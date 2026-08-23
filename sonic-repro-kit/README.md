@@ -78,8 +78,8 @@ chmod +x sonic_repro.sh
 
 `collect-state-action` 使用 released checkpoint 的确定性 `action_mean`，强制 G1
 encoder，并在不启用 cameras/RTX 的情况下记录 50 Hz 单帧转移
-`(state_t, goal_t, actions, state_tp1)`。默认以 6 个环境覆盖 bundled sample；小规模
-验收可先执行：
+`(state_t, goal_t, actions, state_tp1)`。环境数不再写死，而是严格派生为
+`本批动作数 × 每动作变体数`；默认每动作 4 个 startup 变体。
 
 首次在 Ubuntu 同步外层仓库后，先通过补丁把 Windows 侧的 SONIC 修改应用到嵌套
 仓库。应用前要求 SONIC 工作树干净且 HEAD 为固定基线
@@ -92,30 +92,37 @@ git rev-parse HEAD
 PATCH_DIR=~/bly/sonic-repro-kit/patches
 PATCH_1="$PATCH_DIR/0001-feat-record-minimal-SONIC-state-goal-action-data.patch"
 PATCH_2="$PATCH_DIR/0002-fix-preserve-per-environment-joint-defaults.patch"
-git apply --check "$PATCH_1" "$PATCH_2"
+PATCH_3="$PATCH_DIR/0003-feat-collect-repeated-motion-randomized-dataset.patch"
+git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3"
 git switch -c codex/minimal-state-action-recorder
-git am "$PATCH_1" "$PATCH_2"
+git am "$PATCH_1" "$PATCH_2" "$PATCH_3"
 ```
 
 不要在 Ubuntu 手工编辑补丁内容。如果配置文件已存在，应先检查当前提交和工作树，
-不要重复应用补丁。已经应用过 `PATCH_1` 的执行端只需对 `PATCH_2` 分别执行
+不要重复应用补丁。已经应用前两个补丁的执行端只对 `PATCH_3` 分别执行
 `git apply --check` 和 `git am`。
 
 ```bash
-COLLECT_ENVS=2 ./sonic_repro.sh collect-state-action
+./sonic_repro.sh collect-state-action
 RUN_DIR="$(cat ~/bly/sonic-repro/state/latest_run_dir.txt)"
 test -f "$RUN_DIR/markers/collect_state_action.ok"
 test -s "$RUN_DIR/data/sonic_minimal_sa.hdf5"
 cat "$RUN_DIR/manifests/collection_summary.json"
 ```
 
+bundled sample 中只有 2 个动作，因此默认调度自动变成 `2 动作 × 4 变体 = 8 env`，
+验收要求精确得到 8 条 `attempt_id=0` canonical episode。无需也不应再把
+`COLLECT_ENVS` 手工改成动作数；若显式设置，它必须等于派生乘积。
+
 HDF5 中的 `state_t` 和 `state_tp1` 均为 93 维分字段状态，`goal_t` 为 63 维，
 `actions` 为实际送入 Isaac Lab ActionManager 的 29 维 raw action。运行时解析出的
 29 关节顺序、默认关节角、action scale/offset/clip、wrapper clip、仿真步长和控制
 步长保存在 `manifests/state_action_schema.json`，不依赖 YAML 默认值推断。受 startup
-校准随机化影响的默认关节角和 offset 会保留 `per_environment` 映射。可通过
-`COLLECT_MOTION_FILE`、`COLLECT_SMPL_MOTION_FILE` 和 `COLLECT_DATASET_NAME` 覆盖输入
-动作目录与数据集名；只有完整校验通过后才会生成成功 marker。
+校准随机化影响的默认关节角、offset、material、restitution 与 body COM 会保留逐环境
+实际值。HDF5 另外记录 stable global motion ID、variant/batch/attempt ID、四类终止项和
+episode 内恒定的 reset delta。主索引只包含 `attempt_id=0`；自动 reset 产生的额外
+attempt 保留在独立索引。只有精确覆盖目标 `(motion, variant)` 且全部校验通过才生成
+成功 marker。
 
 `render-offline` 是当前机器的推荐渲染入口。它先用已跑通的 Isaac Lab headless
 物理链路记录一段轨迹，再在独立进程中使用 MuJoCo OSMesa 生成 MP4，不会启用
@@ -236,8 +243,76 @@ OFFLINE_RUN_DIR="$TARGET_RUN" OFFLINE_WIDTH=960 OFFLINE_HEIGHT=540 \
   ./sonic_repro.sh render-mujoco
 ```
 
-## 八、完整数据阶段的门禁
+## 八、BONES-SEED 256 动作正式采集
 
-在取得 BONES-SEED 许可并准备至少约 300GB 可用空间前，不执行完整数据下载、转换和评测。当前 99% 满的数据盘不满足条件。
+BONES-SEED 是门控数据集，必须先在网页接受许可。token 只能通过 `hf auth login`
+进入 Hugging Face 凭据存储，不得写入命令、日志或 manifest。下载前脚本要求至少
+70 GiB 可用，下载、转换和采集各阶段结束后要求至少保留 40 GiB：
 
-完整数据阶段包括：下载完整 SMPL、下载 BONES-SEED G1 CSV、转换为 motion library、过滤动作、用官方 checkpoint 跑完整评测，最后才考虑单卡小规模微调。单张 4090 不等价于论文建议的 64+ GPU 全量训练配置。
+```bash
+cd ~/bly/sonic-repro-kit
+./sonic_repro.sh bones-download-preflight
+source ~/bly/sonic-repro/.venv-sonic/bin/activate
+hf auth login
+hf auth whoami
+
+INGEST_RUN=~/bly/runs/bones_seed_ingest_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$INGEST_RUN"/{logs,data/source,data/extracted,data/converted,data/robot_filtered,manifests,markers}
+
+hf download bones-studio/seed \
+  g1.tar.gz \
+  metadata/seed_metadata_v004.parquet \
+  metadata/seed_metadata_v004.csv \
+  --repo-type dataset \
+  --local-dir "$INGEST_RUN/data/source"
+
+BONES_INGEST_RUN="$INGEST_RUN" ./sonic_repro.sh prepare-bones-subset
+test -f "$INGEST_RUN/markers/prepare_bones_subset.ok"
+cat "$INGEST_RUN/manifests/bones_subset_report.json"
+```
+
+CSV metadata 是 146 MB 的无新增依赖回退；4.5 MB parquet 仍同时保留。准备器固定种子
+`20260823`，排除镜像、2 秒以下、20 秒以上及 SONIC 官方关键词命中的动作；每个顶层
+package 先选择 40 个候选，只从 23.5 GB G1 归档中解压这 320 个 CSV，以 120→30 FPS
+转换并再次运行官方过滤器，最终每类严格保留 32 个。任一类别不足即失败，不跨类别
+补齐，不覆盖失败 run，也不自动删除归档、Hugging Face 缓存或中间产物。
+
+第一阶段采集 256 个动作的 4 个 startup 变体：
+
+```bash
+PREP_RUN="$INGEST_RUN"
+COLLECT_MOTION_FILE="$PREP_RUN/data/robot_filtered" \
+COLLECT_MOTION_MANIFEST="$PREP_RUN/manifests/motion_manifest.jsonl" \
+COLLECT_MOTION_COUNT=256 \
+COLLECT_BATCH_MOTIONS=8 \
+COLLECT_VARIANTS_PER_MOTION=4 \
+COLLECT_RANDOMIZATION_PROFILE=startup \
+COLLECT_SEED=20260823 \
+./sonic_repro.sh collect-state-action
+
+STARTUP_RUN="$(cat ~/bly/sonic-repro/state/latest_run_dir.txt)"
+test -f "$STARTUP_RUN/markers/collect_state_action.ok"
+cat "$STARTUP_RUN/manifests/collection_summary.json"
+```
+
+这会使用 32 env 分 32 批完成精确的 1024 条 canonical episode。失败轨迹不会丢弃；
+`status=failed` 与具体 termination term 会进入索引。若总体完成率不低于 80%，且八个
+package 各自不低于 60%，才允许第二阶段的 2 个半幅初始状态扰动变体：
+
+```bash
+COLLECT_MOTION_FILE="$PREP_RUN/data/robot_filtered" \
+COLLECT_MOTION_MANIFEST="$PREP_RUN/manifests/motion_manifest.jsonl" \
+COLLECT_MOTION_COUNT=256 \
+COLLECT_BATCH_MOTIONS=8 \
+COLLECT_VARIANTS_PER_MOTION=2 \
+COLLECT_VARIANT_OFFSET=4 \
+COLLECT_RANDOMIZATION_PROFILE=initial_state_mild \
+COLLECT_BASELINE_SUMMARY="$STARTUP_RUN/manifests/collection_summary.json" \
+COLLECT_SEED=20260823 \
+./sonic_repro.sh collect-state-action
+```
+
+第二阶段验收精确增加 512 条 canonical episode。两阶段均使用
+`COLLECT_SMPL_MOTION_FILE=zeros`，不会下载完整 SOMA/SMPL 数据，也不会启用随机推力、
+camera 或 RTX。BONES-SEED 许可与归属链接会写入 ingest run 的 manifests；数据与衍生
+文件仍受其原许可约束。

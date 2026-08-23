@@ -66,13 +66,30 @@ class VerifyStateActionTest(TestCase):
             outcome = episode.create_group("outcome")
             outcome.create_dataset("terminated", data=np.array([False, False, True]))
             outcome.create_dataset("truncated", data=np.array([False, False, False]))
+            termination_terms = outcome.create_group("termination_terms")
+            for name in ("anchor_pos", "anchor_ori_full", "ee_body_pos"):
+                termination_terms.create_dataset(
+                    name, data=np.array([False, False, name == "anchor_pos"])
+                )
+            termination_terms.create_dataset(
+                "motion_time_out", data=np.array([False, False, False])
+            )
             motion = episode.create_group("motion")
             motion.create_dataset("env_id", data=np.zeros(3, dtype=np.int64))
             motion.create_dataset("motion_id", data=np.zeros(3, dtype=np.int64))
+            motion.create_dataset("global_motion_id", data=np.zeros(3, dtype=np.int64))
+            motion.create_dataset("variant_id", data=np.zeros(3, dtype=np.int64))
+            motion.create_dataset("batch_id", data=np.zeros(3, dtype=np.int64))
+            motion.create_dataset("attempt_id", data=np.zeros(3, dtype=np.int64))
             motion.create_dataset("motion_step", data=np.arange(3, dtype=np.int64))
+            context = episode.create_group("context_t")
+            context.create_dataset("reset_root_pose_delta", data=np.zeros((3, 6)))
+            context.create_dataset("reset_root_velocity_delta", data=np.zeros((3, 6)))
+            context.create_dataset("reset_joint_pos_delta", data=np.zeros((3, 29)))
+            context.create_dataset("reset_joint_vel_delta", data=np.zeros((3, 29)))
 
         schema = {
-            "schema_version": "sonic_minimal_sa_v1",
+            "schema_version": "sonic_minimal_sa_v2",
             "dimensions": {"state": 93, "goal": 63, "action": 29},
             "joint_names": [f"joint_{index}" for index in range(29)],
             "default_joint_pos": {"scope": "global", "values": [0.0] * 29},
@@ -85,13 +102,42 @@ class VerifyStateActionTest(TestCase):
             "action_term_type": "JointPositionAction",
             "control_dt": 0.02,
             "sim_dt": 0.005,
+            "motion_id_to_key": {"0": "motion_0"},
+            "motion_collection": {
+                "eval_motion_repeat": 1,
+                "eval_require_full_batch": True,
+                "variant_offset": 0,
+                "randomization_profile": "startup",
+                "env_to_variant": [0],
+                "env_to_motion_slot": [0],
+            },
+            "runtime_physics": {
+                "body_com": {
+                    "scope": "per_environment",
+                    "values": [[[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]]],
+                },
+                "material_properties": {
+                    "scope": "per_environment",
+                    "values": [[[1.0, 1.0, 0.0]]],
+                },
+            },
         }
         (run_dir / "manifests" / "state_action_schema.json").write_text(
             json.dumps(schema), encoding="utf-8"
         )
 
     def _run_verifier(self, run_dir: Path) -> int:
-        argv = ["verify_state_action.py", "--run-dir", str(run_dir)]
+        argv = [
+            "verify_state_action.py",
+            "--run-dir",
+            str(run_dir),
+            "--expected-motion-count",
+            "1",
+            "--expected-variants-per-motion",
+            "1",
+            "--randomization-profile",
+            "startup",
+        ]
         with mock.patch.object(sys, "argv", argv):
             return verify_state_action.main()
 

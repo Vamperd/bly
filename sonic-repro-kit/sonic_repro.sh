@@ -26,10 +26,26 @@ MAX_RUN_GPU_USED_MIB="${MAX_RUN_GPU_USED_MIB:-3000}"
 EVAL_ENVS="${EVAL_ENVS:-32}"
 RENDER_ENVS="${RENDER_ENVS:-8}"
 SMOKE_ENVS="${SMOKE_ENVS:-16}"
-COLLECT_ENVS="${COLLECT_ENVS:-6}"
+COLLECT_MOTION_COUNT="${COLLECT_MOTION_COUNT:-all}"
+COLLECT_BATCH_MOTIONS="${COLLECT_BATCH_MOTIONS:-8}"
+COLLECT_RANDOMIZATION_PROFILE="${COLLECT_RANDOMIZATION_PROFILE:-startup}"
+if [[ -n "${COLLECT_VARIANTS_PER_MOTION+x}" ]]; then
+  COLLECT_VARIANTS_PER_MOTION="$COLLECT_VARIANTS_PER_MOTION"
+elif [[ "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]]; then
+  COLLECT_VARIANTS_PER_MOTION=2
+else
+  COLLECT_VARIANTS_PER_MOTION=4
+fi
+COLLECT_ENVS="${COLLECT_ENVS:-}"
+COLLECT_SEED="${COLLECT_SEED:-20260823}"
+COLLECT_VARIANT_OFFSET="${COLLECT_VARIANT_OFFSET:-}"
 COLLECT_MOTION_FILE="${COLLECT_MOTION_FILE:-sample_data/robot_filtered}"
-COLLECT_SMPL_MOTION_FILE="${COLLECT_SMPL_MOTION_FILE:-sample_data/smpl_filtered}"
+COLLECT_SMPL_MOTION_FILE="${COLLECT_SMPL_MOTION_FILE:-zeros}"
+COLLECT_MOTION_MANIFEST="${COLLECT_MOTION_MANIFEST:-}"
+COLLECT_BASELINE_SUMMARY="${COLLECT_BASELINE_SUMMARY:-}"
 COLLECT_DATASET_NAME="${COLLECT_DATASET_NAME:-sonic_minimal_sa}"
+BONES_MIN_DOWNLOAD_FREE_GIB="${BONES_MIN_DOWNLOAD_FREE_GIB:-70}"
+BONES_MIN_STAGE_FREE_GIB="${BONES_MIN_STAGE_FREE_GIB:-40}"
 OFFLINE_RENDER_ENVS="${OFFLINE_RENDER_ENVS:-1}"
 OFFLINE_FRAME_SKIP="${OFFLINE_FRAME_SKIP:-2}"
 OFFLINE_WIDTH="${OFFLINE_WIDTH:-960}"
@@ -387,15 +403,22 @@ write_run_manifest() {
     echo "render_envs=$RENDER_ENVS"
     echo "smoke_envs=$SMOKE_ENVS"
     echo "collect_envs=$COLLECT_ENVS"
+    echo "collect_motion_count=$COLLECT_MOTION_COUNT"
+    echo "collect_batch_motions=$COLLECT_BATCH_MOTIONS"
+    echo "collect_variants_per_motion=$COLLECT_VARIANTS_PER_MOTION"
+    echo "collect_variant_offset=$COLLECT_VARIANT_OFFSET"
+    echo "collect_randomization_profile=$COLLECT_RANDOMIZATION_PROFILE"
+    echo "collect_seed=$COLLECT_SEED"
     echo "collect_motion_file=$COLLECT_MOTION_FILE"
     echo "collect_smpl_motion_file=$COLLECT_SMPL_MOTION_FILE"
+    echo "collect_motion_manifest=$COLLECT_MOTION_MANIFEST"
     echo "collect_dataset_name=$COLLECT_DATASET_NAME"
     echo "offline_render_envs=$OFFLINE_RENDER_ENVS"
     echo "offline_frame_skip=$OFFLINE_FRAME_SKIP"
     echo "offline_width=$OFFLINE_WIDTH"
     echo "offline_height=$OFFLINE_HEIGHT"
     echo "offline_gl=$OFFLINE_GL"
-    echo "seed=0"
+    echo "seed=${RUN_SEED:-0}"
     echo "python=$(command -v python)"
   } > "$run_dir/manifests/run_config.txt"
 }
@@ -486,24 +509,125 @@ phase_render() {
 
 phase_collect_state_action() {
   activate_env
+  prepare_dirs
   require_run_gpu_capacity
   [[ -f "$SONIC_DIR/sonic_release/last.pt" ]] \
     || die "Checkpoint missing; run download-sample first."
   [[ -f "$SONIC_DIR/gear_sonic/config/manager_env/recorders/minimal_state_action.yaml" ]] \
     || die "SONIC collector patch is not applied; follow sonic-repro-kit/README.md."
-  [[ "$COLLECT_ENVS" =~ ^[1-9][0-9]*$ ]] \
-    || die "COLLECT_ENVS must be a positive integer; found $COLLECT_ENVS"
+  [[ "$COLLECT_BATCH_MOTIONS" =~ ^[1-9][0-9]*$ ]] \
+    || die "COLLECT_BATCH_MOTIONS must be a positive integer; found $COLLECT_BATCH_MOTIONS"
+  [[ "$COLLECT_VARIANTS_PER_MOTION" =~ ^[1-9][0-9]*$ ]] \
+    || die "COLLECT_VARIANTS_PER_MOTION must be a positive integer; found $COLLECT_VARIANTS_PER_MOTION"
+  [[ "$COLLECT_SEED" =~ ^[0-9]+$ ]] \
+    || die "COLLECT_SEED must be a non-negative integer; found $COLLECT_SEED"
+  [[ "$COLLECT_RANDOMIZATION_PROFILE" == "startup" \
+      || "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]] \
+    || die "Unsupported COLLECT_RANDOMIZATION_PROFILE: $COLLECT_RANDOMIZATION_PROFILE"
   [[ "$COLLECT_DATASET_NAME" =~ ^[A-Za-z0-9._-]+$ ]] \
     || die "COLLECT_DATASET_NAME contains unsupported characters: $COLLECT_DATASET_NAME"
   [[ "$COLLECT_DATASET_NAME" != *.hdf5 ]] \
     || die "COLLECT_DATASET_NAME must not include the .hdf5 extension"
 
-  local run_dir checkpoint_path
+  local motion_path available_motion_count selected_motion_count batch_motion_count
+  if [[ "$COLLECT_MOTION_FILE" = /* ]]; then
+    motion_path="$COLLECT_MOTION_FILE"
+  else
+    motion_path="$SONIC_DIR/$COLLECT_MOTION_FILE"
+  fi
+  [[ -d "$motion_path" ]] || die "Motion directory missing: $motion_path"
+  available_motion_count="$({
+    find "$motion_path" -type f -name '*.pkl' ! -name 'metadata.pkl' -print
+  } | wc -l)"
+  (( available_motion_count > 0 )) || die "No motion PKLs found in $motion_path"
+  if [[ "$COLLECT_MOTION_COUNT" == "all" ]]; then
+    selected_motion_count="$available_motion_count"
+  else
+    [[ "$COLLECT_MOTION_COUNT" =~ ^[1-9][0-9]*$ ]] \
+      || die "COLLECT_MOTION_COUNT must be 'all' or a positive integer"
+    (( COLLECT_MOTION_COUNT <= available_motion_count )) \
+      || die "Requested $COLLECT_MOTION_COUNT motions, only $available_motion_count are available"
+    selected_motion_count="$COLLECT_MOTION_COUNT"
+  fi
+  batch_motion_count="$COLLECT_BATCH_MOTIONS"
+  if (( batch_motion_count > selected_motion_count )); then
+    batch_motion_count="$selected_motion_count"
+  fi
+  (( selected_motion_count % batch_motion_count == 0 )) \
+    || die "Motion count $selected_motion_count must be divisible by batch size $batch_motion_count"
+
+  local derived_envs
+  derived_envs=$(( batch_motion_count * COLLECT_VARIANTS_PER_MOTION ))
+  if [[ -n "$COLLECT_ENVS" && "$COLLECT_ENVS" != "$derived_envs" ]]; then
+    die "COLLECT_ENVS=$COLLECT_ENVS must equal $batch_motion_count x $COLLECT_VARIANTS_PER_MOTION = $derived_envs"
+  fi
+  COLLECT_ENVS="$derived_envs"
+  if [[ -z "$COLLECT_VARIANT_OFFSET" ]]; then
+    if [[ "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]]; then
+      COLLECT_VARIANT_OFFSET=4
+    else
+      COLLECT_VARIANT_OFFSET=0
+    fi
+  fi
+  [[ "$COLLECT_VARIANT_OFFSET" =~ ^[0-9]+$ ]] \
+    || die "COLLECT_VARIANT_OFFSET must be a non-negative integer"
+
+  local free_gib
+  free_gib="$(free_gib_for_path "$RUNS_ROOT")"
+  (( free_gib >= BONES_MIN_STAGE_FREE_GIB )) \
+    || die "Collection requires at least ${BONES_MIN_STAGE_FREE_GIB} GiB free; found ${free_gib} GiB"
+  if [[ "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]]; then
+    [[ "$COLLECT_VARIANTS_PER_MOTION" == "2" ]] \
+      || die "initial_state_mild requires exactly 2 variants per motion"
+    [[ "$COLLECT_VARIANT_OFFSET" == "4" ]] \
+      || die "initial_state_mild requires COLLECT_VARIANT_OFFSET=4"
+    [[ -f "$COLLECT_BASELINE_SUMMARY" ]] \
+      || die "Set COLLECT_BASELINE_SUMMARY to the passed startup collection summary"
+    [[ -f "$COLLECT_MOTION_MANIFEST" ]] \
+      || die "initial_state_mild requires COLLECT_MOTION_MANIFEST"
+    python "$SCRIPT_DIR/check_collection_gate.py" \
+      --summary "$COLLECT_BASELINE_SUMMARY" \
+      --overall-min 0.80 \
+      --package-min 0.60 \
+      --expected-canonical "$(( selected_motion_count * 4 ))" \
+      --expected-package-count 8 \
+      --expected-motion-manifest "$COLLECT_MOTION_MANIFEST"
+  fi
+  if [[ -n "$COLLECT_MOTION_MANIFEST" ]]; then
+    [[ -f "$COLLECT_MOTION_MANIFEST" ]] \
+      || die "Motion manifest missing: $COLLECT_MOTION_MANIFEST"
+  fi
+
+  local run_dir checkpoint_path runtime_manifest_path
   run_dir="$(new_run_dir collect_state_action)"
-  write_run_manifest "$run_dir"
+  if [[ -n "$COLLECT_MOTION_MANIFEST" ]]; then
+    runtime_manifest_path="$run_dir/manifests/motion_manifest.jsonl"
+    cp -- "$COLLECT_MOTION_MANIFEST" "$runtime_manifest_path"
+    COLLECT_MOTION_MANIFEST="$runtime_manifest_path"
+  else
+    runtime_manifest_path=""
+  fi
+  RUN_SEED="$COLLECT_SEED" write_run_manifest "$run_dir"
   checkpoint_path="$(prepare_eval_checkpoint "$run_dir")"
   update_latest_run_pointer "$run_dir"
+  log "Collecting $selected_motion_count motions x $COLLECT_VARIANTS_PER_MOTION variants"
+  log "Batch layout: $batch_motion_count motions x $COLLECT_VARIANTS_PER_MOTION variants = $COLLECT_ENVS envs"
   log "State-action collection run directory: $run_dir"
+
+  local -a reset_randomization_args
+  if [[ "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]]; then
+    reset_randomization_args=(
+      "++manager_env.commands.motion.randomize_eval_resets=True"
+      "++manager_env.commands.motion.pose_range={x:[-0.025,0.025],y:[-0.025,0.025],z:[-0.005,0.005],roll:[-0.05,0.05],pitch:[-0.05,0.05],yaw:[-0.1,0.1]}"
+      "++manager_env.commands.motion.velocity_range={x:[-0.25,0.25],y:[-0.25,0.25],z:[-0.1,0.1],roll:[-0.26,0.26],pitch:[-0.26,0.26],yaw:[-0.39,0.39]}"
+      "++manager_env.commands.motion.joint_position_range=[-0.05,0.05]"
+      "++manager_env.commands.motion.joint_velocity_range=[0.0,0.0]"
+    )
+  else
+    reset_randomization_args=(
+      "++manager_env.commands.motion.randomize_eval_resets=False"
+    )
+  fi
 
   if (
     cd "$SONIC_DIR"
@@ -514,7 +638,9 @@ phase_collect_state_action() {
       "++eval_callbacks=[]" \
       ++run_eval_loop=True \
       ++run_once=True \
+      ++run_all_motions_once=True \
       "++num_envs=$COLLECT_ENVS" \
+      "++seed=$COLLECT_SEED" \
       ++use_encoder=g1 \
       ++manager_env.config.render_results=False \
       ++manager_env.config.enable_cameras=False \
@@ -527,10 +653,18 @@ phase_collect_state_action() {
       ++manager_env.observations.tokenizer.enable_corruption=False \
       "+manager_env/terminations=tracking/eval" \
       ++manager_env.commands.motion.use_paired_motions=False \
-      ++manager_env.commands.motion.sample_unique_motions=True \
+      ++manager_env.commands.motion.sample_unique_motions=False \
       ++manager_env.commands.motion.start_from_first_frame=True \
       ++manager_env.commands.motion.sample_from_n_initial_frames=null \
-      "++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=$COLLECT_ENVS" \
+      "++manager_env.commands.motion.eval_motion_repeat=$COLLECT_VARIANTS_PER_MOTION" \
+      ++manager_env.commands.motion.eval_require_full_batch=True \
+      "++manager_env.commands.motion.eval_variant_offset=$COLLECT_VARIANT_OFFSET" \
+      "++manager_env.commands.motion.collection_randomization_profile=$COLLECT_RANDOMIZATION_PROFILE" \
+      "++manager_env.commands.motion.collection_seed=$COLLECT_SEED" \
+      "++manager_env.commands.motion.collection_motion_manifest=$runtime_manifest_path" \
+      "${reset_randomization_args[@]}" \
+      ++manager_env.commands.motion.motion_lib_cfg.deterministic_motion_order=True \
+      "++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=$selected_motion_count" \
       "++manager_env.commands.motion.motion_lib_cfg.motion_file=$COLLECT_MOTION_FILE" \
       "++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=$COLLECT_SMPL_MOTION_FILE"
   ) 2>&1 | tee "$run_dir/logs/collect_state_action.log"; then
@@ -541,17 +675,76 @@ phase_collect_state_action() {
     return "$rc"
   fi
 
+  local -a verifier_manifest_args
+  verifier_manifest_args=()
+  if [[ -n "$runtime_manifest_path" ]]; then
+    verifier_manifest_args=(--motion-manifest "$runtime_manifest_path")
+  fi
   if python "$SCRIPT_DIR/verify_state_action.py" \
     --run-dir "$run_dir" \
     --dataset-name "$COLLECT_DATASET_NAME" \
-    --expected-min-episodes "$COLLECT_ENVS" \
-    --expected-min-motions "$COLLECT_ENVS" \
+    --expected-motion-count "$selected_motion_count" \
+    --expected-variants-per-motion "$COLLECT_VARIANTS_PER_MOTION" \
+    --variant-offset "$COLLECT_VARIANT_OFFSET" \
+    --randomization-profile "$COLLECT_RANDOMIZATION_PROFILE" \
+    "${verifier_manifest_args[@]}" \
     2>&1 | tee "$run_dir/logs/verify_state_action.log"; then
+    free_gib="$(free_gib_for_path "$run_dir")"
+    if (( free_gib < BONES_MIN_STAGE_FREE_GIB )); then
+      record_exit_code "$run_dir" collect_state_action 1
+      die "Collection finished with ${free_gib} GiB free; required >= ${BONES_MIN_STAGE_FREE_GIB} GiB"
+    fi
     record_exit_code "$run_dir" collect_state_action 0
     mark_stage "$run_dir" collect_state_action.ok
   else
     local rc=$?
     record_exit_code "$run_dir" collect_state_action "$rc"
+    return "$rc"
+  fi
+}
+
+phase_bones_download_preflight() {
+  prepare_dirs
+  local free_gib
+  free_gib="$(free_gib_for_path "$RUNS_ROOT")"
+  (( free_gib >= BONES_MIN_DOWNLOAD_FREE_GIB )) \
+    || die "BONES download requires at least ${BONES_MIN_DOWNLOAD_FREE_GIB} GiB free; found ${free_gib} GiB"
+  log "BONES download disk gate passed: ${free_gib} GiB free."
+  log "Accept the BONES-SEED license in the browser, then use hf auth login; never pass the token on the command line."
+}
+
+phase_prepare_bones_subset() {
+  activate_env
+  prepare_dirs
+  [[ -n "${BONES_INGEST_RUN:-}" ]] \
+    || die "Set BONES_INGEST_RUN to the existing ingest run under $RUNS_ROOT"
+  local ingest_run free_gib
+  ingest_run="$(validated_run_dir "$BONES_INGEST_RUN")"
+  [[ -d "$ingest_run/data/source" ]] \
+    || die "BONES source directory missing: $ingest_run/data/source"
+  ensure_run_layout "$ingest_run"
+  [[ ! -e "$ingest_run/manifests/bones_subset_report.json" \
+      && ! -e "$ingest_run/logs/prepare_bones_subset.log" \
+      && ! -e "$ingest_run/markers/prepare_bones_subset.ok" ]] \
+    || die "Ingest run was already attempted; create a new BONES_INGEST_RUN"
+  free_gib="$(free_gib_for_path "$ingest_run")"
+  (( free_gib >= BONES_MIN_STAGE_FREE_GIB )) \
+    || die "Subset preparation requires at least ${BONES_MIN_STAGE_FREE_GIB} GiB free; found ${free_gib} GiB"
+  RUN_SEED="$COLLECT_SEED" write_run_manifest "$ingest_run"
+  update_latest_run_pointer "$ingest_run"
+  if python "$SCRIPT_DIR/prepare_bones_subset.py" \
+    --ingest-run "$ingest_run" \
+    --sonic-dir "$SONIC_DIR" \
+    --seed "$COLLECT_SEED" \
+    --candidate-per-package 40 \
+    --final-per-package 32 \
+    --min-free-gib "$BONES_MIN_STAGE_FREE_GIB" \
+    2>&1 | tee "$ingest_run/logs/prepare_bones_subset.log"; then
+    record_exit_code "$ingest_run" prepare_bones_subset 0
+    mark_stage "$ingest_run" prepare_bones_subset.ok
+  else
+    local rc=$?
+    record_exit_code "$ingest_run" prepare_bones_subset "$rc"
     return "$rc"
   fi
 }
@@ -753,6 +946,10 @@ Phases:
   render-offline  Dump a fresh trajectory and render it through MuJoCo OSMesa.
   collect-state-action
                   Record and verify minimal (s_t, g_t, a_t, s_t+1) HDF5 data.
+  bones-download-preflight
+                  Require 70 GiB free before the manual gated BONES download.
+  prepare-bones-subset
+                  Select, extract, convert, filter, and audit the 256-motion subset.
   smoke-train     Run five offline training iterations; SMOKE_ENVS defaults to 16.
   verify-minimal  Audit commits, logs, success markers, dependencies, and MP4 output.
   setup-minimal   Install dependencies and sample data; does not run Isaac Sim.
@@ -760,7 +957,10 @@ Phases:
 
 Environment overrides:
   SONIC_WORK_ROOT, SONIC_RUNS_ROOT, EVAL_ENVS, RENDER_ENVS, SMOKE_ENVS,
-  COLLECT_ENVS, COLLECT_MOTION_FILE, COLLECT_SMPL_MOTION_FILE, COLLECT_DATASET_NAME,
+  COLLECT_MOTION_COUNT, COLLECT_BATCH_MOTIONS, COLLECT_VARIANTS_PER_MOTION,
+  COLLECT_ENVS, COLLECT_RANDOMIZATION_PROFILE, COLLECT_SEED, COLLECT_VARIANT_OFFSET,
+  COLLECT_MOTION_FILE, COLLECT_SMPL_MOTION_FILE, COLLECT_MOTION_MANIFEST,
+  COLLECT_BASELINE_SUMMARY, COLLECT_DATASET_NAME, BONES_INGEST_RUN,
   OFFLINE_RENDER_ENVS, OFFLINE_FRAME_SKIP, OFFLINE_WIDTH, OFFLINE_HEIGHT,
   OFFLINE_GL, OFFLINE_CAMERA_DISTANCE, OFFLINE_RUN_DIR,
   MAX_RUN_GPU_USED_MIB, SONIC_COMMIT
@@ -782,6 +982,8 @@ main() {
     render-mujoco) phase_render_mujoco ;;
     render-offline) phase_render_offline ;;
     collect-state-action) phase_collect_state_action ;;
+    bones-download-preflight) phase_bones_download_preflight ;;
+    prepare-bones-subset) phase_prepare_bones_subset ;;
     smoke-train) phase_smoke_train ;;
     verify-minimal) phase_verify_minimal ;;
     status) phase_status ;;

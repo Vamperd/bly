@@ -1,0 +1,571 @@
+From d7301c1f544b804118bfbddf2f87c69972fcec15 Mon Sep 17 00:00:00 2001
+From: Vamper <3230104810@zju.edu.cn>
+Date: Sun, 23 Aug 2026 15:56:07 +0800
+Subject: [PATCH] feat: collect repeated-motion randomized dataset
+
+---
+ .../recorders/minimal_state_action.yaml       |   5 +-
+ gear_sonic/envs/manager_env/mdp/commands.py   |  81 ++++++++++-
+ gear_sonic/envs/manager_env/mdp/recorders.py  | 137 ++++++++++++++++--
+ .../envs/wrapper/manager_env_wrapper.py       |  37 ++++-
+ gear_sonic/eval_agent_trl.py                  |  20 ++-
+ .../tests/test_minimal_state_action_math.py   |   6 +
+ .../utils/motion_lib/motion_lib_base.py       |  50 ++++---
+ 7 files changed, 287 insertions(+), 49 deletions(-)
+
+diff --git a/gear_sonic/config/manager_env/recorders/minimal_state_action.yaml b/gear_sonic/config/manager_env/recorders/minimal_state_action.yaml
+index 27e361e..ce1ee80 100644
+--- a/gear_sonic/config/manager_env/recorders/minimal_state_action.yaml
++++ b/gear_sonic/config/manager_env/recorders/minimal_state_action.yaml
+@@ -26,7 +26,10 @@ minimal_outcome:
+ minimal_motion:
+   _target_: gear_sonic.envs.manager_env.mdp.recorders.MinimalMotionRecorderCfg
+ 
++minimal_context_t:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.MinimalContextTRecorderCfg
++
+ minimal_metadata:
+   _target_: gear_sonic.envs.manager_env.mdp.recorders.MinimalMetadataRecorderCfg
+-  schema_version: sonic_minimal_sa_v1
++  schema_version: sonic_minimal_sa_v2
+   schema_output_path: ???
+diff --git a/gear_sonic/envs/manager_env/mdp/commands.py b/gear_sonic/envs/manager_env/mdp/commands.py
+index 529ff3c..0f8104d 100644
+--- a/gear_sonic/envs/manager_env/mdp/commands.py
++++ b/gear_sonic/envs/manager_env/mdp/commands.py
+@@ -67,6 +67,19 @@ def _init_variable_frames(
+     return per_env_num_frames, frame_choices
+ 
+ 
++def _repeated_eval_motion_ids(
++    num_envs: int, repeat: int, device: torch.device | str
++) -> torch.Tensor:
++    """Map consecutive evaluation environments to repeated local motion IDs."""
++    if repeat <= 0 or num_envs % repeat != 0:
++        raise ValueError(f"repeat={repeat} must be positive and divide num_envs={num_envs}")
++    return torch.div(
++        torch.arange(num_envs, device=device),
++        repeat,
++        rounding_mode="floor",
++    )
++
++
+ @configclass
+ class CommandsCfg:
+     """Command specifications for the MDP."""
+@@ -320,6 +333,15 @@ class TrackingCommand(CommandTerm):
+         self.motion_num_steps = self.motion_lib.get_motion_num_steps(self.motion_ids)
+ 
+         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
++        self.eval_batch_id = 0
++        self.reset_root_pose_delta = torch.zeros(self.num_envs, 6, device=self.device)
++        self.reset_root_velocity_delta = torch.zeros(self.num_envs, 6, device=self.device)
++        self.reset_joint_pos_delta = torch.zeros(
++            self.num_envs, self.robot_num_dof, device=self.device
++        )
++        self.reset_joint_vel_delta = torch.zeros(
++            self.num_envs, self.robot_num_dof, device=self.device
++        )
+ 
+         # Object position randomization offset (per-env, resampled at reset)
+         self._object_position_offset = torch.zeros(self.num_envs, 3, device=self.device)
+@@ -2846,10 +2868,28 @@ class TrackingCommand(CommandTerm):
+             self.per_env_num_frames[env_ids] = self._frame_choices[idx]
+         if len(env_ids) > 0:
+             if self.is_evaluating:
+-                self.motion_ids[env_ids] = (
+-                    torch.arange(self.num_envs).to(self.device)
+-                    % self.motion_lib._num_motions  # noqa: SLF001
+-                )[env_ids]
++                repeat = int(self.cfg.eval_motion_repeat)
++                if repeat <= 0 or self.num_envs % repeat != 0:
++                    raise ValueError(
++                        f"eval_motion_repeat={repeat} must be positive and divide "
++                        f"num_envs={self.num_envs}"
++                    )
++                expected_motions = self.num_envs // repeat
++                if (
++                    self.cfg.eval_require_full_batch
++                    and self.motion_lib._num_motions != expected_motions  # noqa: SLF001
++                ):
++                    raise ValueError(
++                        f"Evaluation batch loaded {self.motion_lib._num_motions} motions but "
++                        f"{expected_motions} are required for {self.num_envs} envs x "
++                        f"repeat={repeat}"
++                    )
++                repeated_motion_ids = _repeated_eval_motion_ids(
++                    self.num_envs, repeat, self.device
++                )
++                if not self.cfg.eval_require_full_batch:
++                    repeated_motion_ids %= self.motion_lib._num_motions  # noqa: SLF001
++                self.motion_ids[env_ids] = repeated_motion_ids[env_ids]
+                 self.motion_start_time_steps[env_ids] = 0
+             elif self.cfg.use_paired_motions:
+                 self.motion_ids[env_ids] = (
+@@ -2991,9 +3031,15 @@ class TrackingCommand(CommandTerm):
+ 
+         self.running_ref_root_height[env_ids] = self.anchor_pos_w[env_ids, 2]
+ 
++        self.reset_root_pose_delta[env_ids] = 0.0
++        self.reset_root_velocity_delta[env_ids] = 0.0
++        self.reset_joint_pos_delta[env_ids] = 0.0
++        self.reset_joint_vel_delta[env_ids] = 0.0
++
+         # Skip reset randomizations during evaluation — they cause visible stumbling
+         # at the start of rendered episodes and are only needed for training robustness.
+-        if not self.is_evaluating:
++        randomize_reset_state = not self.is_evaluating or self.cfg.randomize_eval_resets
++        if randomize_reset_state:
+             range_list = [
+                 self.cfg.pose_range.get(key, (0.0, 0.0))
+                 for key in ["x", "y", "z", "roll", "pitch", "yaw"]
+@@ -3007,6 +3053,7 @@ class TrackingCommand(CommandTerm):
+                 rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5]
+             )
+             root_ori[env_ids] = quat_mul(orientations_delta, root_ori[env_ids])
++            self.reset_root_pose_delta[env_ids] = rand_samples
+             range_list = [
+                 self.cfg.velocity_range.get(key, (0.0, 0.0))
+                 for key in ["x", "y", "z", "roll", "pitch", "yaw"]
+@@ -3017,6 +3064,7 @@ class TrackingCommand(CommandTerm):
+             )
+             root_lin_vel[env_ids] += rand_samples[:, :3]
+             root_ang_vel[env_ids] += rand_samples[:, 3:]
++            self.reset_root_velocity_delta[env_ids] = rand_samples
+ 
+         # Handle DOF mismatch between motion library and robot
+         motion_lib_joint_pos = self.joint_pos.clone()  # Shape: [num_envs, motion_lib_num_dof]
+@@ -3038,18 +3086,25 @@ class TrackingCommand(CommandTerm):
+             joint_pos = motion_lib_joint_pos
+             joint_vel = motion_lib_joint_vel
+ 
+-        if not self.is_evaluating:
+-            joint_pos += sample_uniform(
++        joint_pos_before_randomization = joint_pos.clone()
++        if randomize_reset_state:
++            joint_pos_delta = sample_uniform(
+                 *self.cfg.joint_position_range, joint_pos.shape, joint_pos.device
+             )
+-            joint_vel += sample_uniform(
++            joint_vel_delta = sample_uniform(
+                 *self.cfg.joint_velocity_range, joint_vel.shape, joint_vel.device
+             )
++            joint_pos += joint_pos_delta
++            joint_vel += joint_vel_delta
++            self.reset_joint_vel_delta[env_ids] = joint_vel_delta[env_ids]
+ 
+         soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits[env_ids]
+         joint_pos[env_ids] = torch.clip(
+             joint_pos[env_ids], soft_joint_pos_limits[:, :, 0], soft_joint_pos_limits[:, :, 1]
+         )
++        self.reset_joint_pos_delta[env_ids] = (
++            joint_pos[env_ids] - joint_pos_before_randomization[env_ids]
++        )
+ 
+         ####### Resetting Humaonid States #######
+         self.robot.write_joint_state_to_sim(joint_pos[env_ids], joint_vel[env_ids], env_ids=env_ids)
+@@ -4131,6 +4186,16 @@ class TrackingCommandCfg(CommandTermCfg):
+     # Useful for replay/evaluation to ensure coverage of all unique motions
+     sample_unique_motions: bool = False
+ 
++    # Evaluation-only collector layout. Consecutive environments repeat the
++    # same loaded motion, e.g. repeat=4 gives [0, 0, 0, 0, 1, 1, 1, 1, ...].
++    eval_motion_repeat: int = 1
++    eval_require_full_batch: bool = False
++    eval_variant_offset: int = 0
++    randomize_eval_resets: bool = False
++    collection_randomization_profile: str = "startup"
++    collection_seed: int = 0
++    collection_motion_manifest: str | None = None
++
+     # Sample from the first N frames of the motion (random uniform in [0, N-1])
+     # If set, this takes precedence over start_from_first_frame
+     # Useful for adding slight variation while still starting near the beginning
+diff --git a/gear_sonic/envs/manager_env/mdp/recorders.py b/gear_sonic/envs/manager_env/mdp/recorders.py
+index 28d1c26..f953748 100644
+--- a/gear_sonic/envs/manager_env/mdp/recorders.py
++++ b/gear_sonic/envs/manager_env/mdp/recorders.py
+@@ -34,6 +34,7 @@ class RecordersCfg(recorder_manager.RecorderManagerBaseCfg):
+     minimal_state_tp1 = None
+     minimal_outcome = None
+     minimal_motion = None
++    minimal_context_t = None
+     minimal_metadata = None
+ 
+ 
+@@ -524,6 +525,51 @@ def _json_parameter(value, num_envs: int, width: int, trailing_dim: int | None =
+     return {"scope": "per_environment", "values": tensor.tolist()}
+ 
+ 
++def _json_runtime_tensor(value, num_envs: int):
++    """Serialize a runtime physics tensor and retain every environment row."""
++    if not isinstance(value, torch.Tensor):
++        return None
++    tensor = value.detach().cpu()
++    if tensor.ndim < 1 or tensor.shape[0] != num_envs:
++        raise RuntimeError(
++            f"Expected runtime tensor with first dimension {num_envs}, found {tensor.shape}"
++        )
++    return {"scope": "per_environment", "values": tensor.tolist()}
++
++
++def _minimal_collection_identity(env) -> dict[str, torch.Tensor]:
++    """Resolve stable motion identity and reset-attempt counters for every env."""
++    command = env.command_manager.get_term("motion")
++    local_motion_ids = command.motion_ids.to(torch.int64)
++    global_motion_ids = command.motion_lib.get_motion_ids_in_dataset(local_motion_ids).to(
++        torch.int64
++    )
++    batch_ids = torch.full_like(global_motion_ids, int(command.eval_batch_id))
++    repeat = int(command.cfg.eval_motion_repeat)
++    variant_offset = int(command.cfg.eval_variant_offset)
++    env_ids = torch.arange(env.num_envs, dtype=torch.int64, device=env.device)
++    variant_ids = torch.remainder(env_ids, repeat) + variant_offset
++
++    if not hasattr(env, "_minimal_attempt_ids"):
++        env._minimal_attempt_ids = torch.zeros_like(global_motion_ids)  # noqa: SLF001
++        env._minimal_identity_motion_ids = torch.full_like(global_motion_ids, -1)  # noqa: SLF001
++        env._minimal_identity_batch_ids = torch.full_like(batch_ids, -1)  # noqa: SLF001
++    identity_changed = (env._minimal_identity_motion_ids != global_motion_ids) | (  # noqa: SLF001
++        env._minimal_identity_batch_ids != batch_ids  # noqa: SLF001
++    )
++    env._minimal_attempt_ids[identity_changed] = 0  # noqa: SLF001
++    env._minimal_identity_motion_ids.copy_(global_motion_ids)  # noqa: SLF001
++    env._minimal_identity_batch_ids.copy_(batch_ids)  # noqa: SLF001
++    return {
++        "env_id": env_ids,
++        "motion_id": local_motion_ids,
++        "global_motion_id": global_motion_ids,
++        "variant_id": variant_ids,
++        "batch_id": batch_ids,
++        "attempt_id": env._minimal_attempt_ids.clone(),  # noqa: SLF001
++    }
++
++
+ class MinimalStateTRecorderTerm(recorder_manager.RecorderTerm):
+     """Record state ``t`` after action caching and before physics stepping."""
+ 
+@@ -571,25 +617,44 @@ class MinimalOutcomeRecorderTerm(recorder_manager.RecorderTerm):
+     """Record terminal boundaries for each transition."""
+ 
+     def record_post_step(self):
+-        return "outcome", {
++        termination_manager = self._env.termination_manager
++        termination_terms = {
++            name: termination_manager.get_term(name)
++            for name in ["anchor_pos", "anchor_ori_full", "ee_body_pos", "motion_time_out"]
++            if name in termination_manager.active_terms
++        }
++        outcome = {
+             "terminated": self._env.reset_terminated,
+             "truncated": self._env.reset_time_outs,
++            "termination_terms": termination_terms,
+         }
++        done = self._env.reset_terminated | self._env.reset_time_outs
++        if hasattr(self._env, "_minimal_attempt_ids"):
++            self._env._minimal_attempt_ids[done] += 1  # noqa: SLF001
++        return "outcome", outcome
+ 
+ 
+ class MinimalMotionRecorderTerm(recorder_manager.RecorderTerm):
+     """Record reference indexing needed to audit episode alignment."""
+ 
+-    def __init__(self, cfg, env):
+-        super().__init__(cfg, env)
+-        self._env_ids = torch.arange(env.num_envs, dtype=torch.int64, device=env.device)
++    def record_pre_step(self):
++        command = self._env.command_manager.get_term("motion")
++        identity = _minimal_collection_identity(self._env)
++        identity["motion_step"] = command.motion_start_time_steps + command.time_steps
++        return "motion", identity
++
++
++class MinimalContextTRecorderTerm(recorder_manager.RecorderTerm):
++    """Record episode-constant reset deltas for state-randomized collection."""
+ 
+     def record_pre_step(self):
+         command = self._env.command_manager.get_term("motion")
+-        return "motion", {
+-            "env_id": self._env_ids,
+-            "motion_id": command.motion_ids,
+-            "motion_step": command.motion_start_time_steps + command.time_steps,
++        joint_ids = getattr(_action_term(self._env), "_joint_ids")
++        return "context_t", {
++            "reset_root_pose_delta": command.reset_root_pose_delta,
++            "reset_root_velocity_delta": command.reset_root_velocity_delta,
++            "reset_joint_pos_delta": command.reset_joint_pos_delta[:, joint_ids],
++            "reset_joint_vel_delta": command.reset_joint_vel_delta[:, joint_ids],
+         }
+ 
+ 
+@@ -611,9 +676,7 @@ class MinimalMetadataRecorderTerm(recorder_manager.RecorderTerm):
+             nominal_default_joint_pos = nominal_default_joint_pos[joint_ids].detach().cpu()
+ 
+         clip = getattr(term, "_clip", None)
+-        motion_keys = getattr(command.motion_lib, "curr_motion_keys", None)
+-        if motion_keys is None:
+-            motion_keys = getattr(command.motion_lib, "_motion_data_keys", [])
++        motion_keys = getattr(command.motion_lib, "_motion_data_keys", [])
+         wrapper = getattr(self._env, "wrapper", None)
+         wrapper_clip = None
+         if wrapper is not None:
+@@ -677,6 +740,51 @@ class MinimalMetadataRecorderTerm(recorder_manager.RecorderTerm):
+             "motion_id_to_key": {
+                 str(index): str(key) for index, key in enumerate(motion_keys)
+             },
++            "motion_collection": {
++                "eval_motion_repeat": int(command.cfg.eval_motion_repeat),
++                "eval_require_full_batch": bool(command.cfg.eval_require_full_batch),
++                "variant_offset": int(command.cfg.eval_variant_offset),
++                "randomization_profile": str(command.cfg.collection_randomization_profile),
++                "seed": int(command.cfg.collection_seed),
++                "motion_manifest": command.cfg.collection_motion_manifest,
++                "env_to_variant": [
++                    int(command.cfg.eval_variant_offset)
++                    + env_id % int(command.cfg.eval_motion_repeat)
++                    for env_id in range(self._env.num_envs)
++                ],
++                "env_to_motion_slot": [
++                    env_id // int(command.cfg.eval_motion_repeat)
++                    for env_id in range(self._env.num_envs)
++                ],
++            },
++            "reset_randomization": {
++                "enabled": bool(command.cfg.randomize_eval_resets),
++                "pose_range": {
++                    str(name): list(bounds)
++                    for name, bounds in command.cfg.pose_range.items()
++                },
++                "velocity_range": {
++                    str(name): list(bounds)
++                    for name, bounds in command.cfg.velocity_range.items()
++                },
++                "joint_position_range": list(command.cfg.joint_position_range),
++                "joint_velocity_range": list(command.cfg.joint_velocity_range),
++            },
++            "runtime_physics": {
++                "body_names": list(robot.body_names),
++                "body_com": _json_runtime_tensor(
++                    robot.root_physx_view.get_coms(), self._env.num_envs
++                ),
++                "material_columns": [
++                    "static_friction",
++                    "dynamic_friction",
++                    "restitution",
++                ],
++                "material_properties": _json_runtime_tensor(
++                    robot.root_physx_view.get_material_properties(), self._env.num_envs
++                ),
++            },
++            "termination_terms": list(self._env.termination_manager.active_terms),
+         }
+         output_path = self.cfg.schema_output_path or f"{file_path}.schema.json"
+         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+@@ -714,8 +822,13 @@ class MinimalMotionRecorderCfg(manager_term_cfg.RecorderTermCfg):
+     class_type = MinimalMotionRecorderTerm
+ 
+ 
++@configclass
++class MinimalContextTRecorderCfg(manager_term_cfg.RecorderTermCfg):
++    class_type = MinimalContextTRecorderTerm
++
++
+ @configclass
+ class MinimalMetadataRecorderCfg(manager_term_cfg.RecorderTermCfg):
+     class_type = MinimalMetadataRecorderTerm
+-    schema_version: str = "sonic_minimal_sa_v1"
++    schema_version: str = "sonic_minimal_sa_v2"
+     schema_output_path: str | None = None
+diff --git a/gear_sonic/envs/wrapper/manager_env_wrapper.py b/gear_sonic/envs/wrapper/manager_env_wrapper.py
+index 506c1fc..8b15817 100644
+--- a/gear_sonic/envs/wrapper/manager_env_wrapper.py
++++ b/gear_sonic/envs/wrapper/manager_env_wrapper.py
+@@ -1014,18 +1014,43 @@ class ManagerEnvWrapper:
+ 
+     def begin_seq_motion_samples(self, global_rank=0):
+         logger.info("Loading motions for evaluation")
+-        self.start_idx = global_rank * self.num_envs
+-        self._motion_lib.load_motions_for_evaluation(start_idx=self.start_idx)
+-        self.reset_all(global_rank=global_rank)
++        repeat = int(getattr(self.motion_command.cfg, "eval_motion_repeat", 1))
++        if repeat <= 0 or self.num_envs % repeat != 0:
++            raise ValueError(
++                f"eval_motion_repeat={repeat} must be positive and divide num_envs={self.num_envs}"
++            )
++        self.eval_motion_batch_size = self.num_envs // repeat
++        self.start_idx = global_rank * self.eval_motion_batch_size
++        self.eval_motions_loaded = self._motion_lib.load_motions_for_evaluation(
++            start_idx=self.start_idx,
++            num_motions_to_load=self.eval_motion_batch_size,
++            require_full_batch=bool(self.motion_command.cfg.eval_require_full_batch),
++        )
++        self.motion_command.eval_batch_id = self.start_idx // self.eval_motion_batch_size
++        return self.reset_all(global_rank=global_rank)
+ 
+     def forward_motion_samples(self, global_rank=0, world_size=1):
+         old_start_idx = self.start_idx
+-        self.start_idx += world_size * self.num_envs
++        self.start_idx += world_size * self.eval_motion_batch_size
++        if self.start_idx >= self._motion_lib._num_unique_motions:  # noqa: SLF001
++            return None
+         logger.info(
+             f"Forward motions for evaluation from {old_start_idx} to {self.start_idx} - rank: {global_rank} - world size: {world_size}"  # noqa: E501
+         )
+-        self._motion_lib.load_motions_for_evaluation(start_idx=self.start_idx)
+-        self.reset_all(global_rank=global_rank)
++        self.eval_motions_loaded = self._motion_lib.load_motions_for_evaluation(
++            start_idx=self.start_idx,
++            num_motions_to_load=self.eval_motion_batch_size,
++            require_full_batch=bool(self.motion_command.cfg.eval_require_full_batch),
++        )
++        self.motion_command.eval_batch_id = self.start_idx // self.eval_motion_batch_size
++        return self.reset_all(global_rank=global_rank)
++
++    def has_more_eval_motions(self):
++        """Return whether another sequential evaluation batch remains."""
++        return (
++            self.start_idx + self.eval_motion_batch_size
++            < self._motion_lib._num_unique_motions  # noqa: SLF001
++        )
+ 
+     def focusing_viewer(self):
+         if not self.viewer_focused:
+diff --git a/gear_sonic/eval_agent_trl.py b/gear_sonic/eval_agent_trl.py
+index b4b44d3..2bf4b83 100644
+--- a/gear_sonic/eval_agent_trl.py
++++ b/gear_sonic/eval_agent_trl.py
+@@ -604,6 +604,9 @@ def main(override_config: omegaconf.OmegaConf):
+         max_render_steps = config.get("max_render_steps", 0)
+ 
+         run_once = config.get("run_once", False)
++        run_all_motions_once = config.get("run_all_motions_once", False)
++        if run_all_motions_once and not run_once:
++            raise ValueError("run_all_motions_once=True requires run_once=True")
+         envs_completed = torch.zeros(config.num_envs, dtype=torch.bool, device=device)
+ 
+         with torch.no_grad():
+@@ -648,10 +651,19 @@ def main(override_config: omegaconf.OmegaConf):
+                         else envs_completed | dones
+                     )
+                     if envs_completed.all():
+-                        logger.info("All environments completed one episode. Exiting (run_once=True).")
+-                        if hasattr(env, "end_render_results"):
+-                            env.end_render_results()
+-                        break
++                        if run_all_motions_once and env.has_more_eval_motions():
++                            logger.info("All environments completed the current motion batch.")
++                            obs_dict = env.forward_motion_samples()
++                            if obs_dict is None:
++                                raise RuntimeError("Expected another evaluation motion batch")
++                            envs_completed.zero_()
++                        else:
++                            logger.info(
++                                "All environments completed the requested motion set. Exiting."
++                            )
++                            if hasattr(env, "end_render_results"):
++                                env.end_render_results()
++                            break
+ 
+                 for obs_key in obs_dict.keys():  # noqa: SIM118
+                     obs_dict[obs_key] = obs_dict[obs_key].to(device)
+diff --git a/gear_sonic/tests/test_minimal_state_action_math.py b/gear_sonic/tests/test_minimal_state_action_math.py
+index 9a0081f..2ca5e9a 100644
+--- a/gear_sonic/tests/test_minimal_state_action_math.py
++++ b/gear_sonic/tests/test_minimal_state_action_math.py
+@@ -4,6 +4,7 @@ import math
+ 
+ import torch
+ 
++from gear_sonic.envs.manager_env.mdp.commands import _repeated_eval_motion_ids
+ from gear_sonic.envs.manager_env.mdp.recorders import (
+     _gravity_in_frame,
+     _relative_heading_sin_cos,
+@@ -31,3 +32,8 @@ def test_identity_frame_keeps_world_down_direction():
+     identity = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+     down = torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32)
+     torch.testing.assert_close(_gravity_in_frame(identity, down), down.unsqueeze(0))
++
++
++def test_repeated_eval_motion_ids_are_contiguous():
++    expected = torch.arange(8, dtype=torch.long).repeat_interleave(4)
++    torch.testing.assert_close(_repeated_eval_motion_ids(32, 4, "cpu"), expected)
+diff --git a/gear_sonic/utils/motion_lib/motion_lib_base.py b/gear_sonic/utils/motion_lib/motion_lib_base.py
+index 2d552a7..27283cf 100644
+--- a/gear_sonic/utils/motion_lib/motion_lib_base.py
++++ b/gear_sonic/utils/motion_lib/motion_lib_base.py
+@@ -373,9 +373,14 @@ class MotionLibBase:
+             if self.debug:
+                 self._motion_data_load = {}
+             else:
++                motion_files = glob.glob(
++                    osp.join(motion_file, "**", "*.pkl"), recursive=True
++                )
++                if self.m_cfg.get("deterministic_motion_order", False):
++                    motion_files.sort()
+                 self._motion_data_load = {
+                     osp.splitext(osp.basename(f))[0]: {"path": f}
+-                    for f in glob.glob(osp.join(motion_file, "**", "*.pkl"), recursive=True)
++                    for f in motion_files
+                     if not f.endswith("metadata.pkl")
+                 }
+ 
+@@ -978,30 +983,39 @@ class MotionLibBase:
+                 )  # noqa: RUF100, T201
+         return True
+ 
+-    def load_motions_for_evaluation(self, start_idx=0):
++    def load_motions_for_evaluation(
++        self, start_idx=0, num_motions_to_load=None, require_full_batch=False
++    ):
+         # disable this check to avoid upper body poses randomization in evaluation
+         # if self.all_motions_loaded:
+         #     print("All motions already loaded!!! No need to resample.")
+         #     return
+ 
+-        if (
+-            self._num_unique_motions > self.num_envs
+-        ):  # if number of motions is more than number of envs, then we should only partially load the motions.
+-            self.all_motions_loaded = False
+-            self.load_motions(
+-                random_sample=False,
+-                num_motions_to_load=self.num_envs,
+-                start_idx=start_idx,
+-                is_evaluation=True,
++        if start_idx < 0 or start_idx >= self._num_unique_motions:
++            raise IndexError(
++                f"Evaluation motion start index {start_idx} is outside "
++                f"[0, {self._num_unique_motions})"
+             )
+-        else:
+-            self.all_motions_loaded = True
+-            self.load_motions(
+-                random_sample=False,
+-                num_motions_to_load=self._num_unique_motions,
+-                start_idx=start_idx,
+-                is_evaluation=True,
++        requested = self.num_envs if num_motions_to_load is None else int(num_motions_to_load)
++        if requested <= 0:
++            raise ValueError(f"num_motions_to_load must be positive, found {requested}")
++        remaining = self._num_unique_motions - start_idx
++        if require_full_batch and remaining < requested:
++            raise ValueError(
++                f"Evaluation requires a full batch of {requested} motions, only {remaining} remain"
+             )
++        if require_full_batch or self._num_unique_motions > requested:
++            actual = requested
++        else:
++            actual = self._num_unique_motions
++        self.all_motions_loaded = start_idx == 0 and actual == self._num_unique_motions
++        self.load_motions(
++            random_sample=False,
++            num_motions_to_load=actual,
++            start_idx=start_idx,
++            is_evaluation=True,
++        )
++        return actual
+ 
+     def load_motions(
+         self,
+-- 
+2.42.0.windows.2
+
