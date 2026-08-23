@@ -164,7 +164,8 @@ tail -n 100 "$RUN_DIR/logs/render_mujoco.log"
 `render-mujoco` 默认读取 latest run，也可用 `OFFLINE_RUN_DIR=/绝对路径` 指定已有
 轨迹目录；`render-offline` 将两阶段绑定到同一个新目录。可调参数包括
 `OFFLINE_RENDER_ENVS`、`OFFLINE_FRAME_SKIP`、`OFFLINE_WIDTH`、`OFFLINE_HEIGHT`、
-`OFFLINE_GL` 和 `OFFLINE_CAMERA_DISTANCE`。默认 `OFFLINE_GL=osmesa`。
+`OFFLINE_GL` 和 `OFFLINE_CAMERA_DISTANCE`。默认 `OFFLINE_GL=egl`；只有系统已安装
+`libOSMesa` 时才应显式使用 `OFFLINE_GL=osmesa`。
 
 渲染脚本不会改动 SONIC 中的 G1 XML。默认使用仓库已有、确实包含 free root +
 29 DOF 的 `decoupled_wbc/control/robot_model/model_data/g1/g1_29dof_old.xml`；计划中
@@ -173,6 +174,25 @@ tail -n 100 "$RUN_DIR/logs/render_mujoco.log"
 把机器人 mesh 目录改为绝对路径；若模型包含缺失的 `terrain_mesh`/`terrain_body`，
 只从副本移除。外层 recorder 适配器按 SONIC 官方关节名从 dex 模型中筛出 29 个
 身体关节，再按官方映射转换为 MuJoCo 顺序；四元数保持 wxyz。
+
+运行时 XML 还会按 `OFFLINE_WIDTH`/`OFFLINE_HEIGHT` 写入匹配的离屏 framebuffer，
+因此默认 960×540 以及 1920×1080 等正偶数分辨率不再受 MuJoCo 默认 640×480
+framebuffer 限制。渲染场景默认在世界坐标 `z=0` 注入 50×50 m 的深浅灰棋盘地面；
+该地面、纹理和材质只存在于本次运行的 `manifests/g1_offline_render_*.xml`，不会修改
+SONIC 原始机器人模型。相机仍跟踪 pelvis。
+
+脚本拒绝覆盖已有同名 MP4。若旧 run 已经有视频、但希望复用其中的轨迹验证新地面
+或分辨率，请复制轨迹到新的 run；无需重新运行 Isaac Sim：
+
+```bash
+SOURCE_RUN=~/bly/runs/offline_render_20260823_123453
+TARGET_RUN=~/bly/runs/offline_render_ground_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$TARGET_RUN"/{data,logs,videos,manifests,markers}
+cp "$SOURCE_RUN"/data/*.trajectory.pkl "$TARGET_RUN/data/"
+
+OFFLINE_RUN_DIR="$TARGET_RUN" OFFLINE_WIDTH=960 OFFLINE_HEIGHT=540 \
+  ./sonic_repro.sh render-mujoco
+```
 
 ## 八、完整数据阶段的门禁
 

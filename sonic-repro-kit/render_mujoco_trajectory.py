@@ -151,8 +151,42 @@ def _remove_matching_children(root: ET.Element, tag: str, attribute: str, value:
     return removed
 
 
-def prepare_runtime_xml(source_path: Path, destination_path: Path) -> dict[str, Any]:
-    """Create a run-local model copy with absolute robot meshes and no missing terrain mesh."""
+RUNTIME_GROUND_TEXTURE_NAME = "sonic_floor_checker"
+RUNTIME_GROUND_MATERIAL_NAME = "sonic_floor_material"
+RUNTIME_GROUND_GEOM_NAME = "sonic_floor"
+RUNTIME_GROUND_SIZE = "50 50 0.1"
+RUNTIME_GROUND_RGB1 = "0.18 0.18 0.18"
+RUNTIME_GROUND_RGB2 = "0.72 0.72 0.72"
+
+
+def _find_or_create_top_level(root: ET.Element, tag: str, before: str | None = None) -> ET.Element:
+    element = root.find(tag)
+    if element is not None:
+        return element
+
+    element = ET.Element(tag)
+    if before is not None:
+        for index, child in enumerate(root):
+            if child.tag == before:
+                root.insert(index, element)
+                break
+        else:
+            root.append(element)
+    else:
+        root.append(element)
+    return element
+
+
+def prepare_runtime_xml(
+    source_path: Path,
+    destination_path: Path,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    """Create a run-local model with absolute meshes, a floor, and a sized framebuffer."""
+    if width <= 0 or height <= 0:
+        raise ValueError("Offscreen framebuffer width and height must be positive")
+
     source_path = source_path.resolve(strict=True)
     tree = ET.parse(source_path)
     root = tree.getroot()
@@ -167,6 +201,65 @@ def prepare_runtime_xml(source_path: Path, destination_path: Path) -> dict[str, 
     removed_meshes = _remove_matching_children(root, "mesh", "name", "terrain_mesh")
     removed_geoms = _remove_matching_children(root, "geom", "mesh", "terrain_mesh")
     removed_bodies = _remove_matching_children(root, "body", "name", "terrain_body")
+
+    visual = _find_or_create_top_level(root, "visual", before="asset")
+    visual_global = visual.find("global")
+    if visual_global is None:
+        visual_global = ET.SubElement(visual, "global")
+    visual_global.set("offwidth", str(width))
+    visual_global.set("offheight", str(height))
+
+    replaced_texture = _remove_matching_children(
+        root, "texture", "name", RUNTIME_GROUND_TEXTURE_NAME
+    )
+    replaced_material = _remove_matching_children(
+        root, "material", "name", RUNTIME_GROUND_MATERIAL_NAME
+    )
+    replaced_ground = _remove_matching_children(root, "geom", "name", RUNTIME_GROUND_GEOM_NAME)
+
+    asset = _find_or_create_top_level(root, "asset", before="worldbody")
+    ET.SubElement(
+        asset,
+        "texture",
+        {
+            "name": RUNTIME_GROUND_TEXTURE_NAME,
+            "type": "2d",
+            "builtin": "checker",
+            "width": "512",
+            "height": "512",
+            "rgb1": RUNTIME_GROUND_RGB1,
+            "rgb2": RUNTIME_GROUND_RGB2,
+        },
+    )
+    ET.SubElement(
+        asset,
+        "material",
+        {
+            "name": RUNTIME_GROUND_MATERIAL_NAME,
+            "texture": RUNTIME_GROUND_TEXTURE_NAME,
+            "texrepeat": "20 20",
+            "texuniform": "true",
+            "reflectance": "0.1",
+        },
+    )
+
+    worldbody = _find_or_create_top_level(root, "worldbody")
+    worldbody.insert(
+        0,
+        ET.Element(
+            "geom",
+            {
+                "name": RUNTIME_GROUND_GEOM_NAME,
+                "type": "plane",
+                "size": RUNTIME_GROUND_SIZE,
+                "pos": "0 0 0",
+                "material": RUNTIME_GROUND_MATERIAL_NAME,
+                "contype": "0",
+                "conaffinity": "0",
+            },
+        ),
+    )
+
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     ET.indent(tree, space="  ")
     tree.write(destination_path, encoding="utf-8", xml_declaration=True)
@@ -175,6 +268,22 @@ def prepare_runtime_xml(source_path: Path, destination_path: Path) -> dict[str, 
         "removed_terrain_meshes": removed_meshes,
         "removed_terrain_geoms": removed_geoms,
         "removed_terrain_bodies": removed_bodies,
+        "framebuffer": {"width": width, "height": height},
+        "ground": {
+            "style": "checker",
+            "geom_name": RUNTIME_GROUND_GEOM_NAME,
+            "texture_name": RUNTIME_GROUND_TEXTURE_NAME,
+            "material_name": RUNTIME_GROUND_MATERIAL_NAME,
+            "position": [0.0, 0.0, 0.0],
+            "size": [50.0, 50.0, 0.1],
+            "rgb1": [0.18, 0.18, 0.18],
+            "rgb2": [0.72, 0.72, 0.72],
+        },
+        "replaced_runtime_elements": {
+            "textures": replaced_texture,
+            "materials": replaced_material,
+            "ground_geoms": replaced_ground,
+        },
     }
 
 
@@ -193,7 +302,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest-dir", type=Path, required=True)
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=540)
-    parser.add_argument("--gl", choices=("osmesa", "egl", "glfw"), default="osmesa")
+    parser.add_argument("--gl", choices=("osmesa", "egl", "glfw"), default="egl")
     parser.add_argument("--camera-distance", type=float, default=2.0)
     parser.add_argument("--camera-azimuth", type=float, default=120.0)
     parser.add_argument("--camera-elevation", type=float, default=-30.0)
@@ -228,7 +337,12 @@ def main() -> int:
 
     stem = trajectory_path.name.removesuffix(".trajectory.pkl")
     runtime_xml = manifest_dir / f"g1_offline_render_{stem}.xml"
-    xml_details = prepare_runtime_xml(model_path, runtime_xml)
+    xml_details = prepare_runtime_xml(
+        model_path,
+        runtime_xml,
+        width=args.width,
+        height=args.height,
+    )
 
     model = mujoco.MjModel.from_xml_path(str(runtime_xml))
     if model.nq != 36:
@@ -303,6 +417,8 @@ def main() -> int:
         "encoded_duration_seconds": float(encoded_duration),
         "width": args.width,
         "height": args.height,
+        "framebuffer": xml_details["framebuffer"],
+        "ground": xml_details["ground"],
         "camera": {
             "type": "tracking",
             "body": "pelvis",
