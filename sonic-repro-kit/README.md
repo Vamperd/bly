@@ -72,8 +72,46 @@ chmod +x sonic_repro.sh
 ```bash
 ./sonic_repro.sh eval
 ./sonic_repro.sh smoke-train
+./sonic_repro.sh collect-state-action
 ./sonic_repro.sh render-offline
 ```
+
+`collect-state-action` 使用 released checkpoint 的确定性 `action_mean`，强制 G1
+encoder，并在不启用 cameras/RTX 的情况下记录 50 Hz 单帧转移
+`(state_t, goal_t, actions, state_tp1)`。默认以 6 个环境覆盖 bundled sample；小规模
+验收可先执行：
+
+首次在 Ubuntu 同步外层仓库后，先通过补丁把 Windows 侧的 SONIC 修改应用到嵌套
+仓库。应用前要求 SONIC 工作树干净且 HEAD 为固定基线
+`c374bae5b9039cd0ee71377e654d11ce1bc69e1d`：
+
+```bash
+cd ~/bly/sonic-repro/GR00T-WholeBodyControl
+git status --short --branch
+git rev-parse HEAD
+PATCH=~/bly/sonic-repro-kit/patches/0001-feat-record-minimal-SONIC-state-goal-action-data.patch
+git apply --check "$PATCH"
+git switch -c codex/minimal-state-action-recorder
+git am "$PATCH"
+```
+
+不要在 Ubuntu 手工编辑补丁内容。如果配置文件已存在，应先检查当前提交和工作树，
+不要重复应用补丁。
+
+```bash
+COLLECT_ENVS=2 ./sonic_repro.sh collect-state-action
+RUN_DIR="$(cat ~/bly/sonic-repro/state/latest_run_dir.txt)"
+test -f "$RUN_DIR/markers/collect_state_action.ok"
+test -s "$RUN_DIR/data/sonic_minimal_sa.hdf5"
+cat "$RUN_DIR/manifests/collection_summary.json"
+```
+
+HDF5 中的 `state_t` 和 `state_tp1` 均为 93 维分字段状态，`goal_t` 为 63 维，
+`actions` 为实际送入 Isaac Lab ActionManager 的 29 维 raw action。运行时解析出的
+29 关节顺序、默认关节角、action scale/offset/clip、wrapper clip、仿真步长和控制
+步长保存在 `manifests/state_action_schema.json`，不依赖 YAML 默认值推断。可通过
+`COLLECT_MOTION_FILE`、`COLLECT_SMPL_MOTION_FILE` 和 `COLLECT_DATASET_NAME` 覆盖输入
+动作目录与数据集名；只有完整校验通过后才会生成成功 marker。
 
 `render-offline` 是当前机器的推荐渲染入口。它先用已跑通的 Isaac Lab headless
 物理链路记录一段轨迹，再在独立进程中使用 MuJoCo OSMesa 生成 MP4，不会启用

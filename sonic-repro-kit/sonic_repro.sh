@@ -26,6 +26,10 @@ MAX_RUN_GPU_USED_MIB="${MAX_RUN_GPU_USED_MIB:-3000}"
 EVAL_ENVS="${EVAL_ENVS:-32}"
 RENDER_ENVS="${RENDER_ENVS:-8}"
 SMOKE_ENVS="${SMOKE_ENVS:-16}"
+COLLECT_ENVS="${COLLECT_ENVS:-6}"
+COLLECT_MOTION_FILE="${COLLECT_MOTION_FILE:-sample_data/robot_filtered}"
+COLLECT_SMPL_MOTION_FILE="${COLLECT_SMPL_MOTION_FILE:-sample_data/smpl_filtered}"
+COLLECT_DATASET_NAME="${COLLECT_DATASET_NAME:-sonic_minimal_sa}"
 OFFLINE_RENDER_ENVS="${OFFLINE_RENDER_ENVS:-1}"
 OFFLINE_FRAME_SKIP="${OFFLINE_FRAME_SKIP:-2}"
 OFFLINE_WIDTH="${OFFLINE_WIDTH:-960}"
@@ -382,6 +386,10 @@ write_run_manifest() {
     echo "eval_envs=$EVAL_ENVS"
     echo "render_envs=$RENDER_ENVS"
     echo "smoke_envs=$SMOKE_ENVS"
+    echo "collect_envs=$COLLECT_ENVS"
+    echo "collect_motion_file=$COLLECT_MOTION_FILE"
+    echo "collect_smpl_motion_file=$COLLECT_SMPL_MOTION_FILE"
+    echo "collect_dataset_name=$COLLECT_DATASET_NAME"
     echo "offline_render_envs=$OFFLINE_RENDER_ENVS"
     echo "offline_frame_skip=$OFFLINE_FRAME_SKIP"
     echo "offline_width=$OFFLINE_WIDTH"
@@ -474,6 +482,78 @@ phase_render() {
   fi
   record_exit_code "$run_dir" render_isaac 0
   mark_stage "$run_dir" render.ok
+}
+
+phase_collect_state_action() {
+  activate_env
+  require_run_gpu_capacity
+  [[ -f "$SONIC_DIR/sonic_release/last.pt" ]] \
+    || die "Checkpoint missing; run download-sample first."
+  [[ -f "$SONIC_DIR/gear_sonic/config/manager_env/recorders/minimal_state_action.yaml" ]] \
+    || die "SONIC collector patch is not applied; follow sonic-repro-kit/README.md."
+  [[ "$COLLECT_ENVS" =~ ^[1-9][0-9]*$ ]] \
+    || die "COLLECT_ENVS must be a positive integer; found $COLLECT_ENVS"
+  [[ "$COLLECT_DATASET_NAME" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || die "COLLECT_DATASET_NAME contains unsupported characters: $COLLECT_DATASET_NAME"
+  [[ "$COLLECT_DATASET_NAME" != *.hdf5 ]] \
+    || die "COLLECT_DATASET_NAME must not include the .hdf5 extension"
+
+  local run_dir checkpoint_path
+  run_dir="$(new_run_dir collect_state_action)"
+  write_run_manifest "$run_dir"
+  checkpoint_path="$(prepare_eval_checkpoint "$run_dir")"
+  update_latest_run_pointer "$run_dir"
+  log "State-action collection run directory: $run_dir"
+
+  if (
+    cd "$SONIC_DIR"
+    python gear_sonic/eval_agent_trl.py \
+      "+checkpoint=$checkpoint_path" \
+      +headless=True \
+      "hydra.run.dir=$run_dir/manifests/hydra_collect_state_action" \
+      "++eval_callbacks=[]" \
+      ++run_eval_loop=True \
+      ++run_once=True \
+      "++num_envs=$COLLECT_ENVS" \
+      ++use_encoder=g1 \
+      ++manager_env.config.render_results=False \
+      ++manager_env.config.enable_cameras=False \
+      "~manager_env/recorders=empty" \
+      "+manager_env/recorders=minimal_state_action" \
+      "++manager_env.recorders.dataset_export_dir_path=$run_dir/data" \
+      "++manager_env.recorders.dataset_filename=$COLLECT_DATASET_NAME" \
+      "++manager_env.recorders.minimal_metadata.schema_output_path=$run_dir/manifests/state_action_schema.json" \
+      ++manager_env.observations.policy.enable_corruption=False \
+      ++manager_env.observations.tokenizer.enable_corruption=False \
+      "+manager_env/terminations=tracking/eval" \
+      ++manager_env.commands.motion.use_paired_motions=False \
+      ++manager_env.commands.motion.sample_unique_motions=True \
+      ++manager_env.commands.motion.start_from_first_frame=True \
+      ++manager_env.commands.motion.sample_from_n_initial_frames=null \
+      "++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=$COLLECT_ENVS" \
+      "++manager_env.commands.motion.motion_lib_cfg.motion_file=$COLLECT_MOTION_FILE" \
+      "++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=$COLLECT_SMPL_MOTION_FILE"
+  ) 2>&1 | tee "$run_dir/logs/collect_state_action.log"; then
+    :
+  else
+    local rc=$?
+    record_exit_code "$run_dir" collect_state_action "$rc"
+    return "$rc"
+  fi
+
+  if python "$SCRIPT_DIR/verify_state_action.py" \
+    --run-dir "$run_dir" \
+    --dataset-name "$COLLECT_DATASET_NAME" \
+    --expected-min-episodes "$COLLECT_ENVS" \
+    --expected-min-motions "$COLLECT_ENVS" \
+    2>&1 | tee "$run_dir/logs/verify_state_action.log"; then
+    record_exit_code "$run_dir" collect_state_action 0
+    mark_stage "$run_dir" collect_state_action.ok
+  else
+    local rc=$?
+    record_exit_code "$run_dir" collect_state_action "$rc"
+    return "$rc"
+  fi
 }
 
 phase_dump_trajectory() {
@@ -671,6 +751,8 @@ Phases:
   dump-trajectory Record one headless episode without enabling cameras or RTX.
   render-mujoco   Render the latest trajectory through MuJoCo OSMesa.
   render-offline  Dump a fresh trajectory and render it through MuJoCo OSMesa.
+  collect-state-action
+                  Record and verify minimal (s_t, g_t, a_t, s_t+1) HDF5 data.
   smoke-train     Run five offline training iterations; SMOKE_ENVS defaults to 16.
   verify-minimal  Audit commits, logs, success markers, dependencies, and MP4 output.
   setup-minimal   Install dependencies and sample data; does not run Isaac Sim.
@@ -678,6 +760,7 @@ Phases:
 
 Environment overrides:
   SONIC_WORK_ROOT, SONIC_RUNS_ROOT, EVAL_ENVS, RENDER_ENVS, SMOKE_ENVS,
+  COLLECT_ENVS, COLLECT_MOTION_FILE, COLLECT_SMPL_MOTION_FILE, COLLECT_DATASET_NAME,
   OFFLINE_RENDER_ENVS, OFFLINE_FRAME_SKIP, OFFLINE_WIDTH, OFFLINE_HEIGHT,
   OFFLINE_GL, OFFLINE_CAMERA_DISTANCE, OFFLINE_RUN_DIR,
   MAX_RUN_GPU_USED_MIB, SONIC_COMMIT
@@ -698,6 +781,7 @@ main() {
     dump-trajectory) phase_dump_trajectory ;;
     render-mujoco) phase_render_mujoco ;;
     render-offline) phase_render_offline ;;
+    collect-state-action) phase_collect_state_action ;;
     smoke-train) phase_smoke_train ;;
     verify-minimal) phase_verify_minimal ;;
     status) phase_status ;;
