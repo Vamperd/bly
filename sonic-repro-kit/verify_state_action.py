@@ -48,6 +48,28 @@ def parameter_for_env(
     return resolved
 
 
+def validate_parameter_entry(
+    entry: object, tail_shape: tuple[int, ...]
+) -> tuple[bool, str]:
+    """Validate runtime parameter metadata without assuming a global scope."""
+    if not isinstance(entry, dict):
+        return False, f"expected object, found {type(entry).__name__}"
+    scope = entry.get("scope")
+    try:
+        values = np.asarray(entry.get("values"), dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        return False, str(error)
+    if scope == "global":
+        shape_valid = values.shape == tail_shape
+    elif scope == "per_environment":
+        shape_valid = values.ndim == len(tail_shape) + 1 and values.shape[1:] == tail_shape
+        shape_valid = shape_valid and values.shape[0] > 0
+    else:
+        return False, f"unsupported scope={scope!r}"
+    finite = bool(np.isfinite(values).all())
+    return bool(shape_valid and finite), f"scope={scope}, shape={values.shape}, finite={finite}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -104,23 +126,19 @@ def main() -> int:
         str(schema.get("wrapper_action_transform_enabled")),
     )
     joint_names = schema.get("joint_names", [])
-    default_joint_pos = np.asarray(schema.get("default_joint_pos", []), dtype=np.float64)
-    default_joint_vel = np.asarray(schema.get("default_joint_vel", []), dtype=np.float64)
     check(
         "joint_names",
         len(joint_names) == 29 and len(set(joint_names)) == 29,
         f"count={len(joint_names)}",
     )
-    check(
-        "default_joint_pos",
-        default_joint_pos.shape == (29,) and np.isfinite(default_joint_pos).all(),
-        str(default_joint_pos.shape),
+    default_pos_valid, default_pos_evidence = validate_parameter_entry(
+        schema.get("default_joint_pos"), (29,)
     )
-    check(
-        "default_joint_vel",
-        default_joint_vel.shape == (29,) and np.isfinite(default_joint_vel).all(),
-        str(default_joint_vel.shape),
+    check("default_joint_pos", default_pos_valid, default_pos_evidence)
+    default_vel_valid, default_vel_evidence = validate_parameter_entry(
+        schema.get("default_joint_vel"), (29,)
     )
+    check("default_joint_vel", default_vel_valid, default_vel_evidence)
     check(
         "control_dt",
         np.isclose(float(schema.get("control_dt", -1.0)), 0.02),
@@ -274,6 +292,9 @@ def main() -> int:
                 motion_id = int(motion_ids[0])
                 motion_ids_seen.add(motion_id)
 
+                default_joint_pos = parameter_for_env(
+                    schema["default_joint_pos"], env_id, (29,)
+                )
                 scale = parameter_for_env(schema["action_scale"], env_id, (29,))
                 offset = parameter_for_env(schema["action_offset"], env_id, (29,))
                 processed = actions * scale + offset

@@ -89,14 +89,17 @@ encoder，并在不启用 cameras/RTX 的情况下记录 50 Hz 单帧转移
 cd ~/bly/sonic-repro/GR00T-WholeBodyControl
 git status --short --branch
 git rev-parse HEAD
-PATCH=~/bly/sonic-repro-kit/patches/0001-feat-record-minimal-SONIC-state-goal-action-data.patch
-git apply --check "$PATCH"
+PATCH_DIR=~/bly/sonic-repro-kit/patches
+PATCH_1="$PATCH_DIR/0001-feat-record-minimal-SONIC-state-goal-action-data.patch"
+PATCH_2="$PATCH_DIR/0002-fix-preserve-per-environment-joint-defaults.patch"
+git apply --check "$PATCH_1" "$PATCH_2"
 git switch -c codex/minimal-state-action-recorder
-git am "$PATCH"
+git am "$PATCH_1" "$PATCH_2"
 ```
 
 不要在 Ubuntu 手工编辑补丁内容。如果配置文件已存在，应先检查当前提交和工作树，
-不要重复应用补丁。
+不要重复应用补丁。已经应用过 `PATCH_1` 的执行端只需对 `PATCH_2` 分别执行
+`git apply --check` 和 `git am`。
 
 ```bash
 COLLECT_ENVS=2 ./sonic_repro.sh collect-state-action
@@ -109,7 +112,8 @@ cat "$RUN_DIR/manifests/collection_summary.json"
 HDF5 中的 `state_t` 和 `state_tp1` 均为 93 维分字段状态，`goal_t` 为 63 维，
 `actions` 为实际送入 Isaac Lab ActionManager 的 29 维 raw action。运行时解析出的
 29 关节顺序、默认关节角、action scale/offset/clip、wrapper clip、仿真步长和控制
-步长保存在 `manifests/state_action_schema.json`，不依赖 YAML 默认值推断。可通过
+步长保存在 `manifests/state_action_schema.json`，不依赖 YAML 默认值推断。受 startup
+校准随机化影响的默认关节角和 offset 会保留 `per_environment` 映射。可通过
 `COLLECT_MOTION_FILE`、`COLLECT_SMPL_MOTION_FILE` 和 `COLLECT_DATASET_NAME` 覆盖输入
 动作目录与数据集名；只有完整校验通过后才会生成成功 marker。
 

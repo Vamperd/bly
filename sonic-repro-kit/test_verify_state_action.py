@@ -13,6 +13,14 @@ import verify_state_action
 
 
 class VerifyStateActionTest(TestCase):
+    def test_resolves_per_environment_parameter(self):
+        entry = {
+            "scope": "per_environment",
+            "values": [[0.0] * 29, [1.0] * 29],
+        }
+        resolved = verify_state_action.parameter_for_env(entry, 1, (29,))
+        np.testing.assert_array_equal(resolved, np.ones(29))
+
     def _write_fixture(self, run_dir: Path, corrupt_previous_action: bool = False) -> None:
         (run_dir / "data").mkdir(parents=True)
         (run_dir / "manifests").mkdir()
@@ -67,8 +75,8 @@ class VerifyStateActionTest(TestCase):
             "schema_version": "sonic_minimal_sa_v1",
             "dimensions": {"state": 93, "goal": 63, "action": 29},
             "joint_names": [f"joint_{index}" for index in range(29)],
-            "default_joint_pos": [0.0] * 29,
-            "default_joint_vel": [0.0] * 29,
+            "default_joint_pos": {"scope": "global", "values": [0.0] * 29},
+            "default_joint_vel": {"scope": "global", "values": [0.0] * 29},
             "action_scale": {"scope": "global", "values": [1.0] * 29},
             "action_offset": {"scope": "global", "values": [0.0] * 29},
             "action_clip": None,
