@@ -42,7 +42,12 @@ IDENTITY_FIELDS = (
     "attempt_id",
     "motion_step",
 )
-TERMINATION_TERMS = ("anchor_pos", "anchor_ori_full", "ee_body_pos", "motion_time_out")
+CORE_TERMINATION_TERMS = (
+    "anchor_pos",
+    "anchor_ori_full",
+    "ee_body_pos",
+    "motion_time_out",
+)
 PACKAGES = (
     "Locomotion",
     "Communication",
@@ -193,6 +198,63 @@ def _completion_status(terminated: np.ndarray, truncated: np.ndarray) -> str:
     if bool(terminated[-1]):
         return "failed"
     return "interrupted"
+
+
+def resolve_termination_schema(
+    schema: dict,
+) -> tuple[tuple[str, ...], bool, tuple[str, ...]]:
+    """Resolve output terms and the narrowly-scoped legacy timeout fallback."""
+    active_terms = schema.get("termination_terms")
+    if (
+        not isinstance(active_terms, list)
+        or not all(isinstance(name, str) and name for name in active_terms)
+        or len(set(active_terms)) != len(active_terms)
+    ):
+        raise ValueError("schema termination_terms must be a unique list of names")
+
+    configured_mapping = schema.get("termination_term_mapping")
+    if configured_mapping is not None:
+        if (
+            not isinstance(configured_mapping, dict)
+            or not configured_mapping
+            or not all(
+                isinstance(output_name, str)
+                and output_name
+                and isinstance(runtime_name, str)
+                and runtime_name
+                for output_name, runtime_name in configured_mapping.items()
+            )
+        ):
+            raise ValueError("termination_term_mapping must map non-empty strings")
+        if len(set(configured_mapping.values())) != len(configured_mapping):
+            raise ValueError("termination_term_mapping runtime names must be unique")
+        if set(configured_mapping.values()) != set(active_terms):
+            raise ValueError(
+                "termination_term_mapping runtime names do not match termination_terms"
+            )
+        missing = sorted(set(CORE_TERMINATION_TERMS) - set(configured_mapping))
+        if missing:
+            raise ValueError(f"termination_term_mapping is missing core terms: {missing}")
+        return tuple(configured_mapping), False, ()
+
+    runtime_terms = set(active_terms)
+    timeout_runtime_name = (
+        "motion_time_out" if "motion_time_out" in runtime_terms else "time_out"
+    )
+    required_runtime_terms = {
+        "anchor_pos",
+        "anchor_ori_full",
+        "ee_body_pos",
+        timeout_runtime_name,
+    }
+    missing = sorted(required_runtime_terms - runtime_terms)
+    if missing:
+        raise ValueError(f"legacy schema is missing runtime termination terms: {missing}")
+    legacy_timeout_recovery = (
+        timeout_runtime_name == "time_out" and "motion_time_out" not in runtime_terms
+    )
+    unrecorded_runtime_terms = tuple(sorted(runtime_terms - required_runtime_terms))
+    return CORE_TERMINATION_TERMS, legacy_timeout_recovery, unrecorded_runtime_terms
 
 
 def _parse_args() -> argparse.Namespace:
@@ -382,11 +444,33 @@ def main() -> int:
         material_evidence,
     )
 
+    try:
+        (
+            termination_output_terms,
+            legacy_timeout_recovery,
+            legacy_unrecorded_runtime_terms,
+        ) = resolve_termination_schema(schema)
+    except ValueError as error:
+        termination_output_terms = CORE_TERMINATION_TERMS
+        legacy_timeout_recovery = False
+        legacy_unrecorded_runtime_terms = ()
+        check("termination_term_mapping", False, str(error))
+    else:
+        if legacy_timeout_recovery:
+            mapping_evidence = (
+                "legacy schema: recover motion_time_out from outcome/truncated; "
+                f"unrecorded runtime terms={list(legacy_unrecorded_runtime_terms)}"
+            )
+        else:
+            mapping_evidence = f"output terms={list(termination_output_terms)}"
+        check("termination_term_mapping", True, mapping_evidence)
+
     episodes: list[dict[str, object]] = []
     canonical_by_pair: dict[tuple[int, int], dict] = {}
     reference_by_motion: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     reset_context_by_pair: dict[tuple[int, int], bytes] = {}
     motion_ids_seen: set[int] = set()
+    legacy_timeout_recovered_episodes = 0
     try:
         with h5py.File(dataset_path, "r") as stream:
             if "data" not in stream:
@@ -464,9 +548,16 @@ def main() -> int:
                 done = terminated | truncated
                 if done[:-1].any():
                     raise ValueError(f"{episode_name}: terminal marker before final frame")
-                for term_name in TERMINATION_TERMS:
+                for term_name in termination_output_terms:
                     path = f"outcome/termination_terms/{term_name}"
-                    if path not in episode or np.asarray(episode[path]).shape != (steps,):
+                    if path in episode:
+                        term_values = np.asarray(episode[path])
+                    elif term_name == "motion_time_out" and legacy_timeout_recovery:
+                        term_values = truncated
+                        legacy_timeout_recovered_episodes += 1
+                    else:
+                        raise ValueError(f"{episode_name}: missing or invalid {path}")
+                    if term_values.shape != (steps,):
                         raise ValueError(f"{episode_name}: missing or invalid {path}")
 
                 previous_action = np.asarray(episode["state_t/previous_action"])
@@ -592,10 +683,24 @@ def main() -> int:
                             motion_steps,
                             absolute_reference,
                         )
+            if legacy_timeout_recovery and legacy_timeout_recovered_episodes not in (
+                0,
+                len(episodes),
+            ):
+                raise ValueError(
+                    "legacy timeout recovery is inconsistently required across episodes"
+                )
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
         check("hdf5_validation", False, str(error))
     else:
         check("hdf5_validation", True, f"validated {len(episodes)} exported episodes")
+        if legacy_timeout_recovery:
+            check(
+                "legacy_timeout_recovery",
+                legacy_timeout_recovered_episodes == len(episodes),
+                f"recovered {legacy_timeout_recovered_episodes}/{len(episodes)} episodes "
+                "from outcome/truncated without rewriting HDF5",
+            )
 
     expected_pairs = {
         (motion_id, variant_id)
@@ -703,6 +808,12 @@ def main() -> int:
         "randomization_profile": args.randomization_profile,
         "canonical_episode_count": len(canonical),
         "additional_attempt_count": len(additional_attempts),
+        "legacy_timeout_recovery": {
+            "applied": legacy_timeout_recovered_episodes > 0,
+            "source": "outcome/truncated" if legacy_timeout_recovered_episodes > 0 else None,
+            "episode_count": legacy_timeout_recovered_episodes,
+            "unrecorded_runtime_terms": list(legacy_unrecorded_runtime_terms),
+        },
         "completed_canonical_episodes": completed_total,
         "completion_rate": completion_rate,
         "completion_by_package": completion_by_package,

@@ -21,7 +21,12 @@ class VerifyStateActionTest(TestCase):
         resolved = verify_state_action.parameter_for_env(entry, 1, (29,))
         np.testing.assert_array_equal(resolved, np.ones(29))
 
-    def _write_fixture(self, run_dir: Path, corrupt_previous_action: bool = False) -> None:
+    def _write_fixture(
+        self,
+        run_dir: Path,
+        corrupt_previous_action: bool = False,
+        legacy_timeout_schema: bool = False,
+    ) -> None:
         (run_dir / "data").mkdir(parents=True)
         (run_dir / "manifests").mkdir()
         actions = np.arange(3 * 29, dtype=np.float32).reshape(3, 29) / 100.0
@@ -71,9 +76,13 @@ class VerifyStateActionTest(TestCase):
                 termination_terms.create_dataset(
                     name, data=np.array([False, False, name == "anchor_pos"])
                 )
-            termination_terms.create_dataset(
-                "motion_time_out", data=np.array([False, False, False])
-            )
+            if not legacy_timeout_schema:
+                termination_terms.create_dataset(
+                    "foot_pos_xyz", data=np.array([False, False, False])
+                )
+                termination_terms.create_dataset(
+                    "motion_time_out", data=np.array([False, False, False])
+                )
             motion = episode.create_group("motion")
             motion.create_dataset("env_id", data=np.zeros(3, dtype=np.int64))
             motion.create_dataset("motion_id", data=np.zeros(3, dtype=np.int64))
@@ -121,7 +130,22 @@ class VerifyStateActionTest(TestCase):
                     "values": [[[1.0, 1.0, 0.0]]],
                 },
             },
+            "termination_terms": [
+                "time_out",
+                "anchor_pos",
+                "anchor_ori_full",
+                "ee_body_pos",
+                "foot_pos_xyz",
+            ],
         }
+        if not legacy_timeout_schema:
+            schema["termination_term_mapping"] = {
+                "motion_time_out": "time_out",
+                "anchor_pos": "anchor_pos",
+                "anchor_ori_full": "anchor_ori_full",
+                "ee_body_pos": "ee_body_pos",
+                "foot_pos_xyz": "foot_pos_xyz",
+            }
         (run_dir / "manifests" / "state_action_schema.json").write_text(
             json.dumps(schema), encoding="utf-8"
         )
@@ -152,6 +176,19 @@ class VerifyStateActionTest(TestCase):
             run_dir = Path(directory)
             self._write_fixture(run_dir, corrupt_previous_action=True)
             self.assertEqual(self._run_verifier(run_dir), 1)
+
+    def test_accepts_legacy_timeout_schema_without_rewriting_hdf5(self):
+        with TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            self._write_fixture(run_dir, legacy_timeout_schema=True)
+            self.assertEqual(self._run_verifier(run_dir), 0)
+            summary = json.loads(
+                (run_dir / "manifests" / "collection_summary.json").read_text()
+            )
+            recovery = summary["legacy_timeout_recovery"]
+            self.assertTrue(recovery["applied"])
+            self.assertEqual(recovery["episode_count"], 1)
+            self.assertEqual(recovery["unrecorded_runtime_terms"], ["foot_pos_xyz"])
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ COLLECT_SMPL_MOTION_FILE="${COLLECT_SMPL_MOTION_FILE:-zeros}"
 COLLECT_MOTION_MANIFEST="${COLLECT_MOTION_MANIFEST:-}"
 COLLECT_BASELINE_SUMMARY="${COLLECT_BASELINE_SUMMARY:-}"
 COLLECT_DATASET_NAME="${COLLECT_DATASET_NAME:-sonic_minimal_sa}"
+COLLECT_RUN_DIR="${COLLECT_RUN_DIR:-}"
 BONES_MIN_DOWNLOAD_FREE_GIB="${BONES_MIN_DOWNLOAD_FREE_GIB:-70}"
 BONES_MIN_STAGE_FREE_GIB="${BONES_MIN_STAGE_FREE_GIB:-40}"
 OFFLINE_RENDER_ENVS="${OFFLINE_RENDER_ENVS:-1}"
@@ -703,6 +704,79 @@ phase_collect_state_action() {
   fi
 }
 
+phase_verify_state_action() {
+  activate_env
+  prepare_dirs
+  [[ -n "$COLLECT_RUN_DIR" ]] \
+    || die "Set COLLECT_RUN_DIR to an existing collection run under $RUNS_ROOT"
+  [[ "$COLLECT_MOTION_COUNT" =~ ^[1-9][0-9]*$ ]] \
+    || die "Existing-run verification requires a numeric COLLECT_MOTION_COUNT"
+  [[ "$COLLECT_VARIANTS_PER_MOTION" =~ ^[1-9][0-9]*$ ]] \
+    || die "COLLECT_VARIANTS_PER_MOTION must be a positive integer"
+  [[ "$COLLECT_RANDOMIZATION_PROFILE" == "startup" \
+      || "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]] \
+    || die "Unsupported COLLECT_RANDOMIZATION_PROFILE: $COLLECT_RANDOMIZATION_PROFILE"
+
+  local run_dir variant_offset motion_manifest audit_stamp artifact log_path
+  run_dir="$(validated_run_dir "$COLLECT_RUN_DIR")"
+  [[ -d "$run_dir" ]] || die "Collection run does not exist: $run_dir"
+  [[ -s "$run_dir/data/$COLLECT_DATASET_NAME.hdf5" ]] \
+    || die "Collection dataset is missing: $run_dir/data/$COLLECT_DATASET_NAME.hdf5"
+  [[ -s "$run_dir/manifests/state_action_schema.json" ]] \
+    || die "Collection schema is missing: $run_dir/manifests/state_action_schema.json"
+  [[ ! -e "$run_dir/markers/collect_state_action.ok" ]] \
+    || die "Collection is already marked successful: $run_dir"
+
+  variant_offset="$COLLECT_VARIANT_OFFSET"
+  if [[ -z "$variant_offset" ]]; then
+    if [[ "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]]; then
+      variant_offset=4
+    else
+      variant_offset=0
+    fi
+  fi
+  [[ "$variant_offset" =~ ^[0-9]+$ ]] \
+    || die "COLLECT_VARIANT_OFFSET must be a non-negative integer"
+
+  motion_manifest="$COLLECT_MOTION_MANIFEST"
+  if [[ -z "$motion_manifest" && -s "$run_dir/manifests/motion_manifest.jsonl" ]]; then
+    motion_manifest="$run_dir/manifests/motion_manifest.jsonl"
+  fi
+  [[ -n "$motion_manifest" && -s "$motion_manifest" ]] \
+    || die "Existing-run verification requires its motion manifest"
+
+  audit_stamp="$(timestamp)"
+  for artifact in \
+    collection_summary.json \
+    canonical_episode_index.json \
+    additional_attempt_index.json; do
+    if [[ -e "$run_dir/manifests/$artifact" ]]; then
+      cp -- \
+        "$run_dir/manifests/$artifact" \
+        "$run_dir/manifests/$artifact.before_recheck_$audit_stamp"
+    fi
+  done
+  log_path="$run_dir/logs/verify_state_action_recheck_$audit_stamp.log"
+
+  if python "$SCRIPT_DIR/verify_state_action.py" \
+    --run-dir "$run_dir" \
+    --dataset-name "$COLLECT_DATASET_NAME" \
+    --expected-motion-count "$COLLECT_MOTION_COUNT" \
+    --expected-variants-per-motion "$COLLECT_VARIANTS_PER_MOTION" \
+    --variant-offset "$variant_offset" \
+    --randomization-profile "$COLLECT_RANDOMIZATION_PROFILE" \
+    --motion-manifest "$motion_manifest" \
+    2>&1 | tee "$log_path"; then
+    record_exit_code "$run_dir" verify_state_action 0
+    mark_stage "$run_dir" collect_state_action.ok
+    log "Existing collection verified without rewriting HDF5: $run_dir"
+  else
+    local rc=$?
+    record_exit_code "$run_dir" verify_state_action "$rc"
+    return "$rc"
+  fi
+}
+
 phase_bones_download_preflight() {
   prepare_dirs
   local free_gib
@@ -946,6 +1020,8 @@ Phases:
   render-offline  Dump a fresh trajectory and render it through MuJoCo OSMesa.
   collect-state-action
                   Record and verify minimal (s_t, g_t, a_t, s_t+1) HDF5 data.
+  verify-state-action
+                  Revalidate an existing collection without rewriting its HDF5 data.
   bones-download-preflight
                   Require 70 GiB free before the manual gated BONES download.
   prepare-bones-subset
@@ -960,7 +1036,7 @@ Environment overrides:
   COLLECT_MOTION_COUNT, COLLECT_BATCH_MOTIONS, COLLECT_VARIANTS_PER_MOTION,
   COLLECT_ENVS, COLLECT_RANDOMIZATION_PROFILE, COLLECT_SEED, COLLECT_VARIANT_OFFSET,
   COLLECT_MOTION_FILE, COLLECT_SMPL_MOTION_FILE, COLLECT_MOTION_MANIFEST,
-  COLLECT_BASELINE_SUMMARY, COLLECT_DATASET_NAME, BONES_INGEST_RUN,
+  COLLECT_BASELINE_SUMMARY, COLLECT_DATASET_NAME, COLLECT_RUN_DIR, BONES_INGEST_RUN,
   OFFLINE_RENDER_ENVS, OFFLINE_FRAME_SKIP, OFFLINE_WIDTH, OFFLINE_HEIGHT,
   OFFLINE_GL, OFFLINE_CAMERA_DISTANCE, OFFLINE_RUN_DIR,
   MAX_RUN_GPU_USED_MIB, SONIC_COMMIT
@@ -982,6 +1058,7 @@ main() {
     render-mujoco) phase_render_mujoco ;;
     render-offline) phase_render_offline ;;
     collect-state-action) phase_collect_state_action ;;
+    verify-state-action) phase_verify_state_action ;;
     bones-download-preflight) phase_bones_download_preflight ;;
     prepare-bones-subset) phase_prepare_bones_subset ;;
     smoke-train) phase_smoke_train ;;

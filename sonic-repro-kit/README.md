@@ -93,13 +93,14 @@ PATCH_DIR=~/bly/sonic-repro-kit/patches
 PATCH_1="$PATCH_DIR/0001-feat-record-minimal-SONIC-state-goal-action-data.patch"
 PATCH_2="$PATCH_DIR/0002-fix-preserve-per-environment-joint-defaults.patch"
 PATCH_3="$PATCH_DIR/0003-feat-collect-repeated-motion-randomized-dataset.patch"
-git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3"
+PATCH_4="$PATCH_DIR/0004-fix-record-runtime-termination-terms.patch"
+git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4"
 git switch -c codex/minimal-state-action-recorder
-git am "$PATCH_1" "$PATCH_2" "$PATCH_3"
+git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4"
 ```
 
 不要在 Ubuntu 手工编辑补丁内容。如果配置文件已存在，应先检查当前提交和工作树，
-不要重复应用补丁。已经应用前两个补丁的执行端只对 `PATCH_3` 分别执行
+不要重复应用补丁。已经应用前三个补丁的执行端只对 `PATCH_4` 分别执行
 `git apply --check` 和 `git am`。
 
 ```bash
@@ -119,10 +120,26 @@ HDF5 中的 `state_t` 和 `state_tp1` 均为 93 维分字段状态，`goal_t` �
 29 关节顺序、默认关节角、action scale/offset/clip、wrapper clip、仿真步长和控制
 步长保存在 `manifests/state_action_schema.json`，不依赖 YAML 默认值推断。受 startup
 校准随机化影响的默认关节角、offset、material、restitution 与 body COM 会保留逐环境
-实际值。HDF5 另外记录 stable global motion ID、variant/batch/attempt ID、四类终止项和
+实际值。HDF5 另外记录 stable global motion ID、variant/batch/attempt ID、全部 runtime
+active termination terms（runtime `time_out` 稳定导出为 `motion_time_out`）和
 episode 内恒定的 reset delta。主索引只包含 `attempt_id=0`；自动 reset 产生的额外
 attempt 保留在独立索引。只有精确覆盖目标 `(motion, variant)` 且全部校验通过才生成
 成功 marker。
+
+旧版 recorder 因 runtime 名称为 `time_out` 而可能遗漏 `motion_time_out`。无需重跑或
+改写 HDF5；当 schema 明确包含 `time_out` 时，验证器可严格使用同一帧的 `truncated`
+恢复该标签，并在 summary 中记录兼容模式及无法恢复的额外 runtime term：
+
+```bash
+COLLECT_RUN_DIR=~/bly/runs/collect_state_action_YYYYMMDD_HHMMSS \
+COLLECT_MOTION_COUNT=256 \
+COLLECT_VARIANTS_PER_MOTION=4 \
+COLLECT_VARIANT_OFFSET=0 \
+COLLECT_RANDOMIZATION_PROFILE=startup \
+bash ./sonic_repro.sh verify-state-action
+```
+
+该命令保留原验证 summary/index 的带时间戳副本，不改写 HDF5；通过后才生成 marker。
 
 `render-offline` 是当前机器的推荐渲染入口。它先用已跑通的 Isaac Lab headless
 物理链路记录一段轨迹，再在独立进程中使用 MuJoCo OSMesa 生成 MP4，不会启用
