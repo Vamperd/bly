@@ -24,9 +24,22 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def first_existing(*paths: Path) -> Path:
+    return next((path for path in paths if path.is_file()), paths[0])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--work-root", type=Path, required=True)
+    parser.add_argument("--runs-root", type=Path, required=True)
     parser.add_argument("--expected-sonic-commit", required=True)
     parser.add_argument("--expected-isaaclab-commit", required=True)
     args = parser.parse_args()
@@ -49,12 +62,8 @@ def main() -> int:
         return 1
 
     run_dir = Path(read_text(latest_file).strip()).expanduser().resolve()
-    expected_runs_root = (args.work_root / "GR00T-WholeBodyControl" / "runs").resolve()
-    try:
-        run_dir.relative_to(expected_runs_root)
-        run_path_valid = True
-    except ValueError:
-        run_path_valid = False
+    expected_runs_root = args.runs_root.expanduser().resolve()
+    run_path_valid = path_is_within(run_dir, expected_runs_root) and run_dir != expected_runs_root
     check("latest_run_pointer", run_path_valid and run_dir.is_dir(), str(run_dir))
 
     if not run_path_valid or not run_dir.is_dir():
@@ -67,21 +76,33 @@ def main() -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 1
 
+    expected_directories = {
+        name: run_dir / name
+        for name in ("logs", "videos", "data", "checkpoints", "manifests", "markers")
+    }
+    for name, path in expected_directories.items():
+        check(f"run_directory:{name}", path.is_dir(), str(path))
+
     expected_files = {
-        "metrics_log": run_dir / "metrics.log",
-        "render_log": run_dir / "render.log",
-        "smoke_train_log": run_dir / "train_smoke.log",
-        "environment_freeze": run_dir / "environment_freeze.txt",
-        "gpu_manifest": run_dir / "nvidia-smi.txt",
+        "metrics_log": run_dir / "logs" / "metrics.log",
+        "render_log": first_existing(
+            run_dir / "logs" / "render_mujoco.log",
+            run_dir / "logs" / "render_isaac.log",
+        ),
+        "smoke_train_log": run_dir / "logs" / "train_smoke.log",
+        "environment_freeze": run_dir / "manifests" / "environment_freeze.txt",
+        "gpu_manifest": run_dir / "manifests" / "nvidia-smi.txt",
+        "run_config": run_dir / "manifests" / "run_config.txt",
+        "invocation": run_dir / "manifests" / "invocation.txt",
     }
     for name, path in expected_files.items():
         check(name, path.is_file() and path.stat().st_size > 0, str(path))
 
     for name in ("eval.ok", "render.ok", "smoke_train.ok"):
-        path = run_dir / name
+        path = run_dir / "markers" / name
         check(f"success_marker:{name}", path.is_file(), str(path))
 
-    sonic_commit_file = run_dir / "sonic_commit.txt"
+    sonic_commit_file = run_dir / "manifests" / "sonic_commit.txt"
     sonic_actual = read_text(sonic_commit_file).strip() if sonic_commit_file.is_file() else "missing"
     check(
         "sonic_commit",
@@ -89,7 +110,7 @@ def main() -> int:
         f"expected={args.expected_sonic_commit}, actual={sonic_actual}",
     )
 
-    isaaclab_commit_file = run_dir / "isaaclab_commit.txt"
+    isaaclab_commit_file = run_dir / "manifests" / "isaaclab_commit.txt"
     isaaclab_actual = (
         read_text(isaaclab_commit_file).strip() if isaaclab_commit_file.is_file() else "missing"
     )
@@ -104,11 +125,26 @@ def main() -> int:
     check("dependency:torch", "torch==2.7.0" in freeze, "torch==2.7.0")
     check("dependency:isaacsim", "isaacsim==5.1.0" in freeze, "isaacsim==5.1.0")
 
-    videos = [path for path in (run_dir / "renders").glob("*.mp4") if path.stat().st_size > 0]
+    videos = [path for path in (run_dir / "videos").glob("*.mp4") if path.stat().st_size > 0]
     check("rendered_mp4", bool(videos), ", ".join(str(path) for path in videos) or "none")
 
-    for log_name in ("metrics.log", "render.log", "train_smoke.log"):
-        path = run_dir / log_name
+    trajectory_marker = run_dir / "markers" / "trajectory_dump.ok"
+    if trajectory_marker.is_file():
+        trajectories = [
+            path for path in (run_dir / "data").glob("*.trajectory.pkl") if path.stat().st_size > 0
+        ]
+        check(
+            "trajectory_dump",
+            bool(trajectories),
+            ", ".join(str(path) for path in trajectories) or "none",
+        )
+
+    log_paths = {
+        "metrics.log": expected_files["metrics_log"],
+        "render.log": expected_files["render_log"],
+        "train_smoke.log": expected_files["smoke_train_log"],
+    }
+    for log_name, path in log_paths.items():
         if not path.is_file():
             continue
         text = read_text(path)
@@ -127,7 +163,8 @@ def main() -> int:
         "passed": passed,
         "checks": checks,
     }
-    report_path = run_dir / "verification_report.json"
+    report_path = run_dir / "manifests" / "verification_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print(f"SONIC minimal reproduction: {'PASS' if passed else 'FAIL'}")
