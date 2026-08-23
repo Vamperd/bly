@@ -1,0 +1,106 @@
+Cloning into '/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl'...
+Updating files:  93% (3164/3380)Updating files:  94% (3178/3380)Updating files:  95% (3211/3380)Updating files:  96% (3245/3380)Updating files:  97% (3279/3380)Updating files:  98% (3313/3380)Updating files:  99% (3347/3380)Updating files: 100% (3380/3380)Updating files: 100% (3380/3380), done.
+Filtering content:   0% (2/1271)Filtering content:   0% (10/1271)Filtering content:   1% (13/1271)Filtering content:   1% (20/1271)Filtering content:   2% (26/1271), 63.51 MiB | 22.94 MiB/sFiltering content:   2% (31/1271), 63.51 MiB | 22.94 MiB/sFiltering content:   2% (32/1271), 100.36 MiB | 24.25 MiB/sFiltering content:   2% (34/1271), 102.67 MiB | 4.30 MiB/s Filtering content:   3% (39/1271), 108.03 MiB | 4.34 MiB/sFiltering content:   3% (40/1271), 108.03 MiB | 4.34 MiB/sFiltering content:   4% (51/1271), 122.42 MiB | 4.59 MiB/sFiltering content:   4% (63/1271), 145.90 MiB | 5.38 MiB/sFiltering content:   5% (64/1271), 171.93 MiB | 4.89 MiB/sFiltering content:   5% (72/1271), 171.93 MiB | 4.89 MiB/sFiltering content:   6% (77/1271), 190.35 MiB | 5.28 MiB/sFiltering content:   6% (84/1271), 190.35 MiB | 5.28 MiB/sFiltering content:   7% (89/1271), 215.40 MiB | 5.67 MiB/sFiltering content:   8% (102/1271), 215.40 MiB | 5.67 MiB/sFiltering content:   8% (113/1271), 246.51 MiB | 5.06 MiB/sFiltering content:   9% (115/1271), 265.17 MiB | 3.79 MiB/sFiltering content:  10% (128/1271), 265.17 MiB | 3.79 MiB/sFiltering content:  11% (140/1271), 265.17 MiB | 3.79 MiB/sFiltering content:  12% (153/1271), 316.44 MiB | 7.77 MiB/sFiltering content:  13% (166/1271), 316.44 MiB | 7.77 MiB/sFiltering content:  13% (170/1271), 316.44 MiB | 7.77 MiB/sFiltering content:  14% (178/1271), 342.01 MiB | 8.33 MiB/sFiltering content:  14% (179/1271), 342.01 MiB | 8.33 MiB/sFiltering content:  14% (190/1271), 349.94 MiB | 7.33 MiB/sFiltering content:  15% (191/1271), 358.90 MiB | 8.46 MiB/sFiltering content:  15% (203/1271), 358.90 MiB | 8.46 MiB/sFiltering content:  16% (204/1271), 369.16 MiB | 7.05 MiB/sFiltering content:  17% (217/1271), 369.16 MiB | 7.05 MiB/sFiltering content:  18% (229/1271), 369.16 MiB | 7.05 MiB/sFiltering content:  18% (232/1271), 369.16 MiB | 7.05 MiB/sFiltering content:  18% (233/1271), 369.16 MiB | 7.05 MiB/sFiltering content:  19% (242/1271), 387.48 MiB | 6.14 MiB/sFiltering content:  20% (255/1271), 387.48 MiB | 6.14 MiB/sFiltering content:  20% (260/1271), 387.48 MiB | 6.14 MiB/sFiltering content:  21% (267/1271), 399.84 MiB | 5.49 MiB/sFiltering content:  22% (280/1271), 399.84 MiB | 5.49 MiB/sFiltering content:  22% (288/1271), 399.84 MiB | 5.49 MiB/sFiltering content:  22% (289/1271), 412.48 MiB | 6.54 MiB/sFiltering content:  23% (293/1271), 412.87 MiB | 5.05 MiB/sFiltering content:  23% (301/1271), 417.08 MiB | 4.65 MiB/sFiltering content:  24% (306/1271), 417.46 MiB | 3.55 MiB/sFiltering content:  25% (318/1271), 417.46 MiB | 3.55 MiB/sFiltering content:  25% (323/1271), 417.46 MiB | 3.55 MiB/sFiltering content:  26% (331/1271), 461.71 MiB | 5.45 MiB/sFiltering content:  26% (336/1271), 461.71 MiB | 5.45 MiB/sFiltering content:  27% (344/1271), 502.47 MiB | 6.85 MiB/sFiltering content:  28% (356/1271), 502.47 MiB | 6.85 MiB/sFiltering content:  28% (358/1271), 502.47 MiB | 6.85 MiB/sFiltering content:  29% (369/1271), 502.47 MiB | 6.85 MiB/sFiltering content:  29% (380/1271), 502.47 MiB | 6.85 MiB/sFiltering content:  30% (382/1271), 515.94 MiB | 7.88 MiB/sFiltering content:  31% (395/1271), 515.94 MiB | 7.88 MiB/sFiltering content:  31% (402/1271), 515.94 MiB | 7.88 MiB/sFiltering content:  32% (407/1271), 521.67 MiB | 9.10 MiB/sFiltering content:  33% (420/1271), 524.28 MiB | 8.81 MiB/sFiltering content:  33% (424/1271), 524.28 MiB | 8.81 MiB/sFiltering content:  34% (433/1271), 524.28 MiB | 8.81 MiB/sFiltering content:  35% (445/1271), 524.28 MiB | 8.81 MiB/sFiltering content:  35% (446/1271), 524.28 MiB | 8.81 MiB/sFiltering content:  36% (458/1271), 531.06 MiB | 8.68 MiB/sFiltering content:  37% (471/1271), 531.06 MiB | 8.68 MiB/sFiltering content:  38% (483/1271), 531.06 MiB | 8.68 MiB/sFiltering content:  39% (496/1271), 531.06 MiB | 8.68 MiB/sFiltering content:  40% (509/1271), 531.06 MiB | 8.68 MiB/sFiltering content:  40% (512/1271), 531.06 MiB | 8.68 MiB/sFiltering content:  41% (522/1271), 542.51 MiB | 9.20 MiB/sFiltering content:  42% (534/1271), 542.51 MiB | 9.20 MiB/sFiltering content:  43% (547/1271), 542.51 MiB | 9.20 MiB/sFiltering content:  44% (560/1271), 542.51 MiB | 9.20 MiB/sFiltering content:  45% (572/1271), 542.51 MiB | 9.20 MiB/sFiltering content:  45% (578/1271), 542.51 MiB | 9.20 MiB/sFiltering content:  46% (585/1271), 549.25 MiB | 8.79 MiB/sFiltering content:  47% (598/1271), 549.25 MiB | 8.79 MiB/sFiltering content:  48% (611/1271), 549.25 MiB | 8.79 MiB/sFiltering content:  49% (623/1271), 549.25 MiB | 8.79 MiB/sFiltering content:  49% (629/1271), 549.25 MiB | 8.79 MiB/sFiltering content:  50% (636/1271), 552.96 MiB | 7.83 MiB/sFiltering content:  51% (649/1271), 552.96 MiB | 7.83 MiB/sFiltering content:  51% (655/1271), 552.96 MiB | 7.83 MiB/sFiltering content:  52% (661/1271), 554.08 MiB | 4.75 MiB/sFiltering content:  52% (669/1271), 554.08 MiB | 4.75 MiB/sFiltering content:  53% (674/1271), 554.23 MiB | 2.67 MiB/sFiltering content:  53% (683/1271), 554.23 MiB | 2.67 MiB/sFiltering content:  54% (687/1271), 554.32 MiB | 1.85 MiB/sFiltering content:  54% (689/1271), 554.32 MiB | 1.85 MiB/sFiltering content:  54% (695/1271), 630.86 MiB | 5.18 MiB/sFiltering content:  54% (696/1271), 802.81 MiB | 9.79 MiB/sFiltering content:  55% (700/1271), 804.16 MiB | 8.59 MiB/sFiltering content:  55% (705/1271), 804.16 MiB | 8.59 MiB/sFiltering content:  55% (706/1271), 819.47 MiB | 9.00 MiB/sFiltering content:  55% (710/1271), 821.16 MiB | 9.02 MiB/sFiltering content:  56% (712/1271), 824.37 MiB | 9.83 MiB/sFiltering content:  56% (718/1271), 824.37 MiB | 9.83 MiB/sFiltering content:  56% (724/1271), 829.44 MiB | 10.95 MiB/sFiltering content:  57% (725/1271), 832.75 MiB | 11.97 MiB/sFiltering content:  58% (738/1271), 836.12 MiB | 13.69 MiB/sFiltering content:  58% (739/1271), 836.12 MiB | 13.69 MiB/sFiltering content:  59% (750/1271), 837.52 MiB | 10.33 MiB/sFiltering content:  59% (759/1271), 838.10 MiB | 2.82 MiB/s Filtering content:  60% (763/1271), 838.10 MiB | 2.82 MiB/sFiltering content:  61% (776/1271), 838.71 MiB | 3.23 MiB/sFiltering content:  62% (789/1271), 838.74 MiB | 3.10 MiB/sFiltering content:  62% (793/1271), 838.74 MiB | 3.10 MiB/sFiltering content:  63% (801/1271), 838.76 MiB | 2.59 MiB/sFiltering content:  63% (804/1271), 838.76 MiB | 2.59 MiB/sFiltering content:  63% (805/1271), 871.16 MiB | 392.00 KiB/sFiltering content:  63% (806/1271), 907.59 MiB | 687.00 KiB/sFiltering content:  63% (807/1271), 944.02 MiB | 960.00 KiB/sFiltering content:  63% (808/1271), 980.03 MiB | 1.22 MiB/s  Filtering content:  63% (811/1271), 1016.45 MiB | 1.43 MiB/sFiltering content:  63% (813/1271), 1.09 GiB | 1.25 MiB/s   Filtering content:  63% (813/1271), 1.14 GiB | 1.46 MiB/sFiltering content:  64% (814/1271), 1.14 GiB | 1.46 MiB/sFiltering content:  64% (815/1271), 1.17 GiB | 1.58 MiB/sFiltering content:  64% (816/1271), 1.19 GiB | 1.67 MiB/sFiltering content:  64% (817/1271), 1.22 GiB | 2.90 MiB/sFiltering content:  64% (818/1271), 1.24 GiB | 2.84 MiB/sFiltering content:  64% (819/1271), 1.27 GiB | 2.83 MiB/sFiltering content:  64% (820/1271), 1.28 GiB | 2.08 MiB/sFiltering content:  64% (822/1271), 1.30 GiB | 1.83 MiB/sFiltering content:  65% (827/1271), 1.34 GiB | 3.35 MiB/sFiltering content:  65% (828/1271), 1.43 GiB | 3.78 MiB/sFiltering content:  65% (829/1271), 1.44 GiB | 3.08 MiB/sFiltering content:  65% (832/1271), 1.45 GiB | 2.94 MiB/sFiltering content:  65% (836/1271), 1.47 GiB | 2.91 MiB/sFiltering content:  65% (837/1271), 1.47 GiB | 2.91 MiB/sFiltering content:  65% (838/1271), 1.50 GiB | 2.84 MiB/sFiltering content:  66% (839/1271), 1.50 GiB | 2.48 MiB/sFiltering content:  66% (843/1271), 1.50 GiB | 2.48 MiB/sFiltering content:  66% (845/1271), 1.51 GiB | 3.63 MiB/sFiltering content:  66% (846/1271), 1.51 GiB | 4.80 MiB/sFiltering content:  66% (848/1271), 1.52 GiB | 4.18 MiB/sFiltering content:  66% (850/1271), 1.52 GiB | 2.30 MiB/sFiltering content:  67% (852/1271), 1.52 GiB | 3.14 MiB/sFiltering content:  67% (856/1271), 1.52 GiB | 3.14 MiB/sFiltering content:  67% (859/1271), 1.52 GiB | 3.14 MiB/sFiltering content:  67% (862/1271), 1.53 GiB | 3.07 MiB/sFiltering content:  67% (863/1271), 1.53 GiB | 2.60 MiB/sFiltering content:  68% (865/1271), 1.53 GiB | 2.19 MiB/sFiltering content:  68% (868/1271), 1.53 GiB | 2.19 MiB/sFiltering content:  68% (870/1271), 1.54 GiB | 2.53 MiB/sFiltering content:  68% (871/1271), 1.54 GiB | 1.85 MiB/sFiltering content:  69% (877/1271), 1.54 GiB | 1.86 MiB/sFiltering content:  69% (878/1271), 1.54 GiB | 1.86 MiB/sFiltering content:  69% (881/1271), 1.54 GiB | 1.74 MiB/sFiltering content:  69% (883/1271), 1.54 GiB | 1.66 MiB/sFiltering content:  70% (890/1271), 1.54 GiB | 1.20 MiB/sFiltering content:  70% (892/1271), 1.54 GiB | 1.15 MiB/sFiltering content:  70% (897/1271), 1.54 GiB | 1.00 MiB/sFiltering content:  70% (899/1271), 1.54 GiB | 983.00 KiB/sFiltering content:  71% (903/1271), 1.54 GiB | 574.00 KiB/sFiltering content:  71% (904/1271), 1.54 GiB | 574.00 KiB/sFiltering content:  71% (906/1271), 1.54 GiB | 574.00 KiB/sFiltering content:  71% (911/1271), 1.54 GiB | 564.00 KiB/sFiltering content:  71% (913/1271), 1.54 GiB | 541.00 KiB/sFiltering content:  71% (914/1271), 1.54 GiB | 251.00 KiB/sFiltering content:  71% (915/1271), 1.71 GiB | 6.96 MiB/s  Filtering content:  72% (916/1271), 1.71 GiB | 5.44 MiB/sFiltering content:  72% (921/1271), 1.72 GiB | 5.19 MiB/sFiltering content:  72% (922/1271), 1.72 GiB | 5.39 MiB/sFiltering content:  72% (923/1271), 1.73 GiB | 5.26 MiB/sFiltering content:  72% (924/1271), 1.73 GiB | 5.66 MiB/sFiltering content:  72% (926/1271), 1.73 GiB | 5.85 MiB/sFiltering content:  73% (928/1271), 1.74 GiB | 5.72 MiB/sFiltering content:  73% (932/1271), 1.74 GiB | 5.72 MiB/sFiltering content:  73% (936/1271), 1.74 GiB | 6.27 MiB/sFiltering content:  73% (938/1271), 1.74 GiB | 1.53 MiB/sFiltering content:  74% (941/1271), 1.74 GiB | 2.37 MiB/sFiltering content:  74% (950/1271), 1.74 GiB | 2.37 MiB/sFiltering content:  75% (954/1271), 1.75 GiB | 2.90 MiB/sFiltering content:  75% (955/1271), 1.75 GiB | 2.60 MiB/sFiltering content:  75% (963/1271), 1.75 GiB | 2.57 MiB/sFiltering content:  76% (966/1271), 1.76 GiB | 2.56 MiB/sFiltering content:  76% (970/1271), 1.76 GiB | 2.64 MiB/sFiltering content:  76% (975/1271), 1.76 GiB | 2.28 MiB/sFiltering content:  77% (979/1271), 1.76 GiB | 2.29 MiB/sFiltering content:  77% (981/1271), 1.76 GiB | 2.29 MiB/sFiltering content:  78% (992/1271), 1.76 GiB | 1.90 MiB/sFiltering content:  78% (998/1271), 1.76 GiB | 1.90 MiB/sFiltering content:  79% (1005/1271), 1.77 GiB | 2.38 MiB/sFiltering content:  80% (1017/1271), 1.77 GiB | 2.38 MiB/sFiltering content:  81% (1030/1271), 1.77 GiB | 2.84 MiB/sFiltering content:  81% (1037/1271), 1.77 GiB | 2.71 MiB/sFiltering content:  82% (1043/1271), 1.77 GiB | 2.71 MiB/sFiltering content:  83% (1055/1271), 1.78 GiB | 2.84 MiB/sFiltering content:  83% (1058/1271), 1.78 GiB | 2.84 MiB/sFiltering content:  83% (1059/1271), 1.78 GiB | 1.40 MiB/sFiltering content:  84% (1068/1271), 1.78 GiB | 1.25 MiB/sFiltering content:  84% (1072/1271), 1.79 GiB | 2.03 MiB/sFiltering content:  84% (1074/1271), 1.79 GiB | 2.14 MiB/sFiltering content:  84% (1079/1271), 1.80 GiB | 1.83 MiB/sFiltering content:  85% (1081/1271), 1.80 GiB | 1.83 MiB/sFiltering content:  85% (1083/1271), 1.80 GiB | 1.83 MiB/sFiltering content:  85% (1086/1271), 1.80 GiB | 1.74 MiB/sFiltering content:  85% (1090/1271), 1.80 GiB | 2.99 MiB/sFiltering content:  86% (1094/1271), 1.80 GiB | 2.99 MiB/sFiltering content:  86% (1098/1271), 1.81 GiB | 3.61 MiB/sFiltering content:  86% (1104/1271), 1.81 GiB | 2.00 MiB/sFiltering content:  87% (1106/1271), 1.81 GiB | 2.00 MiB/sFiltering content:  87% (1109/1271), 1.81 GiB | 2.02 MiB/sFiltering content:  87% (1113/1271), 1.81 GiB | 1.91 MiB/sFiltering content:  88% (1119/1271), 1.81 GiB | 1.81 MiB/sFiltering content:  88% (1123/1271), 1.82 GiB | 1.96 MiB/sFiltering content:  89% (1132/1271), 1.82 GiB | 2.12 MiB/sFiltering content:  89% (1141/1271), 1.82 GiB | 2.12 MiB/sFiltering content:  90% (1144/1271), 1.82 GiB | 2.12 MiB/sFiltering content:  90% (1156/1271), 1.82 GiB | 2.04 MiB/sFiltering content:  91% (1157/1271), 1.82 GiB | 2.04 MiB/sFiltering content:  92% (1170/1271), 1.82 GiB | 2.22 MiB/sFiltering content:  92% (1176/1271), 1.82 GiB | 2.08 MiB/sFiltering content:  92% (1180/1271), 1.82 GiB | 1.98 MiB/sFiltering content:  92% (1181/1271), 1.83 GiB | 387.00 KiB/sFiltering content:  92% (1182/1271), 1.84 GiB | 477.00 KiB/sFiltering content:  93% (1183/1271), 1.85 GiB | 560.00 KiB/sFiltering content:  93% (1184/1271), 1.85 GiB | 560.00 KiB/sFiltering content:  93% (1185/1271), 1.87 GiB | 879.00 KiB/sFiltering content:  93% (1186/1271), 1.88 GiB | 933.00 KiB/sFiltering content:  93% (1187/1271), 1.89 GiB | 737.00 KiB/sFiltering content:  93% (1188/1271), 1.90 GiB | 755.00 KiB/sFiltering content:  93% (1190/1271), 1.92 GiB | 908.00 KiB/sFiltering content:  93% (1191/1271), 1.92 GiB | 978.00 KiB/sFiltering content:  93% (1193/1271), 1.93 GiB | 1.52 MiB/s  Filtering content:  93% (1194/1271), 1.98 GiB | 2.25 MiB/sFiltering content:  94% (1195/1271), 1.99 GiB | 2.27 MiB/sFiltering content:  94% (1197/1271), 2.00 GiB | 1.98 MiB/sFiltering content:  94% (1198/1271), 2.02 GiB | 2.24 MiB/sFiltering content:  94% (1199/1271), 2.02 GiB | 4.15 MiB/sFiltering content:  94% (1201/1271), 2.03 GiB | 3.78 MiB/sFiltering content:  94% (1202/1271), 2.05 GiB | 3.68 MiB/sFiltering content:  94% (1203/1271), 2.05 GiB | 3.29 MiB/sFiltering content:  94% (1204/1271), 2.06 GiB | 3.01 MiB/sFiltering content:  94% (1205/1271), 2.07 GiB | 2.15 MiB/sFiltering content:  94% (1207/1271), 2.07 GiB | 2.25 MiB/sFiltering content:  95% (1208/1271), 2.09 GiB | 1.98 MiB/sFiltering content:  95% (1210/1271), 2.09 GiB | 1.85 MiB/sFiltering content:  95% (1211/1271), 2.11 GiB | 1.70 MiB/sFiltering content:  95% (1212/1271), 2.11 GiB | 1.70 MiB/sFiltering content:  95% (1215/1271), 2.12 GiB | 1.92 MiB/sFiltering content:  95% (1216/1271), 2.13 GiB | 2.16 MiB/sFiltering content:  95% (1217/1271), 2.13 GiB | 2.62 MiB/sFiltering content:  95% (1220/1271), 2.14 GiB | 2.63 MiB/sFiltering content:  96% (1221/1271), 2.15 GiB | 2.60 MiB/sFiltering content:  96% (1223/1271), 2.15 GiB | 3.44 MiB/sFiltering content:  96% (1231/1271), 2.15 GiB | 3.22 MiB/sFiltering content:  97% (1233/1271), 2.16 GiB | 4.64 MiB/sFiltering content:  97% (1240/1271), 2.16 GiB | 4.61 MiB/sFiltering content:  98% (1246/1271), 2.16 GiB | 4.41 MiB/sFiltering content:  98% (1255/1271), 2.16 GiB | 4.14 MiB/sFiltering content:  99% (1259/1271), 2.16 GiB | 4.14 MiB/sFiltering content: 100% (1271/1271), 2.17 GiB | 3.49 MiB/sFiltering content: 100% (1271/1271), 2.17 GiB | 2.85 MiB/s, done.
+HEAD is now at c374bae Merge branch 'main' of github.com:NVlabs/GR00T-WholeBodyControl
+Using Python 3.11.14 environment at: /home/helloworld/bly/sonic-repro/.venv-sonic
+   Updating https://github.com/ZhengyiLuo/SMPLSim.git (HEAD)
+    Updated https://github.com/ZhengyiLuo/SMPLSim.git (b5c08720503ad5fff64050c4d289c42d947fcf8d)
+   Updating https://github.com/ZhengyiLuo/smplx.git (master)
+    Updated https://github.com/ZhengyiLuo/smplx.git (a5b8e4ac14f79f3f33fd2cf2a16e6f507146b813)
+Resolved 159 packages in 33.79s
+   Building gear-sonic @ file:///home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic
+   Building smplx @ git+https://github.com/ZhengyiLuo/smplx.git@a5b8e4ac14f79f3f33fd2cf2a16e6f507146b813
+   Building smpl-sim @ git+https://github.com/ZhengyiLuo/SMPLSim.git@b5c08720503ad5fff64050c4d289c42d947fcf8d
+      Built smplx @ git+https://github.com/ZhengyiLuo/smplx.git@a5b8e4ac14f79f3f33fd2cf2a16e6f507146b813
+      Built smpl-sim @ git+https://github.com/ZhengyiLuo/SMPLSim.git@b5c08720503ad5fff64050c4d289c42d947fcf8d
+      Built gear-sonic @ file:///home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic
+Downloading vtk (133.2MiB)
+Downloading pyopengl (3.0MiB)
+Downloading plotly (9.5MiB)
+Downloading pandas (10.8MiB)
+Downloading scikit-learn (8.9MiB)
+Downloading wandb (28.3MiB)
+Downloading opencv-python (60.1MiB)
+Downloading pyarrow (47.7MiB)
+Downloading dash (8.5MiB)
+Downloading mujoco (17.9MiB)
+Downloading open3d (426.9MiB)
+ Downloaded pyopengl
+ Downloaded dash
+ Downloaded plotly
+ Downloaded scikit-learn
+ Downloaded pandas
+ Downloaded mujoco
+ Downloaded wandb
+ Downloaded opencv-python
+ Downloaded pyarrow
+ Downloaded vtk
+ Downloaded open3d
+Prepared 59 packages in 6m 31s
+Uninstalled 3 packages in 7ms
+Installed 59 packages in 76ms
+ + accelerate==1.14.0
+ + addict==2.4.0
+ + blinker==1.9.0
+ - click==8.1.7
+ + click==8.4.2
+ + configargparse==1.7.5
+ + dash==4.4.1
+ + datasets==5.0.1
+ + dill==0.4.1
+ + easydict==1.13
+ + einx==0.4.3
+ + etils==1.14.0
+ + fastjsonschema==2.22.2
+ + flask==3.1.3
+ + frozendict==2.4.7
+ - fsspec==2026.7.0
+ + fsspec==2026.6.0
+ + gear-sonic==0.1.0 (from file:///home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic)
+ + glfw==2.10.2
+ + httpcore==1.0.9
+ + httpx==0.28.1
+ - hydra-core==1.3.5
+ + hydra-core==1.3.2
+ + importlib-metadata==9.0.0
+ + itsdangerous==2.2.0
+ + janus==2.0.0
+ + joblib==1.5.3
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + jupyter-core==5.9.1
+ + loguru==0.7.3
+ + mediapy==1.2.7
+ + mujoco==3.11.0
+ + multiprocess==0.70.19
+ + narwhals==2.24.0
+ + nbformat==5.11.1
+ + numpy-stl==4.0.0
+ + open3d==0.19.0
+ + opencv-python==4.11.0.86
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.5
+ + platformdirs==4.11.3
+ + plotly==6.9.0
+ + pyarrow==25.0.1
+ + pyopengl==3.1.10
+ + pyquaternion==0.9.9
+ + python-utils==4.0.0
+ + referencing==0.37.0
+ + retrying==1.4.2
+ + rpds-py==2026.6.3
+ + scikit-learn==1.9.0
+ + smpl-sim==0.0.1 (from git+https://github.com/ZhengyiLuo/SMPLSim.git@b5c08720503ad5fff64050c4d289c42d947fcf8d)
+ + smplx==0.1.28 (from git+https://github.com/ZhengyiLuo/smplx.git@a5b8e4ac14f79f3f33fd2cf2a16e6f507146b813)
+ + threadpoolctl==3.6.0
+ + torch-einops-utils==0.1.20
+ + torchgeometry==0.1.2
+ + trl==0.28.0
+ + vector-quantize-pytorch==1.31.1
+ + vtk==9.7.0
+ + wandb==0.28.2
+ + xxhash==4.0.1
+ + zipp==4.1.0
+Using Python 3.11.14 environment at: /home/helloworld/bly/sonic-repro/.venv-sonic
+Audited 1 package in 5ms
+Using Python 3.11.14 environment at: /home/helloworld/bly/sonic-repro/.venv-sonic

@@ -1,0 +1,58 @@
+============================================================
+  GEAR-SONIC — Hugging Face Model Downloader
+  Repository : nvidia/GEAR-SONIC
+  Output dir : /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl
+  Mode       : default training checkpoint
+============================================================
+
+[Checkpoint]
+  Downloading sonic_release/last.pt ...
+  -> /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/sonic_release/last.pt
+  Downloading sonic_release/config.yaml ...
+  -> /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/sonic_release/config.yaml
+
+[SMPL Motion Data] Skipped (--no-smpl)
+
+============================================================
+  Done! Files saved under:
+  /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl
+============================================================
+============================================================
+  GEAR-SONIC — Hugging Face Model Downloader
+  Repository : nvidia/GEAR-SONIC
+  Output dir : /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl
+  Mode       : sample data (quick start)
+============================================================
+
+[Sample Data]
+  Downloading sample data ...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files:  17%|█▋        | 1/6 [00:04<00:21,  4.31s/it]Fetching 6 files:  50%|█████     | 3/6 [00:06<00:06,  2.07s/it]Fetching 6 files:  83%|████████▎ | 5/6 [00:06<00:01,  1.27s/it]Fetching 6 files: 100%|██████████| 6/6 [00:06<00:00,  1.06s/it]
+  -> /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/sample_data (6 PKL files)
+
+============================================================
+  Done! Files saved under:
+  /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl
+============================================================
+448M	sonic_release
+4.1M	sample_data
+GR00T-WholeBodyControl Environment Check
+Platform: Linux x86_64
+Python:   /home/helloworld/bly/sonic-repro/.venv-sonic/bin/python
+
+Basic:
+  [+] Python version: 3.11.14
+  [+] Git LFS: installed, files pulled
+  [+] CUDA: NVIDIA GeForce RTX 4090 (CUDA 12.8)
+  [+] PyTorch: 2.7.0+cu128
+  [+] Disk space: 110 GB free
+
+Training:
+  [+] Isaac Lab: 0.54.2
+  [+] gear_sonic: installed (0.1.0)
+  [+] hydra-core: 1.3.2
+  [+] trl: 0.28.0
+  [+] transformers: 4.57.6
+  [+] accelerate: 1.14.0
+  [+] wandb: 0.28.2
+
+All checks passed.

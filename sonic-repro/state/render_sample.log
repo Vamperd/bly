@@ -1,0 +1,124 @@
+[2026-08-18T08:22:33+08:00] GPU gate passed: 1572 MiB currently used.
+2026-08-18 08:22:34.827 | WARNING  | gear_sonic.utils.config_utils:register_rl_resolvers:20 - Warning: Some resolvers already registered: resolver 'eval' is already registered
+/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/eval_agent_trl.py:61: UserWarning: 
+The version_base parameter is not specified.
+Please specify a compatability version level, or None.
+Will assume defaults for version 1.1
+  @hydra.main(config_path="config", config_name="base_eval")
+/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/_internal/hydra.py:119: UserWarning: Future Hydra versions will no longer change working directory at job runtime by default.
+See https://hydra.cc/docs/1.2/upgrades/1.1_to_1.2/changes_to_job_working_dir/ for more information.
+  ret = run_job(
+[32m2026-08-18 08:22:34.981[0m | [1mINFO    [0m | [36m__main__[0m:[36mmain[0m:[36m90[0m - [1mLoading training config file from sonic_release/config.yaml[0m
+Setting seed: 0
+[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
+[INFO][AppLauncher]: Using device: cuda
+[INFO][AppLauncher]: Loading experience file: /home/helloworld/bly/sonic-repro/IsaacLab/apps/isaaclab.python.headless.rendering.kit
+Loading user config located at: '/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/user.config.json'
+[2026-08-18 08:22:35,413][asyncio][DEBUG] - Using selector: EpollSelector
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 595.84        | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 4090          | Yes: 0 |     | 24810   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | e86d2e29.. |
+|     |                                  |        |     |            | b         |            |
+|=============================================================================================|
+| OS: 24.04.3 LTS (Noble Numbat) ubuntu, Version: 24.04.3, Kernel: 7.0.0-28-generic
+| XServer Vendor: The X.Org Foundation, XServer Version: 12101011 (1.21.1.11)
+| Processor: AMD Ryzen 9 3900X 12-Core Processor
+| Cores: 12 | Logical Cores: 24
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64203 | Free Memory: 54861
+| Total Page/Swap (MB): 32767 | Free Page/Swap: 32767
+|---------------------------------------------------------------------------------------------|
+[2026-08-18 08:22:37,820][AutoNode][DEBUG] - Defining data type 'any' as 'Any'
+[2026-08-18 08:22:37,820][AutoNode][DEBUG] - Defining data type 'bool' as 'Bool' and array 'BoolArray
+[2026-08-18 08:22:37,821][AutoNode][DEBUG] - Defining data type 'bundle' as 'Bundle'
+[2026-08-18 08:22:37,821][AutoNode][DEBUG] - Defining data type 'colord[3]' as 'Color3d' and array 'Color3dArray
+[2026-08-18 08:22:37,821][AutoNode][DEBUG] - Defining data type 'colorf[3]' as 'Color3f' and array 'Color3fArray
+[2026-08-18 08:22:37,821][AutoNode][DEBUG] - Defining data type 'colorh[3]' as 'Color3h' and array 'Color3hArray
+[2026-08-18 08:22:37,821][AutoNode][DEBUG] - Defining data type 'colord[4]' as 'Color4d' and array 'Color4dArray
+[2026-08-18 08:22:37,821][AutoNode][DEBUG] - Defining data type 'colorf[4]' as 'Color4f' and array 'Color4fArray
+[2026-08-18 08:22:37,821][AutoNode][DEBUG] - Defining data type 'colorh[4]' as 'Color4h' and array 'Color4hArray
+[2026-08-18 08:22:37,821][AutoNode][DEBUG] - Defining data type 'double' as 'Double' and array 'DoubleArray
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'double[2]' as 'Double2' and array 'Double2Array
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'double[3]' as 'Double3' and array 'Double3Array
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'double[4]' as 'Double4' and array 'Double4Array
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'execution' as 'Execution'
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'float' as 'Float' and array 'FloatArray
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'float[2]' as 'Float2' and array 'Float2Array
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'float[3]' as 'Float3' and array 'Float3Array
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'float[4]' as 'Float4' and array 'Float4Array
+[2026-08-18 08:22:37,822][AutoNode][DEBUG] - Defining data type 'frame[4]' as 'Frame' and array 'FrameArray
+[2026-08-18 08:22:37,823][AutoNode][DEBUG] - Defining data type 'half' as 'Half' and array 'HalfArray
+[2026-08-18 08:22:37,823][AutoNode][DEBUG] - Defining data type 'half[2]' as 'Half2' and array 'Half2Array
+[2026-08-18 08:22:37,823][AutoNode][DEBUG] - Defining data type 'half[3]' as 'Half3' and array 'Half3Array
+[2026-08-18 08:22:37,823][AutoNode][DEBUG] - Defining data type 'half[4]' as 'Half4' and array 'Half4Array
+[2026-08-18 08:22:37,823][AutoNode][DEBUG] - Defining data type 'int' as 'Int' and array 'IntArray
+[2026-08-18 08:22:37,823][AutoNode][DEBUG] - Defining data type 'int[2]' as 'Int2' and array 'Int2Array
+[2026-08-18 08:22:37,823][AutoNode][DEBUG] - Defining data type 'int[3]' as 'Int3' and array 'Int3Array
+[2026-08-18 08:22:37,823][AutoNode][DEBUG] - Defining data type 'int[4]' as 'Int4' and array 'Int4Array
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'int64' as 'Int64' and array 'Int64Array
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'matrixd[2]' as 'Matrix2d' and array 'Matrix2dArray
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'matrixd[3]' as 'Matrix3d' and array 'Matrix3dArray
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'matrixd[4]' as 'Matrix4d' and array 'Matrix4dArray
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'normald[3]' as 'Normal3d' and array 'Normal3dArray
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'normalf[3]' as 'Normal3f' and array 'Normal3fArray
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'normalh[3]' as 'Normal3h' and array 'Normal3hArray
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'objectId' as 'ObjectId' and array 'ObjectIdArray
+[2026-08-18 08:22:37,824][AutoNode][DEBUG] - Defining data type 'path' as 'Path'
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'pointd[3]' as 'Point3d' and array 'Point3dArray
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'pointf[3]' as 'Point3f' and array 'Point3fArray
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'pointh[3]' as 'Point3h' and array 'Point3hArray
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'quatd[4]' as 'Quatd' and array 'QuatdArray
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'quatf[4]' as 'Quatf' and array 'QuatfArray
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'quath[4]' as 'Quath' and array 'QuathArray
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'string' as 'String'
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'target' as 'Target'
+[2026-08-18 08:22:37,825][AutoNode][DEBUG] - Defining data type 'texcoordd[2]' as 'TexCoord2d' and array 'TexCoord2dArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'texcoordf[2]' as 'TexCoord2f' and array 'TexCoord2fArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'texcoordh[2]' as 'TexCoord2h' and array 'TexCoord2hArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'texcoordd[3]' as 'TexCoord3d' and array 'TexCoord3dArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'texcoordf[3]' as 'TexCoord3f' and array 'TexCoord3fArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'texcoordh[3]' as 'TexCoord3h' and array 'TexCoord3hArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'timecode' as 'Timecode' and array 'TimecodeArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'token' as 'Token' and array 'TokenArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'uchar' as 'UChar' and array 'UCharArray
+[2026-08-18 08:22:37,826][AutoNode][DEBUG] - Defining data type 'uint' as 'UInt' and array 'UIntArray
+[2026-08-18 08:22:37,827][AutoNode][DEBUG] - Defining data type 'uint64' as 'UInt64' and array 'UInt64Array
+[2026-08-18 08:22:37,827][AutoNode][DEBUG] - Defining data type 'vectord[3]' as 'Vector3d' and array 'Vector3dArray
+[2026-08-18 08:22:37,827][AutoNode][DEBUG] - Defining data type 'vectorf[3]' as 'Vector3f' and array 'Vector3fArray
+[2026-08-18 08:22:37,827][AutoNode][DEBUG] - Defining data type 'vectorh[3]' as 'Vector3h' and array 'Vector3hArray
+[2026-08-18 08:22:41,249][h5py._conv][DEBUG] - Creating converter from 7 to 5
+[2026-08-18 08:22:41,249][h5py._conv][DEBUG] - Creating converter from 5 to 7
+[2026-08-18 08:22:41,250][h5py._conv][DEBUG] - Creating converter from 7 to 5
+[2026-08-18 08:22:41,250][h5py._conv][DEBUG] - Creating converter from 5 to 7
+[2026-08-18 08:22:41,322][matplotlib][DEBUG] - matplotlib data path: /home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/matplotlib/mpl-data
+[2026-08-18 08:22:41,330][matplotlib][DEBUG] - CONFIGDIR=/home/helloworld/.config/matplotlib
+[2026-08-18 08:22:41,331][matplotlib][DEBUG] - interactive is False
+[2026-08-18 08:22:41,331][matplotlib][DEBUG] - platform is linux
+2026-08-18T00:22:42Z [0ms] [Error] [carb.crashreporter-breakpad.plugin] [crash] Wrote dump file '/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/c14378d3-7d02-4170-3ce11bba-ed58ccb9.dmp'
+2026-08-18T00:22:42Z [0ms] [Error] [carb.crashreporter-breakpad.plugin] [crash]     dump file size is 3905688 bytes, file is readable.
+2026-08-18T00:22:42Z [1ms] [Fatal] [carb.crashreporter-breakpad.plugin] [crash] Crash detected in pid 513890 thread 513890
+2026-08-18T00:22:42Z [1ms] [Fatal] [carb.crashreporter-breakpad.plugin] [crash] Thread 513890 backtrace follows:
+2026-08-18T00:22:42Z [186ms] [Fatal] [carb.crashreporter-breakpad.plugin] 000: libc.so.6!__sigaction+0x50 (libc_sigaction.c:?)
+2026-08-18T00:22:42Z [192ms] [Fatal] [carb.crashreporter-breakpad.plugin] 001: librtx.scenedb.plugin.so!void std::vector<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>, std::allocator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> > >::_M_realloc_insert<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> >(__gnu_cxx::__normal_iterator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>*, std::vector<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>, std::allocator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> > > >, std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>&&)+0x123ef (??:?)
+2026-08-18T00:22:42Z [197ms] [Fatal] [carb.crashreporter-breakpad.plugin] 002: librtx.scenedb.plugin.so!void std::vector<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>, std::allocator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> > >::_M_realloc_insert<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> >(__gnu_cxx::__normal_iterator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>*, std::vector<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>, std::allocator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> > > >, std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>&&)+0x12766 (??:?)
+2026-08-18T00:22:42Z [202ms] [Fatal] [carb.crashreporter-breakpad.plugin] 003: librtx.scenedb.plugin.so!void std::vector<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>, std::allocator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> > >::_M_realloc_insert<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> >(__gnu_cxx::__normal_iterator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>*, std::vector<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>, std::allocator<std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int> > > >, std::tuple<char const*, float, float, unsigned int, unsigned int, unsigned int>&&)+0x14a14 (??:?)
+2026-08-18T00:22:42Z [207ms] [Fatal] [carb.crashreporter-breakpad.plugin] 004: librtx.scenedb.plugin.so!carbOnPluginStartup+0x3b4de (??:?)
+2026-08-18T00:22:42Z [212ms] [Fatal] [carb.crashreporter-breakpad.plugin] 005: librtx.scenedb.plugin.so!void std::vector<int, std::allocator<int> >::_M_realloc_insert<int>(__gnu_cxx::__normal_iterator<int*, std::vector<int, std::allocator<int> > >, int&&)+0x7ce1 (??:?)
+2026-08-18T00:22:42Z [220ms] [Fatal] [carb.crashreporter-breakpad.plugin] 006: libcarb.scenerenderer-rtx.plugin.so!std::unordered_map<unsigned int, unsigned int, std::hash<unsigned int>, std::equal_to<unsigned int>, std::allocator<std::pair<unsigned int const, unsigned int> > >::~unordered_map()+0x4655f (??:?)
+2026-08-18T00:22:42Z [228ms] [Fatal] [carb.crashreporter-breakpad.plugin] 007: libcarb.scenerenderer-rtx.plugin.so!std::unordered_map<unsigned int, unsigned int, std::hash<unsigned int>, std::equal_to<unsigned int>, std::allocator<std::pair<unsigned int const, unsigned int> > >::~unordered_map()+0x64486 (??:?)
+2026-08-18T00:22:42Z [234ms] [Fatal] [carb.crashreporter-breakpad.plugin] 008: libcarb.scenerenderer-rtx.plugin.so!carbOnPluginShutdown+0xe4b (??:?)
+2026-08-18T00:22:42Z [238ms] [Fatal] [carb.crashreporter-breakpad.plugin] 009: libomni.hydra.rtx.plugin.so!+0x4459
+2026-08-18T00:22:42Z [245ms] [Fatal] [carb.crashreporter-breakpad.plugin] 010: libomni.usd.so!void std::vector<unsigned long, std::allocator<unsigned long> >::_M_realloc_insert<unsigned long>(__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, unsigned long&&)+0x10da (??:?)
+2026-08-18T00:22:43Z [252ms] [Fatal] [carb.crashreporter-breakpad.plugin] 011: libomni.usd.so!void std::vector<unsigned long, std::allocator<unsigned long> >::_M_realloc_insert<unsigned long>(__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, unsigned long&&)+0x58ce (??:?)
+2026-08-18T00:22:43Z [259ms] [Fatal] [carb.crashreporter-breakpad.plugin] 012: libomni.usd.so!omni::usd::UsdManager::destroyHydraEngine(unsigned int)+0x3b7 (??:?)
+2026-08-18T00:22:43Z [265ms] [Fatal] [carb.crashreporter-breakpad.plugin] 013: libomni.usd.so!void std::vector<unsigned long, std::allocator<unsigned long> >::_M_realloc_insert<unsigned long>(__gnu_cxx::__normal_iterator<unsigned long*, std::vector<unsigned long, std::allocator<unsigned long> > >, unsigned long&&)+0x8807 (??:?)
+2026-08-18T00:22:43Z [272ms] [Fatal] [carb.crashreporter-breakpad.plugin] 014: libomni.usd.so!omni::usd::UsdManager::createHydraEngine(char const*, omni::usd::UsdContext*)+0x85 (??:?)
+./sonic_repro.sh: line 328: 513890 Segmentation fault      (core dumped) ( cd "$SONIC_DIR"; python gear_sonic/eval_agent_trl.py +checkpoint=sonic_release/last.pt +headless=True ++eval_callbacks=im_eval ++run_eval_loop=False "++num_envs=$RENDER_ENVS" ++manager_env.config.render_results=True "++manager_env.config.save_rendering_dir=$run_dir/renders" ++manager_env.config.env_spacing=10.0 "~manager_env/recorders=empty" "+manager_env/recorders=render" ++manager_env.observations.policy.enable_corruption=False ++manager_env.observations.tokenizer.enable_corruption=False "++manager_env.commands.motion.motion_lib_cfg.motion_file=sample_data/robot_filtered" "++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=sample_data/smpl_filtered" ) 2>&1
+     513891 Done                    | tee "$run_dir/render.log"

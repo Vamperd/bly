@@ -1,0 +1,293 @@
+2026-08-18 07:58:54.631 | WARNING  | gear_sonic.utils.config_utils:register_rl_resolvers:20 - Warning: Some resolvers already registered: resolver 'eval' is already registered
+/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/eval_agent_trl.py:61: UserWarning: 
+The version_base parameter is not specified.
+Please specify a compatability version level, or None.
+Will assume defaults for version 1.1
+  @hydra.main(config_path="config", config_name="base_eval")
+/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/_internal/hydra.py:119: UserWarning: Future Hydra versions will no longer change working directory at job runtime by default.
+See https://hydra.cc/docs/1.2/upgrades/1.1_to_1.2/changes_to_job_working_dir/ for more information.
+  ret = run_job(
+[32m2026-08-18 07:58:54.805[0m | [1mINFO    [0m | [36m__main__[0m:[36mmain[0m:[36m90[0m - [1mLoading training config file from sonic_release/config.yaml[0m
+Setting seed: 0
+[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
+[INFO][AppLauncher]: Using device: cuda
+[INFO][AppLauncher]: Loading experience file: /home/helloworld/bly/sonic-repro/IsaacLab/apps/isaaclab.python.headless.kit
+[2026-08-18 07:58:55,188][asyncio][DEBUG] - Using selector: EpollSelector
+[2026-08-18 07:58:57,602][h5py._conv][DEBUG] - Creating converter from 7 to 5
+[2026-08-18 07:58:57,603][h5py._conv][DEBUG] - Creating converter from 5 to 7
+[2026-08-18 07:58:57,603][h5py._conv][DEBUG] - Creating converter from 7 to 5
+[2026-08-18 07:58:57,603][h5py._conv][DEBUG] - Creating converter from 5 to 7
+[2026-08-18 07:58:57,679][matplotlib][DEBUG] - matplotlib data path: /home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/matplotlib/mpl-data
+[2026-08-18 07:58:57,687][matplotlib][DEBUG] - CONFIGDIR=/home/helloworld/.config/matplotlib
+[2026-08-18 07:58:57,688][matplotlib][DEBUG] - interactive is False
+[2026-08-18 07:58:57,688][matplotlib][DEBUG] - platform is linux
+[2026-08-18 07:58:58,525][filelock][DEBUG] - Attempting to release lock 131527236709328 on /tmp/isaaclab_app_launcher.lock
+[2026-08-18 07:58:58,525][filelock][DEBUG] - Lock 131527236709328 released on /tmp/isaaclab_app_launcher.lock
+[32m2026-08-18 07:59:02.162[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.torch_humanoid_batch[0m:[36m<module>[0m:[36m40[0m - [1mUsing Humanoid Batch[0m
+[DEBUG] Instantiated events: EventCfg(physics_material=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:randomize_rigid_body_material', params={'asset_cfg': SceneEntityCfg(name='robot', joint_names=None, joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names='.*', body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=False), 'static_friction_range': [0.3, 1.6], 'dynamic_friction_range': [0.3, 1.2], 'restitution_range': [0.0, 0.5], 'num_buckets': 64}, mode='startup', interval_range_s=None, is_global_time=False, min_step_count_between_reset=0), add_joint_default_pos=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:randomize_joint_default_pos', params={'asset_cfg': SceneEntityCfg(name='robot', joint_names=['.*'], joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names=None, body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=False), 'pos_distribution_params': [-0.01, 0.01], 'operation': 'add'}, mode='startup', interval_range_s=None, is_global_time=False, min_step_count_between_reset=0), add_hand_joint_default_pos=None, base_com=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:randomize_rigid_body_com', params={'asset_cfg': SceneEntityCfg(name='robot', joint_names=None, joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names='torso_link', body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=False), 'com_range': {'x': [-0.025, 0.025], 'y': [-0.05, 0.05], 'z': [-0.05, 0.05]}}, mode='startup', interval_range_s=None, is_global_time=False, min_step_count_between_reset=0), push_robot=None, randomize_rigid_body_mass=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:randomize_rigid_body_mass', params={'asset_cfg': SceneEntityCfg(name='robot', joint_names=None, joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names='.*wrist_yaw.*|torso_link', body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=False), 'mass_distribution_params': [0.8, 1.5], 'operation': 'scale'}, mode='startup', interval_range_s=None, is_global_time=False, min_step_count_between_reset=0))
+[DEBUG]   Event 'physics_material': EventTermCfg
+[DEBUG]   Event 'add_joint_default_pos': EventTermCfg
+[DEBUG]   Event 'base_com': EventTermCfg
+[DEBUG]   Event 'randomize_rigid_body_mass': EventTermCfg
+
+[36m======================================================================================[0m
+[36m[1m[INFO][IsaacLab]: Logging to file: /tmp/isaaclab/logs/isaaclab_2026-08-18_07-59-02.log[0m
+[36m======================================================================================[0m
+
+[33m07:59:02 [simulation_context.py] WARNING: The `enable_external_forces_every_iteration` parameter in the PhysxCfg is set to False. If you are experiencing noisy velocities, consider enabling this flag. You may need to slightly increase the number of velocity iterations (setting it to 1 or 2 rather than 0), together with this flag, to improve the accuracy of velocity updates.[0m
+[INFO]: Base environment:
+	Environment device    : cuda:0
+	Environment seed      : 0
+	Physics step-size     : 0.005
+	Rendering step-size   : 0.02
+	Environment step-size : 0.02
+[INFO] Generating terrains randomly took : 2.374695 seconds
+syncing registry: 'https://ovextensionsprod.blob.core.windows.net/exts/kit/prod/107/shared/v2' Downloading 495 files...
+syncing registry: 'https://ovextensionsprod.blob.core.windows.net/exts/kit/prod/sdk/107.3/69cbf6ad/v2' Downloading 287 files...
+[omni.kit.registry.nucleus] [tid: 131532689950528] downloading: 'http://d4i3qtqj3r0z5.cloudfront.net/omni.kit.pip_archive-d38fa9ecd1fb6df4.zip' -> '/tmp/tmp6ja2ne72/omni.kit.pip_archive-0.0.0+69cbf6ad.lx64.cp311.zip'...
+[omni.kit.registry.nucleus] [tid: 131532689950528] unpacking: /tmp/tmp6ja2ne72/omni.kit.pip_archive-0.0.0+69cbf6ad.lx64.cp311.zip -> /home/helloworld/.local/share/ov/data/exts/v2/omni.kit.pip_archive-d38fa9ecd1fb6df4
+[omni.kit.registry.nucleus] [tid: 131532689950528] creating a link: /home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.kit.pip_archive-0.0.0+69cbf6ad.lx64.cp311 -> /home/helloworld/.local/share/ov/data/exts/v2/omni.kit.pip_archive-d38fa9ecd1fb6df4
+[omni.kit.registry.nucleus]: pruning global extensions cache: /home/helloworld/.local/share/ov/data/exts/v2
+[omni.kit.registry.nucleus]: global extensions cache pruned: 0 links removed, 0 extensions removed
+[omni.kit.registry.nucleus] [tid: 131532689950528] downloading: 'https://d4i3qtqj3r0z5.cloudfront.net/isaacsim.asset.importer.urdf-2.4.31%2B107.3.3.lx64.r.cp311.zip' -> '/tmp/tmp6a39iwc3/isaacsim.asset.importer.urdf-2.4.31+107.3.3.lx64.r.cp311.zip'...
+[omni.kit.registry.nucleus] [tid: 131532689950528] unpacking: /tmp/tmp6a39iwc3/isaacsim.asset.importer.urdf-2.4.31+107.3.3.lx64.r.cp311.zip -> /home/helloworld/.local/share/ov/data/exts/v2/isaacsim.asset.importer.urdf-2.4.31+107.3.3.lx64.r.cp311
+[omni.kit.registry.nucleus] [tid: 131532689950528] creating a link: /home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/isaacsim.asset.importer.urdf-2.4.31+107.3.3.lx64.r.cp311 -> /home/helloworld/.local/share/ov/data/exts/v2/isaacsim.asset.importer.urdf-2.4.31+107.3.3.lx64.r.cp311
+[INFO]: Time taken for scene creation : 57.485578 seconds
+[INFO]: Scene manager:  <class InteractiveScene>
+	Number of environments: 32
+	Environment spacing   : 2.0
+	Source prim name      : /World/envs/env_0
+	Global prim paths     : []
+	Replicate physics     : True
+[INFO]: Starting the simulation. This may take a few seconds. Please wait...
+[INFO]: Time taken for simulation start : 7.953206 seconds
+[32m2026-08-18 08:00:07.978[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36m__init__[0m:[36m235[0m - [1mLoaded skeleton from gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml[0m
+[32m2026-08-18 08:00:07.979[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36m__init__[0m:[36m236[0m - [1mLoading motion data from sample_data/robot_filtered...[0m
+Loaded 2 motion files
+[32m2026-08-18 08:00:07.979[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_data[0m:[36m472[0m - [1mLoaded 2 motions[0m
+Loading Meshes ... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Loading Geoms... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+[32m2026-08-18 08:00:08.502[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1091[0m - [1mLoading 2 motions...[0m
+[32m2026-08-18 08:00:08.503[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1092[0m - [1mSampling motion: tensor([0, 1], device='cuda:0'), ....[0m
+[32m2026-08-18 08:00:08.503[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1093[0m - [1mCurrent motion keys: ['walk_forward_amateur_001__A001', 'walk_forward_amateur_001__A001_M'], ....[0m
+[32m2026-08-18 08:00:08.503[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1120[0m - [1mIncreased file descriptor limits from 2450/1048576 to 1048576/1048576[0m
+[32m2026-08-18 08:00:08.657[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1140[0m - [1mLoading motions with 1 jobs...[0m
+Loading motions... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Gathering results for non-navigation dataset... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
+Processing motions... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+[32m2026-08-18 08:00:09.176[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1577[0m - [1mLoaded 2 motions with a total length of 80.040s and 4004 frames.[0m
+[INFO] Command Manager:  <CommandManager> contains 1 active terms.
++----------------------------------+
+|       Active Command Terms       |
++-------+--------+-----------------+
+| Index | Name   |       Type      |
++-------+--------+-----------------+
+|   0   | motion | TrackingCommand |
++-------+--------+-----------------+
+
+[INFO] Event Manager:  <EventManager> contains 1 active terms.
++----------------------------------------+
+| Active Event Terms in Mode: 'startup'  |
++--------+-------------------------------+
+| Index  | Name                          |
++--------+-------------------------------+
+|   0    | physics_material              |
+|   1    | add_joint_default_pos         |
+|   2    | base_com                      |
+|   3    | randomize_rigid_body_mass     |
++--------+-------------------------------+
+
+[INFO] Recorder Manager:  <RecorderManager> contains 0 active terms.
++---------------------+
+| Active Recorder Terms |
++-----------+---------+
+|   Index   | Name    |
++-----------+---------+
++-----------+---------+
+
+[INFO] Action Manager:  <ActionManager> contains 1 active terms.
++------------------------------------+
+|  Active Action Terms (shape: 29)   |
++--------+-------------+-------------+
+| Index  | Name        |   Dimension |
++--------+-------------+-------------+
+|   0    | joint_pos   |          29 |
++--------+-------------+-------------+
+
+[INFO] Observation Manager: <ObservationManager> contains 3 groups.
++---------------------------------------------------------+
+| Active Observation Terms in Group: 'policy' (shape: (930,)) |
++-------------+---------------------------+---------------+
+|    Index    | Name                      |     Shape     |
++-------------+---------------------------+---------------+
+|      0      | base_ang_vel              |     (30,)     |
+|      1      | joint_pos                 |     (290,)    |
+|      2      | joint_vel                 |     (290,)    |
+|      3      | actions                   |     (290,)    |
+|      4      | gravity_dir               |     (30,)     |
++-------------+---------------------------+---------------+
++------------------------------------------------------------+
+| Active Observation Terms in Group: 'critic' (shape: (1645,)) |
++-----------+-----------------------------------+------------+
+|   Index   | Name                              |   Shape    |
++-----------+-----------------------------------+------------+
+|     0     | command_multi_future              |   (580,)   |
+|     1     | motion_anchor_pos_b               |    (3,)    |
+|     2     | motion_anchor_ori_b               |    (6,)    |
+|     3     | body_pos                          |   (42,)    |
+|     4     | body_ori                          |   (84,)    |
+|     5     | base_lin_vel                      |   (30,)    |
+|     6     | base_ang_vel                      |   (30,)    |
+|     7     | joint_pos                         |   (290,)   |
+|     8     | joint_vel                         |   (290,)   |
+|     9     | actions                           |   (290,)   |
++-----------+-----------------------------------+------------+
++-----------------------------------------------------------+
+|       Active Observation Terms in Group: 'tokenizer'      |
++-------+----------------------------------------+----------+
+| Index | Name                                   |  Shape   |
++-------+----------------------------------------+----------+
+|   0   | encoder_index                          |   (3,)   |
+|   1   | command_multi_future_nonflat           | (10, 58) |
+|   2   | command_z_multi_future_nonflat         | (10, 1)  |
+|   3   | command_z                              |   (1,)   |
+|   4   | motion_anchor_ori_b                    |   (6,)   |
+|   5   | motion_anchor_ori_b_mf_nonflat         | (10, 6)  |
+|   6   | command_multi_future_lower_body        |  (240,)  |
+|   7   | vr_3point_local_target                 |   (9,)   |
+|   8   | vr_3point_local_orn_target             |  (12,)   |
+|   9   | smpl_joints_multi_future_local_nonflat | (10, 72) |
+|   10  | smpl_root_ori_b_multi_future           | (10, 6)  |
+|   11  | joint_pos_multi_future_wrist_for_smpl  | (10, 6)  |
++-------+----------------------------------------+----------+
+
+[INFO] Termination Manager:  <TerminationManager> contains 5 active terms.
++------------------------------------+
+|      Active Termination Terms      |
++-------+-----------------+----------+
+| Index | Name            | Time Out |
++-------+-----------------+----------+
+|   0   | time_out        |   True   |
+|   1   | anchor_pos      |  False   |
+|   2   | anchor_ori_full |  False   |
+|   3   | ee_body_pos     |  False   |
+|   4   | foot_pos_xyz    |  False   |
++-------+-----------------+----------+
+
+[INFO] Reward Manager:  <RewardManager> contains 12 active terms.
++-----------------------------------------------+
+|              Active Reward Terms              |
++-------+----------------------------+----------+
+| Index | Name                       |   Weight |
++-------+----------------------------+----------+
+|   0   | tracking_anchor_pos        |      0.5 |
+|   1   | tracking_anchor_ori        |      0.5 |
+|   2   | tracking_relative_body_pos |      1.0 |
+|   3   | tracking_relative_body_ori |      1.0 |
+|   4   | tracking_body_linvel       |      1.0 |
+|   5   | tracking_body_angvel       |      1.0 |
+|   6   | action_rate_l2             |     -0.1 |
+|   7   | joint_limit                |    -10.0 |
+|   8   | undesired_contacts         |     -0.1 |
+|   9   | anti_shake_ang_vel         |   -0.005 |
+|   10  | tracking_vr_5point_local   |      2.0 |
+|   11  | feet_acc                   | -2.5e-06 |
++-------+----------------------------+----------+
+
+[INFO] Curriculum Manager:  <CurriculumManager> contains 0 active terms.
++----------------------+
+| Active Curriculum Terms |
++-----------+----------+
+|   Index   | Name     |
++-----------+----------+
++-----------+----------+
+
+[INFO]: Completed setting up the environment...
+Error executing job with overrides: ['+checkpoint=sonic_release/last.pt', '+headless=True', '++eval_callbacks=im_eval', '++run_eval_loop=False', '++num_envs=32', '++manager_env.observations.policy.enable_corruption=False', '++manager_env.observations.tokenizer.enable_corruption=False', '+manager_env/terminations=tracking/eval', '++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=512', '++manager_env.commands.motion.motion_lib_cfg.motion_file=sample_data/robot_filtered', '++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=sample_data/smpl_filtered']
+Loading user config located at: '/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/user.config.json'
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 595.84        | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 4090          | Yes: 0 |     | 24810   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | e86d2e29.. |
+|     |                                  |        |     |            | b         |            |
+|=============================================================================================|
+| OS: 24.04.3 LTS (Noble Numbat) ubuntu, Version: 24.04.3, Kernel: 7.0.0-28-generic
+| XServer Vendor: The X.Org Foundation, XServer Version: 12101011 (1.21.1.11)
+| Processor: AMD Ryzen 9 3900X 12-Core Processor
+| Cores: 12 | Logical Cores: 24
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64203 | Free Memory: 54663
+| Total Page/Swap (MB): 32767 | Free Page/Swap: 32767
+|---------------------------------------------------------------------------------------------|
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 595.84        | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 4090          | Yes: 0 |     | 24810   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | e86d2e29.. |
+|     |                                  |        |     |            | b         |            |
+|=============================================================================================|
+| OS: 24.04.3 LTS (Noble Numbat) ubuntu, Version: 24.04.3, Kernel: 7.0.0-28-generic
+| XServer Vendor: The X.Org Foundation, XServer Version: 12101011 (1.21.1.11)
+| Processor: AMD Ryzen 9 3900X 12-Core Processor
+| Cores: 12 | Logical Cores: 24
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64203 | Free Memory: 53663
+| Total Page/Swap (MB): 32767 | Free Page/Swap: 32767
+|---------------------------------------------------------------------------------------------|
+Traceback (most recent call last):
+  File "/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/eval_agent_trl.py", line 664, in <module>
+    main()
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/main.py", line 94, in decorated_main
+    _run_hydra(
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/_internal/utils.py", line 394, in _run_hydra
+    _run_app(
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/_internal/utils.py", line 457, in _run_app
+    run_and_report(
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/_internal/utils.py", line 223, in run_and_report
+    raise ex
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/_internal/utils.py", line 220, in run_and_report
+    return func()
+           ^^^^^^
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/_internal/utils.py", line 458, in <lambda>
+    lambda: hydra.run(
+            ^^^^^^^^^^
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/_internal/hydra.py", line 132, in run
+    _ = ret.return_value
+        ^^^^^^^^^^^^^^^^
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/core/utils.py", line 260, in return_value
+    raise self._return_value
+  File "/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/hydra/core/utils.py", line 186, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/eval_agent_trl.py", line 401, in main
+    policy = trl_utils_common.custom_instantiate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/trl/utils/common.py", line 116, in custom_instantiate
+    _type = import_type_from_str(d.pop("_target_"))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/trl/utils/common.py", line 16, in import_type_from_str
+    module = importlib.import_module(module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/helloworld/.local/share/uv/python/cpython-3.11.14-linux-x86_64-gnu/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+  File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+  File "/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/trl/modules/actor_critic_modules.py", line 7, in <module>
+    from tensordict import TensorDict
+ModuleNotFoundError: No module named 'tensordict'

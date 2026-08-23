@@ -1,0 +1,565 @@
+⚙️  Running in WANDB offline mode
+/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/transformers/hf_argparser.py:380: FutureWarning: The `PPOConfig` is now located in `trl.experimental`. Please update your imports to `from trl.experimental.ppo import PPOConfig`. The current import path will be removed and no longer supported in TRL 0.29. For more information, see https://github.com/huggingface/trl/issues/4223.
+  obj = dtype(**inputs)
+Setting seed: 0
+2026-08-18 08:25:51.037 | INFO     | __main__:main:213 - Saving wandb logs to /tmp
+wandb: WARNING `resume` will be ignored since W&B syncing is set to `offline`. Starting a new run with run id y50g6qm0.
+wandb: Tracking run with wandb version 0.28.2
+wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: Run data is saved locally in /tmp/wandb/offline-run-20260818_082551-y50g6qm0
+wandb: View this run in the terminal with `wandb leet`
+[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/helloworld/bly/sonic-repro/IsaacLab/apps/isaaclab.python.headless.kit
+Loading user config located at: '/home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/user.config.json'
+[2026-08-18 08:25:51,836][asyncio][DEBUG] - Using selector: EpollSelector
+[2026-08-18 08:25:54,003][h5py._conv][DEBUG] - Creating converter from 7 to 5
+[2026-08-18 08:25:54,003][h5py._conv][DEBUG] - Creating converter from 5 to 7
+[2026-08-18 08:25:54,004][h5py._conv][DEBUG] - Creating converter from 7 to 5
+[2026-08-18 08:25:54,004][h5py._conv][DEBUG] - Creating converter from 5 to 7
+[2026-08-18 08:25:54,080][matplotlib][DEBUG] - matplotlib data path: /home/helloworld/bly/sonic-repro/.venv-sonic/lib/python3.11/site-packages/matplotlib/mpl-data
+[2026-08-18 08:25:54,086][matplotlib][DEBUG] - CONFIGDIR=/home/helloworld/.config/matplotlib
+[2026-08-18 08:25:54,088][matplotlib][DEBUG] - interactive is False
+[2026-08-18 08:25:54,088][matplotlib][DEBUG] - platform is linux
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 595.84        | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 4090          | Yes: 0 |     | 24810   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | e86d2e29.. |
+|     |                                  |        |     |            | b         |            |
+|=============================================================================================|
+| OS: 24.04.3 LTS (Noble Numbat) ubuntu, Version: 24.04.3, Kernel: 7.0.0-28-generic
+| XServer Vendor: The X.Org Foundation, XServer Version: 12101011 (1.21.1.11)
+| Processor: AMD Ryzen 9 3900X 12-Core Processor
+| Cores: 12 | Logical Cores: 24
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64203 | Free Memory: 54393
+| Total Page/Swap (MB): 32767 | Free Page/Swap: 32767
+|---------------------------------------------------------------------------------------------|
+[2026-08-18 08:25:54,959][filelock][DEBUG] - Attempting to release lock 127674148816784 on /tmp/isaaclab_app_launcher.lock
+[2026-08-18 08:25:54,960][filelock][DEBUG] - Lock 127674148816784 released on /tmp/isaaclab_app_launcher.lock
+[32m2026-08-18 08:25:54.978[0m | [1mINFO    [0m | [36m__main__[0m:[36mmain[0m:[36m309[0m - [1mSaving config file to logs_rl/TRL_G1_Track/manager/universal_token/all_modes/sonic_release_test-20260818_082548[0m
+saved meta: {'wandb_run': 'y50g6qm0', 'max_train_steps': 5}
+[32m2026-08-18 08:25:56.513[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.torch_humanoid_batch[0m:[36m<module>[0m:[36m40[0m - [1mUsing Humanoid Batch[0m
+[DEBUG] Instantiated events: EventCfg(physics_material=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:randomize_rigid_body_material', params={'asset_cfg': SceneEntityCfg(name='robot', joint_names=None, joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names='.*', body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=False), 'static_friction_range': [0.3, 1.6], 'dynamic_friction_range': [0.3, 1.2], 'restitution_range': [0.0, 0.5], 'num_buckets': 64}, mode='startup', interval_range_s=None, is_global_time=False, min_step_count_between_reset=0), add_joint_default_pos=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:randomize_joint_default_pos', params={'asset_cfg': SceneEntityCfg(name='robot', joint_names=['.*'], joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names=None, body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=False), 'pos_distribution_params': [-0.01, 0.01], 'operation': 'add'}, mode='startup', interval_range_s=None, is_global_time=False, min_step_count_between_reset=0), add_hand_joint_default_pos=None, base_com=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:randomize_rigid_body_com', params={'asset_cfg': SceneEntityCfg(name='robot', joint_names=None, joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names='torso_link', body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=False), 'com_range': {'x': [-0.025, 0.025], 'y': [-0.05, 0.05], 'z': [-0.05, 0.05]}}, mode='startup', interval_range_s=None, is_global_time=False, min_step_count_between_reset=0), push_robot=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:push_by_setting_velocity', params={'velocity_range': {'x': [-0.5, 0.5], 'y': [-0.5, 0.5], 'z': [-0.2, 0.2], 'roll': [-0.52, 0.52], 'pitch': [-0.52, 0.52], 'yaw': [-0.78, 0.78]}}, mode='interval', interval_range_s=[4.0, 6.0], is_global_time=False, min_step_count_between_reset=0), randomize_rigid_body_mass=EventTermCfg(func='gear_sonic.envs.manager_env.mdp:randomize_rigid_body_mass', params={'asset_cfg': SceneEntityCfg(name='robot', joint_names=None, joint_ids=slice(None, None, None), fixed_tendon_names=None, fixed_tendon_ids=slice(None, None, None), body_names='.*wrist_yaw.*|torso_link', body_ids=slice(None, None, None), object_collection_names=None, object_collection_ids=slice(None, None, None), preserve_order=False), 'mass_distribution_params': [0.8, 2.5], 'operation': 'scale'}, mode='startup', interval_range_s=None, is_global_time=False, min_step_count_between_reset=0))
+[DEBUG]   Event 'physics_material': EventTermCfg
+[DEBUG]   Event 'add_joint_default_pos': EventTermCfg
+[DEBUG]   Event 'base_com': EventTermCfg
+[DEBUG]   Event 'push_robot': EventTermCfg
+[DEBUG]   Event 'randomize_rigid_body_mass': EventTermCfg
+
+[36m======================================================================================[0m
+[36m[1m[INFO][IsaacLab]: Logging to file: /tmp/isaaclab/logs/isaaclab_2026-08-18_08-25-56.log[0m
+[36m======================================================================================[0m
+
+[33m08:25:56 [simulation_context.py] WARNING: The `enable_external_forces_every_iteration` parameter in the PhysxCfg is set to False. If you are experiencing noisy velocities, consider enabling this flag. You may need to slightly increase the number of velocity iterations (setting it to 1 or 2 rather than 0), together with this flag, to improve the accuracy of velocity updates.[0m
+[INFO]: Base environment:
+	Environment device    : cuda:0
+	Environment seed      : 0
+	Physics step-size     : 0.005
+	Rendering step-size   : 0.02
+	Environment step-size : 0.02
+[INFO] Generating terrains randomly took : 2.396154 seconds
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 595.84        | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 4090          | Yes: 0 |     | 24810   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | e86d2e29.. |
+|     |                                  |        |     |            | b         |            |
+|=============================================================================================|
+| OS: 24.04.3 LTS (Noble Numbat) ubuntu, Version: 24.04.3, Kernel: 7.0.0-28-generic
+| XServer Vendor: The X.Org Foundation, XServer Version: 12101011 (1.21.1.11)
+| Processor: AMD Ryzen 9 3900X 12-Core Processor
+| Cores: 12 | Logical Cores: 24
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64203 | Free Memory: 53482
+| Total Page/Swap (MB): 32767 | Free Page/Swap: 32767
+|---------------------------------------------------------------------------------------------|
+[INFO]: Time taken for scene creation : 5.593965 seconds
+[INFO]: Scene manager:  <class InteractiveScene>
+	Number of environments: 8
+	Environment spacing   : 2.0
+	Source prim name      : /World/envs/env_0
+	Global prim paths     : []
+	Replicate physics     : True
+[INFO]: Starting the simulation. This may take a few seconds. Please wait...
+[INFO]: Time taken for simulation start : 1.919533 seconds
+[32m2026-08-18 08:26:04.396[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36m__init__[0m:[36m235[0m - [1mLoaded skeleton from gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml[0m
+[32m2026-08-18 08:26:04.397[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36m__init__[0m:[36m236[0m - [1mLoading motion data from sample_data/robot_filtered...[0m
+Loaded 2 motion files
+[32m2026-08-18 08:26:04.398[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_data[0m:[36m472[0m - [1mLoaded 2 motions[0m
+Loading Meshes ... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Loading Geoms... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+[32m2026-08-18 08:26:04.938[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1091[0m - [1mLoading 2 motions...[0m
+[32m2026-08-18 08:26:04.938[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1092[0m - [1mSampling motion: tensor([0, 1], device='cuda:0'), ....[0m
+[32m2026-08-18 08:26:04.938[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1093[0m - [1mCurrent motion keys: ['walk_forward_amateur_001__A001', 'walk_forward_amateur_001__A001_M'], ....[0m
+[32m2026-08-18 08:26:04.939[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1120[0m - [1mIncreased file descriptor limits from 2450/1048576 to 1048576/1048576[0m
+[32m2026-08-18 08:26:05.069[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1140[0m - [1mLoading motions with 1 jobs...[0m
+Loading motions... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Gathering results for non-navigation dataset... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
+Processing motions... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+[32m2026-08-18 08:26:05.570[0m | [1mINFO    [0m | [36mgear_sonic.utils.motion_lib.motion_lib_base[0m:[36mload_motions[0m:[36m1577[0m - [1mLoaded 2 motions with a total length of 80.040s and 4004 frames.[0m
+[INFO] Command Manager:  <CommandManager> contains 1 active terms.
++----------------------------------+
+|       Active Command Terms       |
++-------+--------+-----------------+
+| Index | Name   |       Type      |
++-------+--------+-----------------+
+|   0   | motion | TrackingCommand |
++-------+--------+-----------------+
+
+[INFO] Event Manager:  <EventManager> contains 2 active terms.
++----------------------------------------+
+| Active Event Terms in Mode: 'startup'  |
++--------+-------------------------------+
+| Index  | Name                          |
++--------+-------------------------------+
+|   0    | physics_material              |
+|   1    | add_joint_default_pos         |
+|   2    | base_com                      |
+|   3    | randomize_rigid_body_mass     |
++--------+-------------------------------+
++----------------------------------------------+
+|    Active Event Terms in Mode: 'interval'    |
++-------+------------+-------------------------+
+| Index | Name       | Interval time range (s) |
++-------+------------+-------------------------+
+|   0   | push_robot |        [4.0, 6.0]       |
++-------+------------+-------------------------+
+
+[INFO] Recorder Manager:  <RecorderManager> contains 0 active terms.
++---------------------+
+| Active Recorder Terms |
++-----------+---------+
+|   Index   | Name    |
++-----------+---------+
++-----------+---------+
+
+[INFO] Action Manager:  <ActionManager> contains 1 active terms.
++------------------------------------+
+|  Active Action Terms (shape: 29)   |
++--------+-------------+-------------+
+| Index  | Name        |   Dimension |
++--------+-------------+-------------+
+|   0    | joint_pos   |          29 |
++--------+-------------+-------------+
+
+[INFO] Observation Manager: <ObservationManager> contains 3 groups.
++---------------------------------------------------------+
+| Active Observation Terms in Group: 'policy' (shape: (930,)) |
++-------------+---------------------------+---------------+
+|    Index    | Name                      |     Shape     |
++-------------+---------------------------+---------------+
+|      0      | base_ang_vel              |     (30,)     |
+|      1      | joint_pos                 |     (290,)    |
+|      2      | joint_vel                 |     (290,)    |
+|      3      | actions                   |     (290,)    |
+|      4      | gravity_dir               |     (30,)     |
++-------------+---------------------------+---------------+
++------------------------------------------------------------+
+| Active Observation Terms in Group: 'critic' (shape: (1645,)) |
++-----------+-----------------------------------+------------+
+|   Index   | Name                              |   Shape    |
++-----------+-----------------------------------+------------+
+|     0     | command_multi_future              |   (580,)   |
+|     1     | motion_anchor_pos_b               |    (3,)    |
+|     2     | motion_anchor_ori_b               |    (6,)    |
+|     3     | body_pos                          |   (42,)    |
+|     4     | body_ori                          |   (84,)    |
+|     5     | base_lin_vel                      |   (30,)    |
+|     6     | base_ang_vel                      |   (30,)    |
+|     7     | joint_pos                         |   (290,)   |
+|     8     | joint_vel                         |   (290,)   |
+|     9     | actions                           |   (290,)   |
++-----------+-----------------------------------+------------+
++-----------------------------------------------------------+
+|       Active Observation Terms in Group: 'tokenizer'      |
++-------+----------------------------------------+----------+
+| Index | Name                                   |  Shape   |
++-------+----------------------------------------+----------+
+|   0   | encoder_index                          |   (3,)   |
+|   1   | command_multi_future_nonflat           | (10, 58) |
+|   2   | command_z_multi_future_nonflat         | (10, 1)  |
+|   3   | command_z                              |   (1,)   |
+|   4   | motion_anchor_ori_b                    |   (6,)   |
+|   5   | motion_anchor_ori_b_mf_nonflat         | (10, 6)  |
+|   6   | command_multi_future_lower_body        |  (240,)  |
+|   7   | vr_3point_local_target                 |   (9,)   |
+|   8   | vr_3point_local_orn_target             |  (12,)   |
+|   9   | smpl_joints_multi_future_local_nonflat | (10, 72) |
+|   10  | smpl_root_ori_b_multi_future           | (10, 6)  |
+|   11  | joint_pos_multi_future_wrist_for_smpl  | (10, 6)  |
++-------+----------------------------------------+----------+
+
+[INFO] Termination Manager:  <TerminationManager> contains 5 active terms.
++------------------------------------+
+|      Active Termination Terms      |
++-------+-----------------+----------+
+| Index | Name            | Time Out |
++-------+-----------------+----------+
+|   0   | time_out        |   True   |
+|   1   | anchor_pos      |  False   |
+|   2   | anchor_ori_full |  False   |
+|   3   | ee_body_pos     |  False   |
+|   4   | foot_pos_xyz    |  False   |
++-------+-----------------+----------+
+
+[INFO] Reward Manager:  <RewardManager> contains 12 active terms.
++-----------------------------------------------+
+|              Active Reward Terms              |
++-------+----------------------------+----------+
+| Index | Name                       |   Weight |
++-------+----------------------------+----------+
+|   0   | tracking_anchor_pos        |      0.5 |
+|   1   | tracking_anchor_ori        |      0.5 |
+|   2   | tracking_relative_body_pos |      1.0 |
+|   3   | tracking_relative_body_ori |      1.0 |
+|   4   | tracking_body_linvel       |      1.0 |
+|   5   | tracking_body_angvel       |      1.0 |
+|   6   | action_rate_l2             |     -0.1 |
+|   7   | joint_limit                |    -10.0 |
+|   8   | undesired_contacts         |     -0.1 |
+|   9   | anti_shake_ang_vel         |   -0.005 |
+|   10  | tracking_vr_5point_local   |      2.0 |
+|   11  | feet_acc                   | -2.5e-06 |
++-------+----------------------------+----------+
+
+[INFO] Curriculum Manager:  <CurriculumManager> contains 0 active terms.
++----------------------+
+| Active Curriculum Terms |
++-----------+----------+
+|   Index   | Name     |
++-----------+----------+
++-----------+----------+
+
+[INFO]: Completed setting up the environment...
+[32m2026-08-18 08:26:07.859[0m | [1mINFO    [0m | [36mgear_sonic.trl.modules.universal_token_modules[0m:[36m__init__[0m:[36m250[0m - [1mMotion Encoder and Quantizer initialized with embedding dim: 64 (num_tokens=2, token_dim=32)[0m
+[32m2026-08-18 08:26:07.882[0m | [1mINFO    [0m | [36mgear_sonic.trl.modules.universal_token_modules[0m:[36m__init__[0m:[36m319[0m - [1mInitialized g1 encoder with input features: ['command_multi_future_nonflat', 'motion_anchor_ori_b_mf_nonflat'][0m
+[32m2026-08-18 08:26:07.902[0m | [1mINFO    [0m | [36mgear_sonic.trl.modules.universal_token_modules[0m:[36m__init__[0m:[36m319[0m - [1mInitialized teleop encoder with input features: ['command_multi_future_lower_body', 'vr_3point_local_target', 'vr_3point_local_orn_target', 'motion_anchor_ori_b'][0m
+[32m2026-08-18 08:26:07.929[0m | [1mINFO    [0m | [36mgear_sonic.trl.modules.universal_token_modules[0m:[36m__init__[0m:[36m319[0m - [1mInitialized smpl encoder with input features: ['smpl_joints_multi_future_local_nonflat', 'smpl_root_ori_b_multi_future', 'joint_pos_multi_future_wrist_for_smpl'][0m
+[32m2026-08-18 08:26:07.984[0m | [1mINFO    [0m | [36mgear_sonic.trl.modules.universal_token_modules[0m:[36m__init__[0m:[36m409[0m - [1mInitialized g1_dyn decoder with input features: ['token_flattened', 'proprioception'] and output features: ['action'][0m
+[32m2026-08-18 08:26:08.008[0m | [1mINFO    [0m | [36mgear_sonic.trl.modules.universal_token_modules[0m:[36m__init__[0m:[36m409[0m - [1mInitialized g1_kin decoder with input features: ['token'] and output features: ['command_multi_future_nonflat', 'motion_anchor_ori_b_mf_nonflat'][0m
+RunningMeanStd:  (1645,)
+===training policy===
+wandb: WARNING Step cannot be set when using tensorboard syncing. Please use `run.define_metric(...)` to define a custom metric to log your step values.
+╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                         [1m Learning iteration 1  [0m                        │
+│                                                                              │
+│                        Computation: 63 steps/s (Collection: 2.184s, Learning │
+│ 0.838s)                                                                      │
+│              Mean action noise std: 0.05                                     │
+│                       Mean entropy: -45.75515                                │
+│                       Mean rewards: 0.75546                                  │
+│                        Mean length: 10.57143                                 │
+│ Env/Episode_Reward/tracking_anchor_pos: 0.0072                               │
+│ Env/Episode_Reward/tracking_anchor_ori: 0.0060                               │
+│ Env/Episode_Reward/tracking_relative_body_pos: 0.0148                        │
+│ Env/Episode_Reward/tracking_relative_body_ori: 0.0064                        │
+│ Env/Episode_Reward/tracking_body_linvel: 0.0085                              │
+│ Env/Episode_Reward/tracking_body_angvel: 0.0064                              │
+│  Env/Episode_Reward/action_rate_l2: -0.0002                                  │
+│     Env/Episode_Reward/joint_limit: -0.0017                                  │
+│ Env/Episode_Reward/undesired_contacts: -0.0006                               │
+│ Env/Episode_Reward/anti_shake_ang_vel: -0.0007                               │
+│ Env/Episode_Reward/tracking_vr_5point_local: 0.0192                          │
+│        Env/Episode_Reward/feet_acc: -0.0065                                  │
+│ Env/Metrics/motion/error_anchor_pos: 0.0934                                  │
+│ Env/Metrics/motion/error_anchor_rot: 0.1890                                  │
+│ Env/Metrics/motion/error_anchor_lin_vel: 0.4252                              │
+│ Env/Metrics/motion/error_anchor_ang_vel: 1.1374                              │
+│  Env/Metrics/motion/error_body_pos: 0.0758                                   │
+│  Env/Metrics/motion/error_body_rot: 0.3253                                   │
+│ Env/Metrics/motion/error_joint_pos: 0.1588                                   │
+│ Env/Metrics/motion/error_joint_vel: 0.7475                                   │
+│   Env/Episode_Termination/time_out: 0.0000                                   │
+│ Env/Episode_Termination/anchor_pos: 0.0000                                   │
+│ Env/Episode_Termination/anchor_ori_full: 0.0781                              │
+│ Env/Episode_Termination/ee_body_pos: 0.1042                                  │
+│ Env/Episode_Termination/foot_pos_xyz: 0.5156                                 │
+│      Env/adp_samp/num_episodes_min: 1.0000                                   │
+│      Env/adp_samp/num_episodes_max: 1.2350                                   │
+│     Env/adp_samp/num_episodes_mean: 1.0244                                   │
+│      Env/adp_samp/num_failures_min: 1.0000                                   │
+│      Env/adp_samp/num_failures_max: 2.2500                                   │
+│     Env/adp_samp/num_failures_mean: 1.0742                                   │
+│      Env/adp_samp/failure_rate_min: 1.0000                                   │
+│      Env/adp_samp/failure_rate_max: 1.0000                                   │
+│     Env/adp_samp/failure_rate_mean: 1.0000                                   │
+│              Env/adp_samp/prob_max: 0.0125                                   │
+│              Env/adp_samp/prob_min: 0.0005                                   │
+│             Env/adp_samp/prob_mean: 0.0122                                   │
+│ Env/adp_samp/prob_max_over_uniform: 1.0240                                   │
+│    Env/adp_samp/effective_num_bins: 80.1569                                  │
+│ Env/adp_samp/num_concentrated_bins: 0.0000                                   │
+│ Env/adp_samp/episodes_max_over_mean: 1.2043                                  │
+│ Env/Metrics/motion/error_body_lin_vel: 0.7152                                │
+│ Env/Metrics/motion/error_body_ang_vel: 2.4132                                │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                     Total episodes: 8                                        │
+│                    Total timesteps: 192                                      │
+│                     Iteration time: 3.02s                                    │
+│                         Total time: 3.02s                                    │
+│                                ETA: 12.1s                                    │
+│ Logging Directory:                                                           │
+│ logs_rl/TRL_G1_Track/manager/universal_token/all_modes/sonic_release_test-20 │
+│ 260818_082548                                                                │
+╰──────────────────────────────────────────────────────────────────────────────╯╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                         [1m Learning iteration 2  [0m                        │
+│                                                                              │
+│                        Computation: 98 steps/s (Collection: 1.315s, Learning │
+│ 0.631s)                                                                      │
+│              Mean action noise std: 0.05                                     │
+│                       Mean entropy: -45.77079                                │
+│                       Mean rewards: 0.80757                                  │
+│                        Mean length: 10.34375                                 │
+│ Env/Episode_Reward/tracking_anchor_pos: 0.0086                               │
+│ Env/Episode_Reward/tracking_anchor_ori: 0.0071                               │
+│ Env/Episode_Reward/tracking_relative_body_pos: 0.0174                        │
+│ Env/Episode_Reward/tracking_relative_body_ori: 0.0082                        │
+│ Env/Episode_Reward/tracking_body_linvel: 0.0110                              │
+│ Env/Episode_Reward/tracking_body_angvel: 0.0079                              │
+│  Env/Episode_Reward/action_rate_l2: -0.0003                                  │
+│     Env/Episode_Reward/joint_limit: -0.0003                                  │
+│ Env/Episode_Reward/undesired_contacts: -0.0007                               │
+│ Env/Episode_Reward/anti_shake_ang_vel: -0.0010                               │
+│ Env/Episode_Reward/tracking_vr_5point_local: 0.0244                          │
+│        Env/Episode_Reward/feet_acc: -0.0035                                  │
+│ Env/Metrics/motion/error_anchor_pos: 0.1103                                  │
+│ Env/Metrics/motion/error_anchor_rot: 0.2376                                  │
+│ Env/Metrics/motion/error_anchor_lin_vel: 0.6225                              │
+│ Env/Metrics/motion/error_anchor_ang_vel: 1.4494                              │
+│  Env/Metrics/motion/error_body_pos: 0.0940                                   │
+│  Env/Metrics/motion/error_body_rot: 0.3953                                   │
+│ Env/Metrics/motion/error_joint_pos: 0.1978                                   │
+│ Env/Metrics/motion/error_joint_vel: 1.1445                                   │
+│ Env/Metrics/motion/error_body_lin_vel: 0.7142                                │
+│ Env/Metrics/motion/error_body_ang_vel: 2.4284                                │
+│   Env/Episode_Termination/time_out: 0.0000                                   │
+│ Env/Episode_Termination/anchor_pos: 0.0000                                   │
+│ Env/Episode_Termination/anchor_ori_full: 0.0052                              │
+│ Env/Episode_Termination/ee_body_pos: 0.3229                                  │
+│ Env/Episode_Termination/foot_pos_xyz: 0.6979                                 │
+│      Env/adp_samp/num_episodes_min: 1.0000                                   │
+│      Env/adp_samp/num_episodes_max: 1.4742                                   │
+│     Env/adp_samp/num_episodes_mean: 1.0712                                   │
+│      Env/adp_samp/num_failures_min: 1.0000                                   │
+│      Env/adp_samp/num_failures_max: 3.5417                                   │
+│     Env/adp_samp/num_failures_mean: 1.2886                                   │
+│      Env/adp_samp/failure_rate_min: 0.7576                                   │
+│      Env/adp_samp/failure_rate_max: 2.1739                                   │
+│     Env/adp_samp/failure_rate_mean: 1.1068                                   │
+│              Env/adp_samp/prob_max: 0.0233                                   │
+│              Env/adp_samp/prob_min: 0.0005                                   │
+│             Env/adp_samp/prob_mean: 0.0122                                   │
+│ Env/adp_samp/prob_max_over_uniform: 1.9085                                   │
+│    Env/adp_samp/effective_num_bins: 75.5204                                  │
+│ Env/adp_samp/num_concentrated_bins: 0.0000                                   │
+│ Env/adp_samp/episodes_max_over_mean: 1.3756                                  │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                     Total episodes: 16                                       │
+│                    Total timesteps: 384                                      │
+│                     Iteration time: 1.95s                                    │
+│                         Total time: 4.97s                                    │
+│                                ETA: 7.5s                                     │
+│ Logging Directory:                                                           │
+│ logs_rl/TRL_G1_Track/manager/universal_token/all_modes/sonic_release_test-20 │
+│ 260818_082548                                                                │
+╰──────────────────────────────────────────────────────────────────────────────╯╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                         [1m Learning iteration 3  [0m                        │
+│                                                                              │
+│                        Computation: 96 steps/s (Collection: 1.345s, Learning │
+│ 0.645s)                                                                      │
+│              Mean action noise std: 0.05                                     │
+│                       Mean entropy: -45.77349                                │
+│                       Mean rewards: 0.78786                                  │
+│                        Mean length: 11.06522                                 │
+│ Env/Episode_Reward/tracking_anchor_pos: 0.0114                               │
+│ Env/Episode_Reward/tracking_anchor_ori: 0.0102                               │
+│ Env/Episode_Reward/tracking_relative_body_pos: 0.0238                        │
+│ Env/Episode_Reward/tracking_relative_body_ori: 0.0096                        │
+│ Env/Episode_Reward/tracking_body_linvel: 0.0165                              │
+│ Env/Episode_Reward/tracking_body_angvel: 0.0127                              │
+│  Env/Episode_Reward/action_rate_l2: -0.0003                                  │
+│     Env/Episode_Reward/joint_limit: -0.0020                                  │
+│ Env/Episode_Reward/undesired_contacts: -0.0014                               │
+│ Env/Episode_Reward/anti_shake_ang_vel: -0.0011                               │
+│ Env/Episode_Reward/tracking_vr_5point_local: 0.0278                          │
+│        Env/Episode_Reward/feet_acc: -0.0336                                  │
+│ Env/Metrics/motion/error_anchor_pos: 0.1365                                  │
+│ Env/Metrics/motion/error_anchor_rot: 0.2661                                  │
+│ Env/Metrics/motion/error_anchor_lin_vel: 0.6872                              │
+│ Env/Metrics/motion/error_anchor_ang_vel: 1.4928                              │
+│  Env/Metrics/motion/error_body_pos: 0.1041                                   │
+│  Env/Metrics/motion/error_body_rot: 0.4316                                   │
+│ Env/Metrics/motion/error_joint_pos: 0.2158                                   │
+│ Env/Metrics/motion/error_joint_vel: 0.9928                                   │
+│ Env/Metrics/motion/error_body_lin_vel: 0.7643                                │
+│ Env/Metrics/motion/error_body_ang_vel: 2.2653                                │
+│   Env/Episode_Termination/time_out: 0.0000                                   │
+│ Env/Episode_Termination/anchor_pos: 0.0000                                   │
+│ Env/Episode_Termination/anchor_ori_full: 0.0417                              │
+│ Env/Episode_Termination/ee_body_pos: 0.4844                                  │
+│ Env/Episode_Termination/foot_pos_xyz: 0.5573                                 │
+│      Env/adp_samp/num_episodes_min: 1.0000                                   │
+│      Env/adp_samp/num_episodes_max: 1.6100                                   │
+│     Env/adp_samp/num_episodes_mean: 1.1180                                   │
+│      Env/adp_samp/num_failures_min: 1.0000                                   │
+│      Env/adp_samp/num_failures_max: 4.0000                                   │
+│     Env/adp_samp/num_failures_mean: 1.4802                                   │
+│      Env/adp_samp/failure_rate_min: 0.7813                                   │
+│      Env/adp_samp/failure_rate_max: 2.5316                                   │
+│     Env/adp_samp/failure_rate_mean: 1.2425                                   │
+│              Env/adp_samp/prob_max: 0.0240                                   │
+│              Env/adp_samp/prob_min: 0.0004                                   │
+│             Env/adp_samp/prob_mean: 0.0122                                   │
+│ Env/adp_samp/prob_max_over_uniform: 1.9718                                   │
+│    Env/adp_samp/effective_num_bins: 74.0572                                  │
+│ Env/adp_samp/num_concentrated_bins: 0.0000                                   │
+│ Env/adp_samp/episodes_max_over_mean: 1.4398                                  │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                     Total episodes: 24                                       │
+│                    Total timesteps: 576                                      │
+│                     Iteration time: 1.99s                                    │
+│                         Total time: 6.96s                                    │
+│                                ETA: 4.6s                                     │
+│ Logging Directory:                                                           │
+│ logs_rl/TRL_G1_Track/manager/universal_token/all_modes/sonic_release_test-20 │
+│ 260818_082548                                                                │
+╰──────────────────────────────────────────────────────────────────────────────╯╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                         [1m Learning iteration 4  [0m                        │
+│                                                                              │
+│                        Computation: 100 steps/s (Collection: 1.284s,         │
+│ Learning 0.629s)                                                             │
+│              Mean action noise std: 0.05                                     │
+│                       Mean entropy: -45.76712                                │
+│                       Mean rewards: 0.82940                                  │
+│                        Mean length: 11.32258                                 │
+│ Env/Episode_Reward/tracking_anchor_pos: 0.0106                               │
+│ Env/Episode_Reward/tracking_anchor_ori: 0.0088                               │
+│ Env/Episode_Reward/tracking_relative_body_pos: 0.0218                        │
+│ Env/Episode_Reward/tracking_relative_body_ori: 0.0096                        │
+│ Env/Episode_Reward/tracking_body_linvel: 0.0148                              │
+│ Env/Episode_Reward/tracking_body_angvel: 0.0114                              │
+│  Env/Episode_Reward/action_rate_l2: -0.0003                                  │
+│     Env/Episode_Reward/joint_limit: -0.0019                                  │
+│ Env/Episode_Reward/undesired_contacts: -0.0016                               │
+│ Env/Episode_Reward/anti_shake_ang_vel: -0.0009                               │
+│ Env/Episode_Reward/tracking_vr_5point_local: 0.0273                          │
+│        Env/Episode_Reward/feet_acc: -0.0351                                  │
+│ Env/Metrics/motion/error_anchor_pos: 0.1225                                  │
+│ Env/Metrics/motion/error_anchor_rot: 0.2509                                  │
+│ Env/Metrics/motion/error_anchor_lin_vel: 0.6370                              │
+│ Env/Metrics/motion/error_anchor_ang_vel: 1.5164                              │
+│  Env/Metrics/motion/error_body_pos: 0.1074                                   │
+│  Env/Metrics/motion/error_body_rot: 0.4209                                   │
+│ Env/Metrics/motion/error_joint_pos: 0.2141                                   │
+│ Env/Metrics/motion/error_joint_vel: 1.1384                                   │
+│ Env/Metrics/motion/error_body_lin_vel: 0.7615                                │
+│ Env/Metrics/motion/error_body_ang_vel: 2.3131                                │
+│   Env/Episode_Termination/time_out: 0.0000                                   │
+│ Env/Episode_Termination/anchor_pos: 0.0000                                   │
+│ Env/Episode_Termination/anchor_ori_full: 0.1510                              │
+│ Env/Episode_Termination/ee_body_pos: 0.4635                                  │
+│ Env/Episode_Termination/foot_pos_xyz: 0.5365                                 │
+│      Env/adp_samp/num_episodes_min: 1.0000                                   │
+│      Env/adp_samp/num_episodes_max: 1.9025                                   │
+│     Env/adp_samp/num_episodes_mean: 1.1649                                   │
+│      Env/adp_samp/num_failures_min: 1.0000                                   │
+│      Env/adp_samp/num_failures_max: 4.7083                                   │
+│     Env/adp_samp/num_failures_mean: 1.6682                                   │
+│      Env/adp_samp/failure_rate_min: 0.7353                                   │
+│      Env/adp_samp/failure_rate_max: 2.6316                                   │
+│     Env/adp_samp/failure_rate_mean: 1.3331                                   │
+│              Env/adp_samp/prob_max: 0.0233                                   │
+│              Env/adp_samp/prob_min: 0.0004                                   │
+│             Env/adp_samp/prob_mean: 0.0122                                   │
+│ Env/adp_samp/prob_max_over_uniform: 1.9114                                   │
+│    Env/adp_samp/effective_num_bins: 73.6378                                  │
+│ Env/adp_samp/num_concentrated_bins: 0.0000                                   │
+│ Env/adp_samp/episodes_max_over_mean: 1.6330                                  │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                     Total episodes: 32                                       │
+│                    Total timesteps: 768                                      │
+│                     Iteration time: 1.91s                                    │
+│                         Total time: 8.87s                                    │
+│                                ETA: 2.2s                                     │
+│ Logging Directory:                                                           │
+│ logs_rl/TRL_G1_Track/manager/universal_token/all_modes/sonic_release_test-20 │
+│ 260818_082548                                                                │
+╰──────────────────────────────────────────────────────────────────────────────╯╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                         [1m Learning iteration 5  [0m                        │
+│                                                                              │
+│                        Computation: 100 steps/s (Collection: 1.293s,         │
+│ Learning 0.609s)                                                             │
+│              Mean action noise std: 0.05                                     │
+│                       Mean entropy: -45.75035                                │
+│                       Mean rewards: 0.83912                                  │
+│                        Mean length: 11.22500                                 │
+│ Env/Episode_Reward/tracking_anchor_pos: 0.0101                               │
+│ Env/Episode_Reward/tracking_anchor_ori: 0.0089                               │
+│ Env/Episode_Reward/tracking_relative_body_pos: 0.0209                        │
+│ Env/Episode_Reward/tracking_relative_body_ori: 0.0089                        │
+│ Env/Episode_Reward/tracking_body_linvel: 0.0137                              │
+│ Env/Episode_Reward/tracking_body_angvel: 0.0105                              │
+│  Env/Episode_Reward/action_rate_l2: -0.0003                                  │
+│     Env/Episode_Reward/joint_limit: -0.0004                                  │
+│ Env/Episode_Reward/undesired_contacts: -0.0011                               │
+│ Env/Episode_Reward/anti_shake_ang_vel: -0.0010                               │
+│ Env/Episode_Reward/tracking_vr_5point_local: 0.0304                          │
+│        Env/Episode_Reward/feet_acc: -0.0123                                  │
+│ Env/Metrics/motion/error_anchor_pos: 0.1130                                  │
+│ Env/Metrics/motion/error_anchor_rot: 0.2296                                  │
+│ Env/Metrics/motion/error_anchor_lin_vel: 0.5736                              │
+│ Env/Metrics/motion/error_anchor_ang_vel: 1.3217                              │
+│  Env/Metrics/motion/error_body_pos: 0.0942                                   │
+│  Env/Metrics/motion/error_body_rot: 0.4286                                   │
+│ Env/Metrics/motion/error_joint_pos: 0.2200                                   │
+│ Env/Metrics/motion/error_joint_vel: 1.0212                                   │
+│ Env/Metrics/motion/error_body_lin_vel: 0.7334                                │
+│ Env/Metrics/motion/error_body_ang_vel: 2.1542                                │
+│   Env/Episode_Termination/time_out: 0.0000                                   │
+│ Env/Episode_Termination/anchor_pos: 0.0000                                   │
+│ Env/Episode_Termination/anchor_ori_full: 0.1771                              │
+│ Env/Episode_Termination/ee_body_pos: 0.4844                                  │
+│ Env/Episode_Termination/foot_pos_xyz: 0.4688                                 │
+│      Env/adp_samp/num_episodes_min: 1.0000                                   │
+│      Env/adp_samp/num_episodes_max: 1.9400                                   │
+│     Env/adp_samp/num_episodes_mean: 1.2117                                   │
+│      Env/adp_samp/num_failures_min: 1.0000                                   │
+│      Env/adp_samp/num_failures_max: 5.8333                                   │
+│     Env/adp_samp/num_failures_mean: 1.8664                                   │
+│      Env/adp_samp/failure_rate_min: 0.7353                                   │
+│      Env/adp_samp/failure_rate_max: 3.9063                                   │
+│     Env/adp_samp/failure_rate_mean: 1.4342                                   │
+│              Env/adp_samp/prob_max: 0.0317                                   │
+│              Env/adp_samp/prob_min: 0.0004                                   │
+│             Env/adp_samp/prob_mean: 0.0122                                   │
+│ Env/adp_samp/prob_max_over_uniform: 2.5956                                   │
+│    Env/adp_samp/effective_num_bins: 71.3324                                  │
+│ Env/adp_samp/num_concentrated_bins: 0.0000                                   │
+│ Env/adp_samp/episodes_max_over_mean: 1.6012                                  │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                     Total episodes: 40                                       │
+│                    Total timesteps: 960                                      │
+│                     Iteration time: 1.90s                                    │
+│                         Total time: 10.77s                                   │
+│                                ETA: 0.0s                                     │
+│ Logging Directory:                                                           │
+│ logs_rl/TRL_G1_Track/manager/universal_token/all_modes/sonic_release_test-20 │
+│ 260818_082548                                                                │
+╰──────────────────────────────────────────────────────────────────────────────╯

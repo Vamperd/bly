@@ -1,0 +1,64 @@
+generated_at=2026-08-18T04:56:44+08:00
+work_root=/home/helloworld/bly/sonic-repro
+host=Ubuntu
+kernel=Linux 7.0.0-28-generic x86_64 GNU/Linux
+
+PRETTY_NAME="Ubuntu 24.04.3 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.3 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+
+ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+
+               total        used        free      shared  buff/cache   available
+Mem:            62Gi        10Gi        34Gi       137Mi        18Gi        52Gi
+Swap:           31Gi          0B        31Gi
+
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p3  456G  305G  128G  71% /
+/dev/nvme0n1p3  456G  305G  128G  71% /
+
+Tue Aug 18 04:56:44 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.84                 Driver Version: 595.84         CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 4090        Off |   00000000:0B:00.0  On |                  Off |
+|  0%   51C    P2              1W /  450W |   10767MiB /  24564MiB |      1%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           88274      G   ...rack-uuid=3190708988185955192         63MiB |
+|    0   N/A  N/A           88620      C   ...conda3/envs/summer/bin/python       9348MiB |
+|    0   N/A  N/A          184494      G   /usr/share/rustdesk/rustdesk             20MiB |
+|    0   N/A  N/A          349575      G   /usr/lib/xorg/Xorg                      196MiB |
+|    0   N/A  N/A          349729    C+G   ...c/gnome-remote-desktop-daemon        392MiB |
+|    0   N/A  N/A          349793      G   /usr/bin/gnome-shell                     55MiB |
+|    0   N/A  N/A          350324      G   ...exec/xdg-desktop-portal-gnome          8MiB |
+|    0   N/A  N/A          352051    C+G   /usr/bin/rustdesk                       449MiB |
+|    0   N/A  N/A          495662      G   /usr/share/code/code                     65MiB |
+|    0   N/A  N/A          499335      G   /usr/bin/nautilus                        18MiB |
++-----------------------------------------------------------------------------------------+
+
+NVIDIA GeForce RTX 4090, 595.84, 24564 MiB, 10767 MiB, 13308 MiB
+
+uv 0.9.13
+git version 2.43.0
+git-lfs: missing

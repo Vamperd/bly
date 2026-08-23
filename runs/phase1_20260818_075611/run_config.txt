@@ -1,0 +1,6 @@
+generated_at=2026-08-18T07:56:11+08:00
+work_root=/home/helloworld/bly/sonic-repro
+eval_envs=32
+render_envs=8
+smoke_envs=16
+python=/home/helloworld/bly/sonic-repro/.venv-sonic/bin/python

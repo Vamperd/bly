@@ -1,0 +1,29 @@
+Tue Aug 18 08:18:30 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.84                 Driver Version: 595.84         CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 4090        Off |   00000000:0B:00.0  On |                  Off |
+| 30%   40C    P2              1W /  450W |    1572MiB /  24564MiB |      2%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           88274      G   ...rack-uuid=3190708988185955192        218MiB |
+|    0   N/A  N/A          266754      G   /usr/bin/baobab                          14MiB |
+|    0   N/A  N/A          349575      G   /usr/lib/xorg/Xorg                      199MiB |
+|    0   N/A  N/A          349729    C+G   ...c/gnome-remote-desktop-daemon        392MiB |
+|    0   N/A  N/A          349793      G   /usr/bin/gnome-shell                     30MiB |
+|    0   N/A  N/A          350324      G   ...exec/xdg-desktop-portal-gnome          8MiB |
+|    0   N/A  N/A          352051    C+G   /usr/bin/rustdesk                       449MiB |
+|    0   N/A  N/A          392219      G   /usr/share/rustdesk/rustdesk             20MiB |
+|    0   N/A  N/A          495662      G   /usr/share/code/code                     63MiB |
+|    0   N/A  N/A          499335      G   /usr/bin/nautilus                        20MiB |
++-----------------------------------------------------------------------------------------+
