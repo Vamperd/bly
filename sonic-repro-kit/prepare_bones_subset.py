@@ -70,6 +70,10 @@ FILTER_KEYWORDS = (
     "walking_on_edge",
     "push_obstacle",
 )
+G1_PATH_COLUMNS = (
+    "move_g1_path",
+    "move_g1_mujoco_path",
+)
 
 
 def sha256(path: Path) -> str:
@@ -141,6 +145,16 @@ def normalized_member_name(value: str) -> str:
     return "/".join(parts)
 
 
+def resolve_g1_path_column(row: dict[str, object]) -> str:
+    for column in G1_PATH_COLUMNS:
+        if column in row:
+            return column
+    expected = ", ".join(G1_PATH_COLUMNS)
+    raise ValueError(
+        f"metadata is missing a G1 path column; expected one of: {expected}"
+    )
+
+
 def eligible_rows(rows: list[dict[str, object]]) -> tuple[dict[str, list[dict]], Counter]:
     by_package = {package: [] for package in PACKAGES}
     rejection_counts: Counter = Counter()
@@ -149,18 +163,18 @@ def eligible_rows(rows: list[dict[str, object]]) -> tuple[dict[str, list[dict]],
         "move_duration_frames",
         "package",
         "is_mirror",
-        "move_g1_mujoco_path",
     }
     if not rows or not required.issubset(rows[0]):
         missing = sorted(required - set(rows[0] if rows else {}))
         raise ValueError(f"metadata is missing required columns: {missing}")
+    g1_path_column = resolve_g1_path_column(rows[0])
     for row in rows:
         package = str(row["package"]).strip()
         if package not in by_package:
             rejection_counts["unknown_package"] += 1
             continue
         filename = str(row["filename"]).strip()
-        source_path = normalized_member_name(str(row["move_g1_mujoco_path"]))
+        source_path = normalized_member_name(str(row[g1_path_column]))
         try:
             duration_frames = int(float(row["move_duration_frames"]))
         except (TypeError, ValueError):
@@ -296,6 +310,7 @@ def main() -> int:
     ensure_new_output_tree(run_dir)
     start_free = require_free(run_dir, args.min_free_gib, "prepare start")
     rows, metadata_path = load_metadata(source_dir)
+    metadata_g1_path_column = resolve_g1_path_column(rows[0] if rows else {})
     by_package, rejection_counts = eligible_rows(rows)
     eligibility_counts = {package: len(by_package[package]) for package in PACKAGES}
     report = {
@@ -305,6 +320,7 @@ def main() -> int:
         "final_per_package": args.final_per_package,
         "metadata_path": str(metadata_path),
         "metadata_sha256": sha256(metadata_path),
+        "metadata_g1_path_column": metadata_g1_path_column,
         "archive_path": str(archive_path),
         "archive_size_bytes": archive_path.stat().st_size,
         "eligibility_counts": eligibility_counts,

@@ -47,6 +47,32 @@ class PrepareBonesSubsetTest(TestCase):
         self.assertEqual(rejected["duration"], 1)
         self.assertEqual(rejected["sonic_keyword"], 1)
 
+    def test_v004_move_g1_path_is_normalized_to_internal_column(self):
+        row = self._row("Locomotion", 0)
+        source_path = row.pop("move_g1_mujoco_path")
+        row["move_g1_path"] = source_path
+
+        eligible, rejected = prepare_bones_subset.eligible_rows([row])
+
+        self.assertFalse(rejected)
+        self.assertEqual(
+            eligible["Locomotion"][0]["move_g1_mujoco_path"], source_path
+        )
+        self.assertEqual(
+            prepare_bones_subset.resolve_g1_path_column(row), "move_g1_path"
+        )
+
+    def test_legacy_move_g1_mujoco_path_remains_supported(self):
+        row = self._row("Locomotion", 0)
+
+        eligible, rejected = prepare_bones_subset.eligible_rows([row])
+
+        self.assertFalse(rejected)
+        self.assertEqual(
+            eligible["Locomotion"][0]["move_g1_mujoco_path"],
+            row["move_g1_mujoco_path"],
+        )
+
     def test_selective_tar_extraction_preserves_session(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
