@@ -257,6 +257,67 @@ def resolve_termination_schema(
     return CORE_TERMINATION_TERMS, legacy_timeout_recovery, unrecorded_runtime_terms
 
 
+def validate_reset_randomization_config(
+    config: object, profile: str
+) -> tuple[bool, str]:
+    """Validate the configured sampling range separately from post-clip deltas."""
+    if not isinstance(config, dict):
+        return False, "reset_randomization metadata is missing"
+    enabled = config.get("enabled")
+    if profile == "startup":
+        return enabled is False, f"enabled={enabled}"
+
+    expected_pose = {
+        "x": (-0.025, 0.025),
+        "y": (-0.025, 0.025),
+        "z": (-0.005, 0.005),
+        "roll": (-0.05, 0.05),
+        "pitch": (-0.05, 0.05),
+        "yaw": (-0.1, 0.1),
+    }
+    expected_velocity = {
+        "x": (-0.25, 0.25),
+        "y": (-0.25, 0.25),
+        "z": (-0.1, 0.1),
+        "roll": (-0.26, 0.26),
+        "pitch": (-0.26, 0.26),
+        "yaw": (-0.39, 0.39),
+    }
+
+    def ranges_match(actual: object, expected: dict[str, tuple[float, float]]) -> bool:
+        if not isinstance(actual, dict) or set(actual) != set(expected):
+            return False
+        return all(
+            np.allclose(
+                np.asarray(actual[name], dtype=np.float64),
+                np.asarray(bounds, dtype=np.float64),
+                rtol=0.0,
+                atol=1e-12,
+            )
+            for name, bounds in expected.items()
+        )
+
+    try:
+        valid = enabled is True
+        valid = valid and ranges_match(config.get("pose_range"), expected_pose)
+        valid = valid and ranges_match(config.get("velocity_range"), expected_velocity)
+        valid = valid and np.allclose(
+            np.asarray(config.get("joint_position_range"), dtype=np.float64),
+            np.array([-0.05, 0.05]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        valid = valid and np.allclose(
+            np.asarray(config.get("joint_velocity_range"), dtype=np.float64),
+            np.array([0.0, 0.0]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+    except (TypeError, ValueError):
+        valid = False
+    return bool(valid), f"enabled={enabled}, configured mild ranges audited"
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -391,6 +452,10 @@ def main() -> int:
         collection.get("randomization_profile") == args.randomization_profile,
         str(collection.get("randomization_profile")),
     )
+    reset_config_valid, reset_config_evidence = validate_reset_randomization_config(
+        schema.get("reset_randomization"), args.randomization_profile
+    )
+    check("reset_randomization_config", reset_config_valid, reset_config_evidence)
     motion_key_map = schema.get("motion_id_to_key", {})
     check(
         "motion_key_map",
@@ -471,6 +536,7 @@ def main() -> int:
     reset_context_by_pair: dict[tuple[int, int], bytes] = {}
     motion_ids_seen: set[int] = set()
     legacy_timeout_recovered_episodes = 0
+    reset_joint_pos_delta_max_abs = 0.0
     try:
         with h5py.File(dataset_path, "r") as stream:
             if "data" not in stream:
@@ -601,6 +667,12 @@ def main() -> int:
                     )
                     if not np.allclose(context, context[0], rtol=0.0, atol=1e-7):
                         raise ValueError(f"{episode_name}: {context_name} changes inside episode")
+                    if context_name == "reset_joint_pos_delta":
+                        reset_joint_pos_delta_max_abs = max(
+                            reset_joint_pos_delta_max_abs,
+                            float(np.max(np.abs(context[0]))),
+                        )
+                        continue
                     expected_limit = (
                         limit
                         if args.randomization_profile == "initial_state_mild"
@@ -694,6 +766,12 @@ def main() -> int:
         check("hdf5_validation", False, str(error))
     else:
         check("hdf5_validation", True, f"validated {len(episodes)} exported episodes")
+        check(
+            "reset_joint_pos_delta_semantics",
+            True,
+            "actual written joint position minus unperturbed reference after soft-limit "
+            f"clipping; max_abs={reset_joint_pos_delta_max_abs:.6f}",
+        )
         if legacy_timeout_recovery:
             check(
                 "legacy_timeout_recovery",
@@ -813,6 +891,13 @@ def main() -> int:
             "source": "outcome/truncated" if legacy_timeout_recovered_episodes > 0 else None,
             "episode_count": legacy_timeout_recovered_episodes,
             "unrecorded_runtime_terms": list(legacy_unrecorded_runtime_terms),
+        },
+        "reset_joint_pos_delta": {
+            "definition": (
+                "actual written joint position minus unperturbed reference after "
+                "soft-limit clipping"
+            ),
+            "max_abs": reset_joint_pos_delta_max_abs,
         },
         "completed_canonical_episodes": completed_total,
         "completion_rate": completion_rate,

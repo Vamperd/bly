@@ -26,6 +26,7 @@ class VerifyStateActionTest(TestCase):
         run_dir: Path,
         corrupt_previous_action: bool = False,
         legacy_timeout_schema: bool = False,
+        startup_joint_clip_delta: bool = False,
     ) -> None:
         (run_dir / "data").mkdir(parents=True)
         (run_dir / "manifests").mkdir()
@@ -94,7 +95,10 @@ class VerifyStateActionTest(TestCase):
             context = episode.create_group("context_t")
             context.create_dataset("reset_root_pose_delta", data=np.zeros((3, 6)))
             context.create_dataset("reset_root_velocity_delta", data=np.zeros((3, 6)))
-            context.create_dataset("reset_joint_pos_delta", data=np.zeros((3, 29)))
+            joint_pos_delta = np.zeros((3, 29))
+            if startup_joint_clip_delta:
+                joint_pos_delta[:, 0] = -0.125
+            context.create_dataset("reset_joint_pos_delta", data=joint_pos_delta)
             context.create_dataset("reset_joint_vel_delta", data=np.zeros((3, 29)))
 
         schema = {
@@ -119,6 +123,13 @@ class VerifyStateActionTest(TestCase):
                 "randomization_profile": "startup",
                 "env_to_variant": [0],
                 "env_to_motion_slot": [0],
+            },
+            "reset_randomization": {
+                "enabled": False,
+                "pose_range": {},
+                "velocity_range": {},
+                "joint_position_range": [-0.1, 0.1],
+                "joint_velocity_range": [0.0, 0.0],
             },
             "runtime_physics": {
                 "body_com": {
@@ -189,6 +200,16 @@ class VerifyStateActionTest(TestCase):
             self.assertTrue(recovery["applied"])
             self.assertEqual(recovery["episode_count"], 1)
             self.assertEqual(recovery["unrecorded_runtime_terms"], ["foot_pos_xyz"])
+
+    def test_accepts_startup_joint_limit_clip_delta(self):
+        with TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            self._write_fixture(run_dir, startup_joint_clip_delta=True)
+            self.assertEqual(self._run_verifier(run_dir), 0)
+            summary = json.loads(
+                (run_dir / "manifests" / "collection_summary.json").read_text()
+            )
+            self.assertAlmostEqual(summary["reset_joint_pos_delta"]["max_abs"], 0.125)
 
 
 if __name__ == "__main__":

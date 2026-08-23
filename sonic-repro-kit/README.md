@@ -140,6 +140,10 @@ bash ./sonic_repro.sh verify-state-action
 ```
 
 该命令保留原验证 summary/index 的带时间戳副本，不改写 HDF5；通过后才生成 marker。
+`context_t/reset_joint_pos_delta` 是最终写入仿真的关节角相对未扰动参考角的差值，包含
+soft joint limit 裁剪，因此即使 startup 未启用 reset 随机化也可能非零。验证器要求它
+在 episode 内恒定且有限，并在 summary 审计最大绝对值；root pose/velocity 与 joint
+velocity 仍按所选随机化 profile 的配置范围严格验收。
 
 `render-offline` 是当前机器的推荐渲染入口。它先用已跑通的 Isaac Lab headless
 物理链路记录一段轨迹，再在独立进程中使用 MuJoCo OSMesa 生成 MP4，不会启用
