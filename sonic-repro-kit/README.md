@@ -243,7 +243,7 @@ OFFLINE_RUN_DIR="$TARGET_RUN" OFFLINE_WIDTH=960 OFFLINE_HEIGHT=540 \
   ./sonic_repro.sh render-mujoco
 ```
 
-## 八、BONES-SEED 256 动作正式采集
+## 八、BONES-SEED 256 动作正式采集  
 
 BONES-SEED 是门控数据集，必须先在网页接受许可。token 只能通过 `hf auth login`
 进入 Hugging Face 凭据存储，不得写入命令、日志或 manifest。下载前脚本要求至少
