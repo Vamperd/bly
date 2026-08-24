@@ -244,6 +244,10 @@ class ActionReplayTrajectoryRecorderTerm(recorder_manager.RecorderTerm):
                 pickle.dump(trajectory, stream, protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(temporary_trajectory, trajectory_path)
 
+    def close_writers(self) -> None:
+        """Match SONIC's trajectory-recorder shutdown interface."""
+        self.close("")
+
 
 @configclass
 class ActionReplayTrajectoryRecorderCfg(manager_term_cfg.RecorderTermCfg):

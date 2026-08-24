@@ -1011,6 +1011,7 @@ phase_capture_action_mask_source() {
       ++manager_env.terminations.anchor_pos=null \
       ++manager_env.terminations.anchor_ori_full=null \
       ++manager_env.terminations.ee_body_pos=null \
+      ++manager_env.terminations.foot_pos_xyz=null \
       ++manager_env.events.physics_material=null \
       ++manager_env.events.add_joint_default_pos=null \
       ++manager_env.events.base_com=null \
@@ -1092,6 +1093,7 @@ phase_replay_action_mask() {
       ++manager_env.terminations.anchor_pos=null \
       ++manager_env.terminations.anchor_ori_full=null \
       ++manager_env.terminations.ee_body_pos=null \
+      ++manager_env.terminations.foot_pos_xyz=null \
       ++manager_env.events.physics_material=null \
       ++manager_env.events.add_joint_default_pos=null \
       ++manager_env.events.base_com=null \
