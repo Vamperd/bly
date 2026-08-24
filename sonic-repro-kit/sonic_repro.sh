@@ -1001,6 +1001,7 @@ phase_capture_action_mask_source() {
       ++use_encoder=g1 \
       ++manager_env.config.render_results=False \
       ++manager_env.config.enable_cameras=False \
+      ++manager_env.config.terrain_type=plane \
       "~manager_env/recorders=empty" \
       ++manager_env.recorders.dataset_export_mode=0 \
       "++manager_env.recorders.trajectory._target_=action_replay_recorder.ActionReplayTrajectoryRecorderCfg" \
@@ -1083,6 +1084,7 @@ phase_replay_action_mask() {
       ++use_encoder=g1 \
       ++manager_env.config.render_results=False \
       ++manager_env.config.enable_cameras=False \
+      ++manager_env.config.terrain_type=plane \
       "~manager_env/recorders=empty" \
       ++manager_env.recorders.dataset_export_mode=0 \
       "++manager_env.recorders.trajectory._target_=action_replay_recorder.ActionReplayTrajectoryRecorderCfg" \

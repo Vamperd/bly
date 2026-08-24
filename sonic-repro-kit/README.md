@@ -369,9 +369,11 @@ ACTION_MASK_RUN_DIR=~/bly/runs/cvae_action_mask_eval_YYYYMMDD_HHMMSS \
   bash ./sonic_repro.sh render-action-mask
 ```
 
-源采集与重放均为 headless Isaac 物理运行，关闭 camera、RTX、observation corruption、
-startup/interval 随机化和跟踪失败 reset，只保留 motion timeout。重放把 original 与全部
-补全场景映射到同一个动作、同一初始状态的并行环境；记录绝对 root/joint/body 状态和
-runtime Action 映射。渲染阶段再用 MuJoCo 对这些完整物理状态做 50 FPS 公共世界相机
-可视化，不会把 CVAE 预测 State 当成物理结果。`ACTION_MASK_GL`、宽高和相机距离仅影响
-离线视频，不影响 Isaac 轨迹。
+源采集与重放均为 headless Isaac 物理运行，固定使用 `plane` 地形，并关闭 camera、RTX、
+observation corruption、startup/interval 随机化和跟踪失败 reset，只保留 motion timeout。
+源采集和批量重放必须显式使用相同平面，不能继承 SONIC release 的随机 `trimesh`；否则
+1-env 源运行和多 env 重放会落在不同地形块上，并在 Mask 开始前产生物理分歧。重放把
+original 与全部补全场景映射到同一个动作、同一初始状态的并行环境；记录绝对
+root/joint/body 状态和 runtime Action 映射。渲染阶段再用 MuJoCo 对这些完整物理状态做
+50 FPS 公共世界相机可视化，不会把 CVAE 预测 State 当成物理结果。
+`ACTION_MASK_GL`、宽高和相机距离仅影响离线视频，不影响 Isaac 轨迹。
