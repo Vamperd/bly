@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Runtime products belong in /home/helloworld/bly/runs, never in the source tree.
+checkpoints/
+outputs/
+data/
+

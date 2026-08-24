@@ -1,0 +1,55 @@
+{
+  "seed": 20260824,
+  "data": {
+    "window_transitions": 128,
+    "validation_stride": 64,
+    "num_workers": 4,
+    "max_train_episodes": null,
+    "max_validation_episodes": null
+  },
+  "model": {
+    "kind": "transformer",
+    "d_model": 256,
+    "encoder_layers": 4,
+    "decoder_layers": 6,
+    "heads": 8,
+    "ffn_dim": 1024,
+    "latent_dim": 64,
+    "dropout": 0.1,
+    "tcn_channels": 360,
+    "tcn_encoder_layers": 5,
+    "tcn_decoder_layers": 5,
+    "tcn_kernel_size": 3
+  },
+  "masking": {
+    "task_probabilities": [0.35, 0.25, 0.40],
+    "completion_probabilities": [0.40, 0.30, 0.30],
+    "element_fraction": [0.10, 0.40],
+    "step_count": [1, 8],
+    "feature_fraction": [0.10, 0.40]
+  },
+  "training": {
+    "micro_batch": 16,
+    "gradient_accumulation": 4,
+    "max_optimizer_steps": 100000,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.0001,
+    "gradient_clip": 1.0,
+    "warmup_steps": 5000,
+    "validation_interval": 1000,
+    "validation_max_batches": 64,
+    "early_stopping_patience": 12,
+    "kl_warmup_steps": 20000,
+    "kl_beta": 0.001,
+    "free_bits": 0.05,
+    "forward_weight": 2.0,
+    "inverse_weight": 1.0,
+    "gravity_weight": 0.1,
+    "amp": "bf16"
+  },
+  "evaluation": {
+    "latent_samples": 8,
+    "max_batches": null,
+    "negative_control_min_degradation": 0.10
+  }
+}
