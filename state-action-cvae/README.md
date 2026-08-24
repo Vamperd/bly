@@ -151,6 +151,41 @@ bash ./cvae_repro.sh sample
 `action_scale [29]`；可选显式三个布尔 mask、valid mask、progress 和 `normalized`。
 输出 `data/samples.npz` 保存物理单位下的 8 条样本、均值与方差。
 
+## 通用 Action Mask 物理重放与视频
+
+该入口只使用 validation（默认 Locomotion）动作，自动选择完成且不少于 192 步的
+motion。源 SONIC 轨迹只采集一次；Element、Step、随机 Feature、五个语义关节组及
+Inverse Full 共用同一个 128 步窗口、同一组完整 physical state 和 prior mean。Mask
+Action 时会同步隐藏下一 State 中的 previous-action 副本，未 Mask Action 保持逐元素
+等于原序列。8 个随机 latent 只报告不确定性，不用于挑选主结果。
+
+先确保 README 中的 SONIC `0005` 外部 Action 补丁已经在 Ubuntu 嵌套仓库应用，再运行：
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+
+CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_dataset_20260824_145739 \
+CVAE_CHECKPOINT=/home/helloworld/bly/runs/cvae_train_20260824_150534/checkpoints/best.pt \
+CVAE_REPLAY_SPLIT=validation \
+CVAE_REPLAY_PACKAGE=Locomotion \
+CVAE_REPLAY_MOTION_KEY=auto \
+CVAE_MASK_PRESET=all_action_masks_v1 \
+CVAE_REPLAY_LATENT_MODE=prior_mean \
+CVAE_REPLAY_LATENT_SAMPLES=8 \
+CVAE_REPLAY_RENDER=representatives \
+CVAE_REPLAY_SEED=20260824 \
+bash ./cvae_repro.sh validate-action-mask-replay
+```
+
+`CVAE_MASK_SCENARIOS=/绝对路径/custom_scenarios.jsonl` 可替代默认 preset；场景遵循
+`sonic_action_mask_scenario_v1`，因此新增 Mask 不修改推理、Isaac replay 或视频后端。
+`CVAE_REPLAY_RENDER=all` 为每个场景生成对比视频，`none` 只运行补全、物理重放和
+指标。输出位于新的 `cvae_action_mask_eval_时间戳` run，包含 source/original、五个代表
+场景、总览 grid、离线补全误差、16-step stride 全动作扫描、物理漂移和稳定性指标。
+工程门禁只要求坐标往返、源重放忠实度和 Mask 前一致；若 CVAE 弱于 hold-last 或线性
+插值，run 仍诚实保存并在 summary 中令 `model_quality_pass=false`。
+
 ## 测试
 
 项目不创建新环境，也不主动安装 pytest。使用现有 Ubuntu 环境运行内置 unittest：
@@ -162,5 +197,5 @@ python -m unittest discover -s tests -v
 ```
 
 测试覆盖 runtime Action 映射、per-environment 参数、跨 motion 划分、padding、三类 Mask、
-Action/previous-action 防泄漏、Transformer/TCN shape 和微型数据过拟合。
-
+Action/previous-action 防泄漏、通用 ActionMaskScenario、Transformer/TCN shape 和微型
+数据过拟合。

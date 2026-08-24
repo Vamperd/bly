@@ -53,6 +53,11 @@ OFFLINE_WIDTH="${OFFLINE_WIDTH:-960}"
 OFFLINE_HEIGHT="${OFFLINE_HEIGHT:-540}"
 OFFLINE_GL="${OFFLINE_GL:-egl}"
 OFFLINE_CAMERA_DISTANCE="${OFFLINE_CAMERA_DISTANCE:-2.0}"
+ACTION_MASK_RUN_DIR="${ACTION_MASK_RUN_DIR:-}"
+ACTION_MASK_GL="${ACTION_MASK_GL:-$OFFLINE_GL}"
+ACTION_MASK_WIDTH="${ACTION_MASK_WIDTH:-$OFFLINE_WIDTH}"
+ACTION_MASK_HEIGHT="${ACTION_MASK_HEIGHT:-$OFFLINE_HEIGHT}"
+ACTION_MASK_CAMERA_DISTANCE="${ACTION_MASK_CAMERA_DISTANCE:-$OFFLINE_CAMERA_DISTANCE}"
 
 printf -v SCRIPT_INVOCATION '%q ' "$0" "$@"
 
@@ -937,6 +942,222 @@ phase_render_offline() {
   OFFLINE_RUN_DIR="$run_dir" phase_render_mujoco
 }
 
+json_manifest_value() {
+  local manifest="$1" key="$2"
+  python -c \
+    'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8"))[sys.argv[2]]; print(value)' \
+    "$manifest" "$key"
+}
+
+prepare_action_mask_motion_dir() {
+  local run_dir="$1" request="$2" motion_file expected_hash actual_hash motion_dir motion_link
+  motion_file="$(json_manifest_value "$request" motion_file)"
+  [[ -s "$motion_file" ]] || die "Action-mask motion PKL is missing: $motion_file"
+  expected_hash="$(json_manifest_value "$request" motion_file_sha256)"
+  actual_hash="$(sha256sum "$motion_file" | awk '{print $1}')"
+  [[ "$actual_hash" == "$expected_hash" ]] \
+    || die "Action-mask motion PKL SHA256 no longer matches its request manifest"
+  motion_dir="$run_dir/data/replay_motion"
+  motion_link="$motion_dir/$(basename "$motion_file")"
+  mkdir -p -- "$motion_dir"
+  if [[ ! -e "$motion_link" && ! -L "$motion_link" ]]; then
+    ln -s -- "$motion_file" "$motion_link"
+  fi
+  [[ "$(readlink -f -- "$motion_link")" == "$(readlink -f -- "$motion_file")" ]] \
+    || die "Run-local motion link points at an unexpected file: $motion_link"
+  printf '%s\n' "$motion_dir"
+}
+
+phase_capture_action_mask_source() {
+  activate_env
+  require_run_gpu_capacity
+  [[ -n "$ACTION_MASK_RUN_DIR" ]] \
+    || die "Set ACTION_MASK_RUN_DIR to the CVAE Action-mask evaluation run"
+  local run_dir request motion_dir checkpoint_path seed output_dir
+  run_dir="$(validated_run_dir "$ACTION_MASK_RUN_DIR")"
+  request="$run_dir/manifests/action_mask_request.json"
+  [[ -s "$request" ]] || die "Action-mask request is missing: $request"
+  [[ -f "$SONIC_DIR/gear_sonic/eval_agent_trl.py" ]] \
+    || die "SONIC evaluation entrypoint is missing"
+  ensure_run_layout "$run_dir"
+  motion_dir="$(prepare_action_mask_motion_dir "$run_dir" "$request")"
+  checkpoint_path="$(prepare_eval_checkpoint "$run_dir")"
+  seed="$(json_manifest_value "$request" seed)"
+  output_dir="$run_dir/data/source"
+  mkdir -p -- "$output_dir"
+
+  if (
+    cd "$SONIC_DIR"
+    PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python gear_sonic/eval_agent_trl.py \
+      "+checkpoint=$checkpoint_path" \
+      +headless=True \
+      "hydra.run.dir=$run_dir/manifests/hydra_action_mask_source" \
+      "++eval_callbacks=[]" \
+      ++run_eval_loop=True \
+      ++run_once=True \
+      ++run_all_motions_once=False \
+      ++num_envs=1 \
+      "++seed=$seed" \
+      ++use_encoder=g1 \
+      ++manager_env.config.render_results=False \
+      ++manager_env.config.enable_cameras=False \
+      "~manager_env/recorders=empty" \
+      ++manager_env.recorders.dataset_export_mode=0 \
+      "++manager_env.recorders.trajectory._target_=action_replay_recorder.ActionReplayTrajectoryRecorderCfg" \
+      "++manager_env.recorders.trajectory.save_path=$output_dir" \
+      ++manager_env.observations.policy.enable_corruption=False \
+      ++manager_env.observations.tokenizer.enable_corruption=False \
+      "+manager_env/terminations=tracking/eval" \
+      ~manager_env.terminations.anchor_pos \
+      ~manager_env.terminations.anchor_ori_full \
+      ~manager_env.terminations.ee_body_pos \
+      ~manager_env.events.physics_material \
+      ~manager_env.events.add_joint_default_pos \
+      ~manager_env.events.base_com \
+      ~manager_env.events.push_robot \
+      ~manager_env.events.randomize_rigid_body_mass \
+      ++manager_env.commands.motion.use_paired_motions=False \
+      ++manager_env.commands.motion.sample_unique_motions=False \
+      ++manager_env.commands.motion.start_from_first_frame=True \
+      ++manager_env.commands.motion.sample_from_n_initial_frames=null \
+      ++manager_env.commands.motion.eval_motion_repeat=1 \
+      ++manager_env.commands.motion.eval_require_full_batch=True \
+      ++manager_env.commands.motion.randomize_eval_resets=False \
+      ++manager_env.commands.motion.motion_lib_cfg.deterministic_motion_order=True \
+      ++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=1 \
+      "++manager_env.commands.motion.motion_lib_cfg.motion_file=$motion_dir" \
+      ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=zeros
+  ) 2>&1 | tee "$run_dir/logs/action_mask_source.log"; then
+    :
+  else
+    local rc=$?
+    record_exit_code "$run_dir" action_mask_source "$rc"
+    return "$rc"
+  fi
+  [[ -s "$output_dir/000000.replay.npz" \
+      && -s "$output_dir/000000.trajectory.pkl" ]] \
+    || die "Source capture did not produce both replay NPZ and trajectory PKL"
+  record_exit_code "$run_dir" action_mask_source 0
+  mark_stage "$run_dir" action_mask_source.ok
+}
+
+phase_replay_action_mask() {
+  activate_env
+  require_run_gpu_capacity
+  [[ -n "$ACTION_MASK_RUN_DIR" ]] \
+    || die "Set ACTION_MASK_RUN_DIR to the CVAE Action-mask evaluation run"
+  local run_dir request source_request motion_dir checkpoint_path seed actions_file actions_hash
+  local expected_actions_hash num_envs output_dir
+  run_dir="$(validated_run_dir "$ACTION_MASK_RUN_DIR")"
+  request="$run_dir/manifests/action_replay_request.json"
+  source_request="$run_dir/manifests/action_mask_request.json"
+  [[ -s "$request" && -s "$source_request" ]] \
+    || die "Action replay request manifests are incomplete in $run_dir"
+  motion_dir="$(prepare_action_mask_motion_dir "$run_dir" "$request")"
+  checkpoint_path="$(prepare_eval_checkpoint "$run_dir")"
+  seed="$(json_manifest_value "$source_request" seed)"
+  actions_file="$(json_manifest_value "$request" raw_actions_file)"
+  expected_actions_hash="$(json_manifest_value "$request" raw_actions_sha256)"
+  num_envs="$(json_manifest_value "$request" num_envs)"
+  [[ "$num_envs" =~ ^[1-9][0-9]*$ ]] || die "Invalid Action replay environment count: $num_envs"
+  [[ -s "$actions_file" ]] || die "External Action replay file is missing: $actions_file"
+  actions_hash="$(sha256sum "$actions_file" | awk '{print $1}')"
+  [[ "$actions_hash" == "$expected_actions_hash" ]] \
+    || die "External Action replay SHA256 no longer matches its request manifest"
+  output_dir="$run_dir/data/replay"
+  mkdir -p -- "$output_dir"
+
+  if (
+    cd "$SONIC_DIR"
+    PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python gear_sonic/eval_agent_trl.py \
+      "+checkpoint=$checkpoint_path" \
+      +headless=True \
+      "hydra.run.dir=$run_dir/manifests/hydra_action_mask_replay" \
+      "++eval_callbacks=[]" \
+      ++run_eval_loop=True \
+      ++run_once=False \
+      "++external_action_replay_path=$actions_file" \
+      "++num_envs=$num_envs" \
+      "++seed=$seed" \
+      ++use_encoder=g1 \
+      ++manager_env.config.render_results=False \
+      ++manager_env.config.enable_cameras=False \
+      "~manager_env/recorders=empty" \
+      ++manager_env.recorders.dataset_export_mode=0 \
+      "++manager_env.recorders.trajectory._target_=action_replay_recorder.ActionReplayTrajectoryRecorderCfg" \
+      "++manager_env.recorders.trajectory.save_path=$output_dir" \
+      ++manager_env.observations.policy.enable_corruption=False \
+      ++manager_env.observations.tokenizer.enable_corruption=False \
+      "+manager_env/terminations=tracking/eval" \
+      ~manager_env.terminations.anchor_pos \
+      ~manager_env.terminations.anchor_ori_full \
+      ~manager_env.terminations.ee_body_pos \
+      ~manager_env.events.physics_material \
+      ~manager_env.events.add_joint_default_pos \
+      ~manager_env.events.base_com \
+      ~manager_env.events.push_robot \
+      ~manager_env.events.randomize_rigid_body_mass \
+      ++manager_env.commands.motion.use_paired_motions=False \
+      ++manager_env.commands.motion.sample_unique_motions=False \
+      ++manager_env.commands.motion.start_from_first_frame=True \
+      ++manager_env.commands.motion.sample_from_n_initial_frames=null \
+      "++manager_env.commands.motion.eval_motion_repeat=$num_envs" \
+      ++manager_env.commands.motion.eval_require_full_batch=True \
+      ++manager_env.commands.motion.randomize_eval_resets=False \
+      ++manager_env.commands.motion.motion_lib_cfg.deterministic_motion_order=True \
+      ++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=1 \
+      "++manager_env.commands.motion.motion_lib_cfg.motion_file=$motion_dir" \
+      ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=zeros
+  ) 2>&1 | tee "$run_dir/logs/action_mask_replay.log"; then
+    :
+  else
+    local rc=$?
+    record_exit_code "$run_dir" action_mask_replay "$rc"
+    return "$rc"
+  fi
+  local replay_count trajectory_count
+  replay_count="$(find "$output_dir" -maxdepth 1 -type f -name '*.replay.npz' -size +0c | wc -l)"
+  trajectory_count="$(find "$output_dir" -maxdepth 1 -type f -name '*.trajectory.pkl' -size +0c | wc -l)"
+  [[ "$replay_count" == "$num_envs" && "$trajectory_count" == "$num_envs" ]] \
+    || die "Expected $num_envs replay artifacts; found NPZ=$replay_count PKL=$trajectory_count"
+  record_exit_code "$run_dir" action_mask_replay 0
+  mark_stage "$run_dir" action_mask_replay.ok
+}
+
+phase_render_action_mask() {
+  activate_env
+  [[ -n "$ACTION_MASK_RUN_DIR" ]] \
+    || die "Set ACTION_MASK_RUN_DIR to the CVAE Action-mask evaluation run"
+  local run_dir request model_path render_mode
+  run_dir="$(validated_run_dir "$ACTION_MASK_RUN_DIR")"
+  request="$run_dir/manifests/action_mask_request.json"
+  [[ -s "$request" ]] || die "Action-mask request is missing: $request"
+  model_path="$SONIC_DIR/decoupled_wbc/control/robot_model/model_data/g1/g1_29dof_old.xml"
+  [[ -f "$model_path" ]] || die "MuJoCo G1 model missing: $model_path"
+  render_mode="$(json_manifest_value "$request" render_mode)"
+  if python "$SCRIPT_DIR/render_action_mask_comparison.py" \
+    --run-dir "$run_dir" \
+    --model "$model_path" \
+    --render-mode "$render_mode" \
+    --width "$ACTION_MASK_WIDTH" \
+    --height "$ACTION_MASK_HEIGHT" \
+    --gl "$ACTION_MASK_GL" \
+    --camera-distance "$ACTION_MASK_CAMERA_DISTANCE" \
+    2>&1 | tee "$run_dir/logs/action_mask_render.log"; then
+    :
+  else
+    local rc=$?
+    record_exit_code "$run_dir" action_mask_render "$rc"
+    return "$rc"
+  fi
+  [[ -s "$run_dir/videos/sonic_source.mp4" \
+      && -s "$run_dir/videos/original_action_replay.mp4" \
+      && -s "$run_dir/videos/all_action_masks_grid.mp4" ]] \
+    || die "Action-mask renderer did not produce the mandatory MP4 files"
+  record_exit_code "$run_dir" action_mask_render 0
+  mark_stage "$run_dir" action_mask_render.ok
+}
+
 phase_smoke_train() {
   activate_env
   require_run_gpu_capacity
@@ -1018,6 +1239,12 @@ Phases:
   dump-trajectory Record one headless episode without enabling cameras or RTX.
   render-mujoco   Render the latest trajectory through MuJoCo OSMesa.
   render-offline  Dump a fresh trajectory and render it through MuJoCo OSMesa.
+  capture-action-mask-source
+                  Capture one deterministic SONIC source trajectory for CVAE replay.
+  replay-action-mask
+                  Execute original and CVAE-completed raw Actions in Isaac physics.
+  render-action-mask
+                  Render synchronized common-camera Action-mask comparison MP4s.
   collect-state-action
                   Record and verify minimal (s_t, g_t, a_t, s_t+1) HDF5 data.
   verify-state-action
@@ -1039,6 +1266,8 @@ Environment overrides:
   COLLECT_BASELINE_SUMMARY, COLLECT_DATASET_NAME, COLLECT_RUN_DIR, BONES_INGEST_RUN,
   OFFLINE_RENDER_ENVS, OFFLINE_FRAME_SKIP, OFFLINE_WIDTH, OFFLINE_HEIGHT,
   OFFLINE_GL, OFFLINE_CAMERA_DISTANCE, OFFLINE_RUN_DIR,
+  ACTION_MASK_RUN_DIR, ACTION_MASK_GL, ACTION_MASK_WIDTH, ACTION_MASK_HEIGHT,
+  ACTION_MASK_CAMERA_DISTANCE,
   MAX_RUN_GPU_USED_MIB, SONIC_COMMIT
 EOF
 }
@@ -1057,6 +1286,9 @@ main() {
     dump-trajectory) phase_dump_trajectory ;;
     render-mujoco) phase_render_mujoco ;;
     render-offline) phase_render_offline ;;
+    capture-action-mask-source) phase_capture_action_mask_source ;;
+    replay-action-mask) phase_replay_action_mask ;;
+    render-action-mask) phase_render_action_mask ;;
     collect-state-action) phase_collect_state_action ;;
     verify-state-action) phase_verify_state_action ;;
     bones-download-preflight) phase_bones_download_preflight ;;

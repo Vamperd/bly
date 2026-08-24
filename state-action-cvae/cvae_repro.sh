@@ -10,6 +10,7 @@ SMOKE_CONFIG="$SCRIPT_DIR/configs/smoke.json"
 SEED="${CVAE_SEED:-20260824}"
 SONIC_DIR="${SONIC_DIR:-$HOME/bly/sonic-repro/GR00T-WholeBodyControl}"
 ISAACLAB_DIR="${ISAACLAB_DIR:-$HOME/bly/sonic-repro/IsaacLab}"
+SONIC_KIT_DIR="${SONIC_KIT_DIR:-$HOME/bly/sonic-repro-kit}"
 
 timestamp() {
   date +%Y%m%d_%H%M%S
@@ -191,6 +192,83 @@ sample_model() {
   printf '%s\n' "$run_dir"
 }
 
+validate_action_mask_replay() {
+  local dataset_run="${CVAE_DATASET_RUN:-}" checkpoint="${CVAE_CHECKPOINT:-}"
+  local split="${CVAE_REPLAY_SPLIT:-validation}" package="${CVAE_REPLAY_PACKAGE:-Locomotion}"
+  local motion_key="${CVAE_REPLAY_MOTION_KEY:-auto}"
+  local preset="${CVAE_MASK_PRESET:-all_action_masks_v1}"
+  local latent_mode="${CVAE_REPLAY_LATENT_MODE:-prior_mean}"
+  local latent_samples="${CVAE_REPLAY_LATENT_SAMPLES:-8}"
+  local render_mode="${CVAE_REPLAY_RENDER:-representatives}"
+  local replay_seed="${CVAE_REPLAY_SEED:-$SEED}" run_dir
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -n "$checkpoint" ]] || die "CVAE_CHECKPOINT is required"
+  [[ -d "$SONIC_KIT_DIR" && -f "$SONIC_KIT_DIR/sonic_repro.sh" ]] \
+    || die "SONIC reproduction kit is unavailable: $SONIC_KIT_DIR"
+  [[ "$split" == "validation" ]] \
+    || die "Action-mask replay is currently restricted to CVAE_REPLAY_SPLIT=validation"
+  [[ "$latent_mode" == "prior_mean" ]] \
+    || die "The primary replay result must use CVAE_REPLAY_LATENT_MODE=prior_mean"
+  [[ "$latent_samples" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_REPLAY_LATENT_SAMPLES must be a positive integer"
+  [[ "$replay_seed" =~ ^[0-9]+$ ]] \
+    || die "CVAE_REPLAY_SEED must be a non-negative integer"
+  [[ "$render_mode" == "representatives" || "$render_mode" == "all" \
+      || "$render_mode" == "none" ]] \
+    || die "CVAE_REPLAY_RENDER must be representatives, all, or none"
+  run_dir="$(new_run_dir cvae_action_mask_eval)"
+  capture_environment "$run_dir"
+
+  local -a scenario_args=()
+  if [[ -n "${CVAE_MASK_SCENARIOS:-}" ]]; then
+    scenario_args=(--custom-scenarios "$CVAE_MASK_SCENARIOS")
+  fi
+  run_logged "$run_dir" action_mask_prepare.log \
+    "$PYTHON" -m cvae_sa.action_mask_eval prepare \
+      --dataset-run "$dataset_run" \
+      --checkpoint "$checkpoint" \
+      --output-run "$run_dir" \
+      --split "$split" \
+      --package "$package" \
+      --motion-key "$motion_key" \
+      --seed "$replay_seed" \
+      --preset "$preset" \
+      --latent-mode "$latent_mode" \
+      --latent-samples "$latent_samples" \
+      --render-mode "$render_mode" \
+      "${scenario_args[@]}"
+  run_logged "$run_dir" action_mask_source_orchestration.log \
+    env ACTION_MASK_RUN_DIR="$run_dir" \
+      bash "$SONIC_KIT_DIR/sonic_repro.sh" capture-action-mask-source
+  run_logged "$run_dir" action_mask_completion.log \
+    "$PYTHON" -m cvae_sa.action_mask_eval complete \
+      --dataset-run "$dataset_run" \
+      --checkpoint "$checkpoint" \
+      --output-run "$run_dir" \
+      --latent-samples "$latent_samples" \
+      --seed "$replay_seed" \
+      "${scenario_args[@]}"
+  run_logged "$run_dir" action_mask_replay_orchestration.log \
+    env ACTION_MASK_RUN_DIR="$run_dir" \
+      bash "$SONIC_KIT_DIR/sonic_repro.sh" replay-action-mask
+  run_logged "$run_dir" action_mask_physics_metrics.log \
+    "$PYTHON" -m cvae_sa.action_mask_eval physics-metrics \
+      --output-run "$run_dir"
+  if [[ "$render_mode" != "none" ]]; then
+    run_logged "$run_dir" action_mask_render_orchestration.log \
+      env ACTION_MASK_RUN_DIR="$run_dir" \
+        bash "$SONIC_KIT_DIR/sonic_repro.sh" render-action-mask
+  fi
+  run_logged "$run_dir" action_mask_finalize.log \
+    "$PYTHON" -m cvae_sa.action_mask_eval finalize \
+      --output-run "$run_dir" \
+      --render-mode "$render_mode"
+  [[ -f "$run_dir/markers/cvae_action_mask_replay.ok" ]] \
+    || die "Action-mask replay evaluation marker is missing"
+  update_latest cvae_action_mask_eval "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 ORIGINAL_ARGS=("$@")
 [[ -x "$PYTHON" ]] || die "Python environment is unavailable: $PYTHON"
 export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
@@ -201,5 +279,6 @@ case "${1:-}" in
   train) train_model false ;;
   evaluate) evaluate_model ;;
   sample) sample_model ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|smoke-train|train|evaluate|sample}" ;;
+  validate-action-mask-replay) validate_action_mask_replay ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|smoke-train|train|evaluate|sample|validate-action-mask-replay}" ;;
 esac

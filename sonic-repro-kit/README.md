@@ -94,14 +94,29 @@ PATCH_1="$PATCH_DIR/0001-feat-record-minimal-SONIC-state-goal-action-data.patch"
 PATCH_2="$PATCH_DIR/0002-fix-preserve-per-environment-joint-defaults.patch"
 PATCH_3="$PATCH_DIR/0003-feat-collect-repeated-motion-randomized-dataset.patch"
 PATCH_4="$PATCH_DIR/0004-fix-record-runtime-termination-terms.patch"
-git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4"
+PATCH_5="$PATCH_DIR/0005-feat-add-external-action-physics-replay.patch"
+git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5"
 git switch -c codex/minimal-state-action-recorder
-git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4"
+git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5"
 ```
 
 不要在 Ubuntu 手工编辑补丁内容。如果配置文件已存在，应先检查当前提交和工作树，
 不要重复应用补丁。已经应用前三个补丁的执行端只对 `PATCH_4` 分别执行
 `git apply --check` 和 `git am`。
+
+已经应用前四个补丁且当前位于 `codex/minimal-state-action-recorder` 的执行端，只需：
+
+```bash
+cd ~/bly/sonic-repro/GR00T-WholeBodyControl
+git status --short --branch
+git rev-parse HEAD
+PATCH_5=~/bly/sonic-repro-kit/patches/0005-feat-add-external-action-physics-replay.patch
+git apply --check "$PATCH_5"
+git am "$PATCH_5"
+```
+
+`0005` 只在显式设置 `external_action_replay_path` 时覆盖 eval 的 raw Action；所有既有
+SONIC eval、采集与训练行为默认不变。补丁不改 Isaac Lab。
 
 ```bash
 ./sonic_repro.sh collect-state-action
@@ -339,3 +354,24 @@ COLLECT_SEED=20260823 \
 `COLLECT_SMPL_MOTION_FILE=zeros`，不会下载完整 SOMA/SMPL 数据，也不会启用随机推力、
 camera 或 RTX。BONES-SEED 许可与归属链接会写入 ingest run 的 manifests；数据与衍生
 文件仍受其原许可约束。
+
+## 九、CVAE Action Mask 通用物理重放
+
+通常从 `state-action-cvae/cvae_repro.sh validate-action-mask-replay` 统一调用以下三个
+内部阶段，无需手工分步执行：
+
+```bash
+ACTION_MASK_RUN_DIR=~/bly/runs/cvae_action_mask_eval_YYYYMMDD_HHMMSS \
+  bash ./sonic_repro.sh capture-action-mask-source
+ACTION_MASK_RUN_DIR=~/bly/runs/cvae_action_mask_eval_YYYYMMDD_HHMMSS \
+  bash ./sonic_repro.sh replay-action-mask
+ACTION_MASK_RUN_DIR=~/bly/runs/cvae_action_mask_eval_YYYYMMDD_HHMMSS \
+  bash ./sonic_repro.sh render-action-mask
+```
+
+源采集与重放均为 headless Isaac 物理运行，关闭 camera、RTX、observation corruption、
+startup/interval 随机化和跟踪失败 reset，只保留 motion timeout。重放把 original 与全部
+补全场景映射到同一个动作、同一初始状态的并行环境；记录绝对 root/joint/body 状态和
+runtime Action 映射。渲染阶段再用 MuJoCo 对这些完整物理状态做 50 FPS 公共世界相机
+可视化，不会把 CVAE 预测 State 当成物理结果。`ACTION_MASK_GL`、宽高和相机距离仅影响
+离线视频，不影响 Isaac 轨迹。
