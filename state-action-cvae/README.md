@@ -186,6 +186,14 @@ bash ./cvae_repro.sh validate-action-mask-replay
 工程门禁只要求坐标往返、源重放忠实度和 Mask 前一致；若 CVAE 弱于 hold-last 或线性
 插值，run 仍诚实保存并在 summary 中令 `model_quality_pass=false`。
 
+默认 `CVAE_REPLAY_LATENT_MODE=prior_mean` 使用条件 prior 的确定性均值；
+`CVAE_REPLAY_LATENT_SAMPLES` 在该模式下只用于不确定性统计，不会把多个 Action 求平均。
+若仅用于模型候选覆盖能力的 oracle 诊断，可设置
+`CVAE_REPLAY_LATENT_MODE=oracle_best_of_n`：程序生成 N 条完整候选，并用被 Mask 的真实
+Action 计算误差，只选整条误差最小的候选进行 Isaac 重放。该模式明确使用标签泄漏，不能
+代表部署时可获得的性能；manifest 会保存每条候选误差、选中编号及
+`oracle_uses_ground_truth_action=true`。
+
 ## 测试
 
 项目不创建新环境，也不主动安装 pytest。使用现有 Ubuntu 环境运行内置 unittest：

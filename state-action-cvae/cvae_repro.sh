@@ -207,8 +207,8 @@ validate_action_mask_replay() {
     || die "SONIC reproduction kit is unavailable: $SONIC_KIT_DIR"
   [[ "$split" == "validation" ]] \
     || die "Action-mask replay is currently restricted to CVAE_REPLAY_SPLIT=validation"
-  [[ "$latent_mode" == "prior_mean" ]] \
-    || die "The primary replay result must use CVAE_REPLAY_LATENT_MODE=prior_mean"
+  [[ "$latent_mode" == "prior_mean" || "$latent_mode" == "oracle_best_of_n" ]] \
+    || die "CVAE_REPLAY_LATENT_MODE must be prior_mean or oracle_best_of_n"
   [[ "$latent_samples" =~ ^[1-9][0-9]*$ ]] \
     || die "CVAE_REPLAY_LATENT_SAMPLES must be a positive integer"
   [[ "$replay_seed" =~ ^[0-9]+$ ]] \

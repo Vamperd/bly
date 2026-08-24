@@ -24,6 +24,7 @@ from .action_masks import (
     scenario_mask,
     write_scenarios,
 )
+from .action_selection import LATENT_MODES, select_latent_action_window
 from .constants import ACTION_DIM, DEFAULT_WINDOW_TRANSITIONS, PHYSICAL_STATE_DIM, TASK_NAMES
 from .dataset import read_episode_index
 from .masking import MaskBatch
@@ -92,8 +93,10 @@ def prepare(
     output_run = output_run.expanduser().resolve()
     if split != "validation":
         raise ValueError("Action-mask physics replay is restricted to the validation split")
-    if latent_mode != "prior_mean":
-        raise ValueError("the primary replay result must use latent_mode=prior_mean")
+    if latent_mode not in LATENT_MODES:
+        raise ValueError(
+            f"unsupported latent_mode {latent_mode!r}; expected one of {sorted(LATENT_MODES)}"
+        )
     if latent_samples <= 0:
         raise ValueError("latent_samples must be positive")
     if render_mode not in {"representatives", "all", "none"}:
@@ -455,6 +458,11 @@ def complete(
     dataset_run = dataset_run.expanduser().resolve()
     checkpoint_path = checkpoint_path.expanduser().resolve()
     request = load_json(output_run / "manifests/action_mask_request.json")
+    latent_mode = request["latent_mode"]
+    if latent_mode not in LATENT_MODES:
+        raise ValueError(f"unsupported latent_mode {latent_mode!r} in request")
+    if int(request["latent_samples"]) != latent_samples:
+        raise ValueError("prepare and complete latent sample counts differ")
     source_path = output_run / SOURCE_RELATIVE_PATH
     if not source_path.is_file():
         raise FileNotFoundError(f"SONIC source capture is missing: {source_path}")
@@ -499,6 +507,8 @@ def complete(
     full_masks = []
     uncertainty_values = []
     saturation_values = []
+    selected_candidate_indices = []
+    candidate_error_values = []
     offline_metrics: dict[str, Any] = {}
     mapping_round_trip_max = 0.0
 
@@ -512,7 +522,7 @@ def complete(
             * normalization["action_std"]
             + normalization["action_mean"]
         )
-        completed_window = np.where(mask, predicted_window, source_window)
+        prior_mean_window = np.where(mask, predicted_window, source_window)
 
         stochastic_windows = []
         for sample_index in range(latent_samples):
@@ -524,7 +534,20 @@ def complete(
                 + normalization["action_mean"]
             )
             stochastic_windows.append(np.where(mask, sampled_action, source_window))
-        uncertainty = np.stack(stochastic_windows).std(axis=0)
+        candidate_windows = np.stack(stochastic_windows)
+        uncertainty = candidate_windows.std(axis=0)
+        completed_window, selected_candidate_index, candidate_errors = (
+            select_latent_action_window(
+                prior_mean_window,
+                candidate_windows,
+                source_window,
+                mask,
+                latent_mode,
+            )
+        )
+        prior_mean_rmse = float(
+            np.sqrt(np.mean(np.square(prior_mean_window[mask] - source_window[mask])))
+        )
 
         full_relative = source["action_rel"].copy()
         absolute_mask = np.zeros_like(full_relative, dtype=bool)
@@ -561,6 +584,18 @@ def complete(
         hold, linear = masked_baselines(source_window, mask)
         offline_metrics[scenario.name] = {
             "scenario": scenario.to_dict(),
+            "latent_selection_mode": latent_mode,
+            "latent_candidate_seeds": [
+                scenario.seed + sample_index + 1 for sample_index in range(latent_samples)
+            ],
+            "selected_candidate_index": selected_candidate_index,
+            "candidate_masked_rmse_rad": candidate_errors.tolist(),
+            "selected_candidate_pre_mapping_rmse_rad": (
+                float(candidate_errors[selected_candidate_index])
+                if selected_candidate_index >= 0
+                else None
+            ),
+            "prior_mean_pre_mapping_rmse_rad": prior_mean_rmse,
             **_masked_metrics(
                 source_window,
                 achieved[window_start:window_stop],
@@ -580,12 +615,15 @@ def complete(
         uncertainty_full[window_start:window_stop] = uncertainty
         uncertainty_values.append(uncertainty_full)
         saturation_values.append(saturated)
+        selected_candidate_indices.append(selected_candidate_index)
+        candidate_error_values.append(candidate_errors)
 
     relative_array = np.stack(completed_relative)
     raw_array = np.stack(completed_raw)
     mask_array = np.stack(full_masks)
     uncertainty_array = np.stack(uncertainty_values)
     saturation_array = np.stack(saturation_values)
+    candidate_error_array = np.stack(candidate_error_values)
     temporary = output_run / "data/.completed_actions.tmp.npz"
     np.savez_compressed(
         temporary,
@@ -596,6 +634,8 @@ def complete(
         completed_raw_action=raw_array,
         mask_action=mask_array,
         latent_action_std=uncertainty_array,
+        latent_candidate_masked_rmse_rad=candidate_error_array,
+        selected_latent_candidate_index=np.asarray(selected_candidate_indices, dtype=np.int64),
         action_saturated=saturation_array,
         window_start=np.int64(window_start),
         window_length=np.int64(DEFAULT_WINDOW_TRANSITIONS),
@@ -627,8 +667,11 @@ def complete(
         "window_start": window_start,
         "window_length": DEFAULT_WINDOW_TRANSITIONS,
         "peak_block_start": peak_block_start,
-        "latent_mode": "prior_mean",
+        "latent_mode": latent_mode,
         "latent_samples_for_uncertainty": latent_samples,
+        "latent_candidate_count": latent_samples,
+        "oracle_uses_ground_truth_action": latent_mode == "oracle_best_of_n",
+        "multi_position_scan_latent_mode": "prior_mean",
         "relative_raw_processed_round_trip_max_abs": mapping_round_trip_max,
         "relative_raw_processed_round_trip_threshold": 1.0e-6,
         "visible_action_max_abs_change": 0.0,
@@ -652,6 +695,9 @@ def complete(
         "steps": int(replay_raw.shape[0]),
         "num_envs": int(replay_raw.shape[1]),
         "scenario_names": ["original", *scenario_names],
+        "latent_mode": latent_mode,
+        "latent_candidate_count": latent_samples,
+        "oracle_uses_ground_truth_action": latent_mode == "oracle_best_of_n",
         "source_capture": str(source_path.resolve()),
         "control_dt": source["control_dt"],
     }
@@ -903,6 +949,9 @@ def physics_metrics(output_run: Path) -> dict[str, Any]:
     report = {
         "schema_version": "sonic_action_replay_physics_metrics_v1",
         "replay_execution_mode": replay_execution_mode,
+        "latent_mode": offline["latent_mode"],
+        "latent_candidate_count": offline["latent_candidate_count"],
+        "oracle_uses_ground_truth_action": offline["oracle_uses_ground_truth_action"],
         "passed": fidelity_pass and pre_mask_pass and mapping_pass and action_execution_pass,
         "source_replay_fidelity": source_fidelity,
         "source_replay_fidelity_thresholds": {
@@ -957,6 +1006,9 @@ def finalize(output_run: Path, render_mode: str) -> dict[str, Any]:
         "schema_version": "sonic_action_mask_eval_summary_v1",
         "passed": bool(physics["passed"]),
         "pipeline_completed": True,
+        "latent_mode": physics["latent_mode"],
+        "latent_candidate_count": physics["latent_candidate_count"],
+        "oracle_uses_ground_truth_action": physics["oracle_uses_ground_truth_action"],
         "model_quality_pass": bool(physics["model_quality_pass"]),
         "render_mode": render_mode,
         "videos": videos,
