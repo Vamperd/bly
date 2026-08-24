@@ -791,6 +791,12 @@ def _post_mask_metrics(
 def physics_metrics(output_run: Path) -> dict[str, Any]:
     output_run = output_run.expanduser().resolve()
     request = load_json(output_run / "manifests/action_replay_request.json")
+    replay_execution_manifest = output_run / "manifests/action_replay_slices.json"
+    replay_execution_mode = (
+        load_json(replay_execution_manifest)["execution_mode"]
+        if replay_execution_manifest.is_file()
+        else "legacy_parallel_environment"
+    )
     source = _load_replay_trajectory(output_run / SOURCE_RELATIVE_PATH)
     replay_dir = output_run / "data/replay"
     trajectories = [
@@ -896,6 +902,7 @@ def physics_metrics(output_run: Path) -> dict[str, Any]:
     }
     report = {
         "schema_version": "sonic_action_replay_physics_metrics_v1",
+        "replay_execution_mode": replay_execution_mode,
         "passed": fidelity_pass and pre_mask_pass and mapping_pass and action_execution_pass,
         "source_replay_fidelity": source_fidelity,
         "source_replay_fidelity_thresholds": {

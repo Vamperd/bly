@@ -372,8 +372,13 @@ ACTION_MASK_RUN_DIR=~/bly/runs/cvae_action_mask_eval_YYYYMMDD_HHMMSS \
 源采集与重放均为 headless Isaac 物理运行，固定使用 `plane` 地形，并关闭 camera、RTX、
 observation corruption、startup/interval 随机化和跟踪失败 reset，只保留 motion timeout。
 源采集和批量重放必须显式使用相同平面，不能继承 SONIC release 的随机 `trimesh`；否则
-1-env 源运行和多 env 重放会落在不同地形块上，并在 Mask 开始前产生物理分歧。重放把
-original 与全部补全场景映射到同一个动作、同一初始状态的并行环境；记录绝对
-root/joint/body 状态和 runtime Action 映射。渲染阶段再用 MuJoCo 对这些完整物理状态做
-50 FPS 公共世界相机可视化，不会把 CVAE 预测 State 当成物理结果。
+1-env 源运行和多 env 重放会落在不同地形块上，并在 Mask 开始前产生物理分歧。
+
+为避免 GPU PhysX 在不同 env 世界坐标下的接触数值差异被开环回放放大，original 与每个
+补全场景默认按清单顺序各启动一次隔离的单环境 Isaac 重放。批量 Action 会先拆成可审计的
+`data/replay_action_slices/*.actions.npz`，输出仍以原场景编号写入同一个 `data/replay/`，
+因此 CVAE 推理、指标和视频接口不变。该模式比 17-env 并行模式慢，但所有场景使用相同
+seed、平面、单环境原点和控制配置，物理对比才有效。每次重放记录绝对 root/joint/body
+状态和 runtime Action 映射。渲染阶段再用 MuJoCo 对这些完整物理状态做 50 FPS 公共世界
+相机可视化，不会把 CVAE 预测 State 当成物理结果。
 `ACTION_MASK_GL`、宽高和相机距离仅影响离线视频，不影响 Isaac 轨迹。

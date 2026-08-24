@@ -68,6 +68,8 @@ class ActionReplayTrajectoryRecorderTerm(recorder_manager.RecorderTerm):
             return
         if not self.cfg.save_path:
             raise ValueError("Action replay recorder save_path is required")
+        if self.cfg.environment_id_offset < 0:
+            raise ValueError("environment_id_offset must be non-negative")
         term = _action_term(self._env)
         joint_names = list(getattr(term, "_joint_names", []))
         if len(joint_names) != ACTION_DIM or len(set(joint_names)) != ACTION_DIM:
@@ -210,8 +212,9 @@ class ActionReplayTrajectoryRecorderTerm(recorder_manager.RecorderTerm):
                     for name, values in action.items()
                 }
             )
-            replay_path = output / f"{env_id:06d}.replay.npz"
-            temporary = output / f".{env_id:06d}.replay.tmp.npz"
+            artifact_id = env_id + self.cfg.environment_id_offset
+            replay_path = output / f"{artifact_id:06d}.replay.npz"
+            temporary = output / f".{artifact_id:06d}.replay.tmp.npz"
             np.savez_compressed(
                 temporary,
                 **arrays,
@@ -238,8 +241,8 @@ class ActionReplayTrajectoryRecorderTerm(recorder_manager.RecorderTerm):
                 "table_pos_w": None,
                 "table_quat_w": None,
             }
-            trajectory_path = output / f"{env_id:06d}.trajectory.pkl"
-            temporary_trajectory = output / f".{env_id:06d}.trajectory.tmp.pkl"
+            trajectory_path = output / f"{artifact_id:06d}.trajectory.pkl"
+            temporary_trajectory = output / f".{artifact_id:06d}.trajectory.tmp.pkl"
             with temporary_trajectory.open("wb") as stream:
                 pickle.dump(trajectory, stream, protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(temporary_trajectory, trajectory_path)
@@ -253,3 +256,4 @@ class ActionReplayTrajectoryRecorderTerm(recorder_manager.RecorderTerm):
 class ActionReplayTrajectoryRecorderCfg(manager_term_cfg.RecorderTermCfg):
     class_type = ActionReplayTrajectoryRecorderTerm
     save_path: str | None = None
+    environment_id_offset: int = 0

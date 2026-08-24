@@ -1049,7 +1049,7 @@ phase_replay_action_mask() {
   [[ -n "$ACTION_MASK_RUN_DIR" ]] \
     || die "Set ACTION_MASK_RUN_DIR to the CVAE Action-mask evaluation run"
   local run_dir request source_request motion_dir checkpoint_path seed actions_file actions_hash
-  local expected_actions_hash num_envs output_dir
+  local expected_actions_hash num_envs output_dir slice_dir slice_manifest
   run_dir="$(validated_run_dir "$ACTION_MASK_RUN_DIR")"
   request="$run_dir/manifests/action_replay_request.json"
   source_request="$run_dir/manifests/action_mask_request.json"
@@ -1067,58 +1067,76 @@ phase_replay_action_mask() {
   [[ "$actions_hash" == "$expected_actions_hash" ]] \
     || die "External Action replay SHA256 no longer matches its request manifest"
   output_dir="$run_dir/data/replay"
-  mkdir -p -- "$output_dir"
+  slice_dir="$run_dir/data/replay_action_slices"
+  slice_manifest="$run_dir/manifests/action_replay_slices.json"
+  mkdir -p -- "$output_dir" "$slice_dir"
+  python "$SCRIPT_DIR/prepare_action_replay_slices.py" \
+    --source "$actions_file" \
+    --output-dir "$slice_dir" \
+    --expected-num-envs "$num_envs" \
+    --manifest "$slice_manifest" \
+    > "$run_dir/logs/action_replay_slices.log"
 
-  if (
-    cd "$SONIC_DIR"
-    PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python gear_sonic/eval_agent_trl.py \
-      "+checkpoint=$checkpoint_path" \
-      +headless=True \
-      "hydra.run.dir=$run_dir/manifests/hydra_action_mask_replay" \
-      "++eval_callbacks=[]" \
-      ++run_eval_loop=True \
-      ++run_once=False \
-      "++external_action_replay_path=$actions_file" \
-      "++num_envs=$num_envs" \
-      "++seed=$seed" \
-      ++use_encoder=g1 \
-      ++manager_env.config.render_results=False \
-      ++manager_env.config.enable_cameras=False \
-      ++manager_env.config.terrain_type=plane \
-      "~manager_env/recorders=empty" \
-      ++manager_env.recorders.dataset_export_mode=0 \
-      "++manager_env.recorders.trajectory._target_=action_replay_recorder.ActionReplayTrajectoryRecorderCfg" \
-      "++manager_env.recorders.trajectory.save_path=$output_dir" \
-      ++manager_env.observations.policy.enable_corruption=False \
-      ++manager_env.observations.tokenizer.enable_corruption=False \
-      "+manager_env/terminations=tracking/eval" \
-      ++manager_env.terminations.anchor_pos=null \
-      ++manager_env.terminations.anchor_ori_full=null \
-      ++manager_env.terminations.ee_body_pos=null \
-      ++manager_env.terminations.foot_pos_xyz=null \
-      ++manager_env.events.physics_material=null \
-      ++manager_env.events.add_joint_default_pos=null \
-      ++manager_env.events.base_com=null \
-      ++manager_env.events.push_robot=null \
-      ++manager_env.events.randomize_rigid_body_mass=null \
-      ++manager_env.commands.motion.use_paired_motions=False \
-      ++manager_env.commands.motion.sample_unique_motions=False \
-      ++manager_env.commands.motion.start_from_first_frame=True \
-      ++manager_env.commands.motion.sample_from_n_initial_frames=null \
-      "++manager_env.commands.motion.eval_motion_repeat=$num_envs" \
-      ++manager_env.commands.motion.eval_require_full_batch=True \
-      ++manager_env.commands.motion.randomize_eval_resets=False \
-      ++manager_env.commands.motion.motion_lib_cfg.deterministic_motion_order=True \
-      ++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=1 \
-      "++manager_env.commands.motion.motion_lib_cfg.motion_file=$motion_dir" \
-      ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=zeros
-  ) 2>&1 | tee "$run_dir/logs/action_mask_replay.log"; then
-    :
-  else
-    local rc=$?
-    record_exit_code "$run_dir" action_mask_replay "$rc"
-    return "$rc"
-  fi
+  local scenario_index scenario_id action_slice hydra_dir
+  for ((scenario_index = 0; scenario_index < num_envs; scenario_index++)); do
+    printf -v scenario_id '%06d' "$scenario_index"
+    action_slice="$slice_dir/$scenario_id.actions.npz"
+    hydra_dir="$run_dir/manifests/hydra_action_mask_replay_$scenario_id"
+    [[ -s "$action_slice" ]] \
+      || die "Serial Action replay slice is missing: $action_slice"
+    log "Replaying Action-mask environment $scenario_index/$((num_envs - 1)) as one isolated env"
+    if (
+      cd "$SONIC_DIR"
+      PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python gear_sonic/eval_agent_trl.py \
+        "+checkpoint=$checkpoint_path" \
+        +headless=True \
+        "hydra.run.dir=$hydra_dir" \
+        "++eval_callbacks=[]" \
+        ++run_eval_loop=True \
+        ++run_once=False \
+        "++external_action_replay_path=$action_slice" \
+        ++num_envs=1 \
+        "++seed=$seed" \
+        ++use_encoder=g1 \
+        ++manager_env.config.render_results=False \
+        ++manager_env.config.enable_cameras=False \
+        ++manager_env.config.terrain_type=plane \
+        "~manager_env/recorders=empty" \
+        ++manager_env.recorders.dataset_export_mode=0 \
+        "++manager_env.recorders.trajectory._target_=action_replay_recorder.ActionReplayTrajectoryRecorderCfg" \
+        "++manager_env.recorders.trajectory.save_path=$output_dir" \
+        "++manager_env.recorders.trajectory.environment_id_offset=$scenario_index" \
+        ++manager_env.observations.policy.enable_corruption=False \
+        ++manager_env.observations.tokenizer.enable_corruption=False \
+        "+manager_env/terminations=tracking/eval" \
+        ++manager_env.terminations.anchor_pos=null \
+        ++manager_env.terminations.anchor_ori_full=null \
+        ++manager_env.terminations.ee_body_pos=null \
+        ++manager_env.terminations.foot_pos_xyz=null \
+        ++manager_env.events.physics_material=null \
+        ++manager_env.events.add_joint_default_pos=null \
+        ++manager_env.events.base_com=null \
+        ++manager_env.events.push_robot=null \
+        ++manager_env.events.randomize_rigid_body_mass=null \
+        ++manager_env.commands.motion.use_paired_motions=False \
+        ++manager_env.commands.motion.sample_unique_motions=False \
+        ++manager_env.commands.motion.start_from_first_frame=True \
+        ++manager_env.commands.motion.sample_from_n_initial_frames=null \
+        ++manager_env.commands.motion.eval_motion_repeat=1 \
+        ++manager_env.commands.motion.eval_require_full_batch=True \
+        ++manager_env.commands.motion.randomize_eval_resets=False \
+        ++manager_env.commands.motion.motion_lib_cfg.deterministic_motion_order=True \
+        ++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=1 \
+        "++manager_env.commands.motion.motion_lib_cfg.motion_file=$motion_dir" \
+        ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=zeros
+    ) 2>&1 | tee -a "$run_dir/logs/action_mask_replay.log"; then
+      :
+    else
+      local rc=$?
+      record_exit_code "$run_dir" action_mask_replay "$rc"
+      return "$rc"
+    fi
+  done
   local replay_count trajectory_count
   replay_count="$(find "$output_dir" -maxdepth 1 -type f -name '*.replay.npz' -size +0c | wc -l)"
   trajectory_count="$(find "$output_dir" -maxdepth 1 -type f -name '*.trajectory.pkl' -size +0c | wc -l)"
