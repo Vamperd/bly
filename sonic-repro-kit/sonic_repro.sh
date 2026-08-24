@@ -1008,14 +1008,14 @@ phase_capture_action_mask_source() {
       ++manager_env.observations.policy.enable_corruption=False \
       ++manager_env.observations.tokenizer.enable_corruption=False \
       "+manager_env/terminations=tracking/eval" \
-      ~manager_env.terminations.anchor_pos \
-      ~manager_env.terminations.anchor_ori_full \
-      ~manager_env.terminations.ee_body_pos \
-      ~manager_env.events.physics_material \
-      ~manager_env.events.add_joint_default_pos \
-      ~manager_env.events.base_com \
-      ~manager_env.events.push_robot \
-      ~manager_env.events.randomize_rigid_body_mass \
+      ++manager_env.terminations.anchor_pos=null \
+      ++manager_env.terminations.anchor_ori_full=null \
+      ++manager_env.terminations.ee_body_pos=null \
+      ++manager_env.events.physics_material=null \
+      ++manager_env.events.add_joint_default_pos=null \
+      ++manager_env.events.base_com=null \
+      ++manager_env.events.push_robot=null \
+      ++manager_env.events.randomize_rigid_body_mass=null \
       ++manager_env.commands.motion.use_paired_motions=False \
       ++manager_env.commands.motion.sample_unique_motions=False \
       ++manager_env.commands.motion.start_from_first_frame=True \
@@ -1089,14 +1089,14 @@ phase_replay_action_mask() {
       ++manager_env.observations.policy.enable_corruption=False \
       ++manager_env.observations.tokenizer.enable_corruption=False \
       "+manager_env/terminations=tracking/eval" \
-      ~manager_env.terminations.anchor_pos \
-      ~manager_env.terminations.anchor_ori_full \
-      ~manager_env.terminations.ee_body_pos \
-      ~manager_env.events.physics_material \
-      ~manager_env.events.add_joint_default_pos \
-      ~manager_env.events.base_com \
-      ~manager_env.events.push_robot \
-      ~manager_env.events.randomize_rigid_body_mass \
+      ++manager_env.terminations.anchor_pos=null \
+      ++manager_env.terminations.anchor_ori_full=null \
+      ++manager_env.terminations.ee_body_pos=null \
+      ++manager_env.events.physics_material=null \
+      ++manager_env.events.add_joint_default_pos=null \
+      ++manager_env.events.base_com=null \
+      ++manager_env.events.push_robot=null \
+      ++manager_env.events.randomize_rigid_body_mass=null \
       ++manager_env.commands.motion.use_paired_motions=False \
       ++manager_env.commands.motion.sample_unique_motions=False \
       ++manager_env.commands.motion.start_from_first_frame=True \
