@@ -96,9 +96,10 @@ PATCH_3="$PATCH_DIR/0003-feat-collect-repeated-motion-randomized-dataset.patch"
 PATCH_4="$PATCH_DIR/0004-fix-record-runtime-termination-terms.patch"
 PATCH_5="$PATCH_DIR/0005-feat-add-external-action-physics-replay.patch"
 PATCH_6="$PATCH_DIR/0006-feat-collect-physics-state-action-v3.patch"
-git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6"
+PATCH_7="$PATCH_DIR/0007-fix-lazy-physics-diagnostics-initialization.patch"
+git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6" "$PATCH_7"
 git switch -c codex/minimal-state-action-recorder
-git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6"
+git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6" "$PATCH_7"
 ```
 
 不要在 Ubuntu 手工编辑补丁内容。如果配置文件已存在，应先检查当前提交和工作树，
@@ -132,6 +133,17 @@ git am "$PATCH_6"
 
 `0006` 只增加默认关闭的 Physics v3 recorder 和 4 帧 contact history 配置；旧 collector、
 SONIC 策略输入与训练行为不变，也不修改 Isaac Lab。
+
+若首次 v3 smoke 在创建 `RecorderManager` 时报告
+`AttributeError: ManagerBasedRLEnv has no attribute action_manager`，说明还缺少初始化顺序
+修复。已经应用 `0006` 的执行端继续应用：
+
+```bash
+cd ~/bly/sonic-repro/GR00T-WholeBodyControl
+PATCH_7=~/bly/sonic-repro-kit/patches/0007-fix-lazy-physics-diagnostics-initialization.patch
+git apply --check "$PATCH_7"
+git am "$PATCH_7"
+```
 
 ```bash
 ./sonic_repro.sh collect-state-action
