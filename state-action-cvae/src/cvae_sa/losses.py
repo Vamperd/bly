@@ -65,10 +65,14 @@ def _balanced_physics_state_loss(
     contact_mask = step_mask[..., None].expand(*step_mask.shape, 2)
     if bool(contact_mask.any()):
         if contact_logits is None:
-            contact_loss = F.binary_cross_entropy(
-                prediction[..., 68:70].clamp(1e-6, 1.0 - 1e-6),
-                target[..., 68:70],
-                reduction="none",
+            # Rollout/cycle paths currently carry contact probabilities rather
+            # than logits. torch BCE on probabilities is deliberately rejected
+            # by CUDA autocast, so evaluate the stable Bernoulli NLL in FP32.
+            probability = prediction[..., 68:70].float().clamp(1e-6, 1.0 - 1e-6)
+            contact_target = target[..., 68:70].float()
+            contact_loss = -(
+                contact_target * torch.log(probability)
+                + (1.0 - contact_target) * torch.log1p(-probability)
             )
         else:
             contact_loss = F.binary_cross_entropy_with_logits(
