@@ -382,6 +382,7 @@ def train(
     best_score = math.inf
     validations_without_improvement = 0
     losses: list[float] = []
+    validation_scores: list[float] = []
     model.train()
     optimizer.zero_grad(set_to_none=True)
     for optimizer_step in range(1, max_steps + 1):
@@ -424,14 +425,24 @@ def train(
 
         validation_interval = int(training["validation_interval"])
         if optimizer_step % validation_interval == 0 or optimizer_step == max_steps:
-            validation = validate(
-                model,
-                validation_loader,
-                masker,
-                device,
-                str(training["amp"]),
-                int(training["validation_max_batches"]),
+            validation_devices = (
+                [device.index if device.index is not None else torch.cuda.current_device()]
+                if device.type == "cuda"
+                else []
             )
+            # Reuse the same validation masks at every checkpoint. Mixed task
+            # losses and the rollout curriculum make unrelated random masks an
+            # invalid smoke-progress comparison.
+            with torch.random.fork_rng(devices=validation_devices):
+                torch.manual_seed(seed + 90_001)
+                validation = validate(
+                    model,
+                    validation_loader,
+                    masker,
+                    device,
+                    str(training["amp"]),
+                    int(training["validation_max_batches"]),
+                )
             validation_record = {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "phase": "validation",
@@ -441,6 +452,7 @@ def train(
             with metrics_path.open("a", encoding="utf-8") as metrics_stream:
                 metrics_stream.write(json.dumps(validation_record, ensure_ascii=False) + "\n")
             score = validation["selection_score"]
+            validation_scores.append(float(score))
             if score < best_score:
                 best_score = score
                 validations_without_improvement = 0
@@ -471,13 +483,37 @@ def train(
     if reopened.get("format_version") != expected_format:
         raise ValueError("atomically written checkpoint cannot be reopened")
     smoke_decreased = True
+    train_window_decreased = True
+    validation_score_improved = True
     if smoke:
         span = min(20, len(losses) // 2)
-        smoke_decreased = span > 0 and float(np.mean(losses[-span:])) < float(
+        train_window_decreased = span > 0 and float(np.mean(losses[-span:])) < float(
             np.mean(losses[:span])
         )
+        validation_score_improved = (
+            len(validation_scores) >= 2
+            and min(validation_scores[1:]) < validation_scores[0]
+        )
+        smoke_decreased = train_window_decreased or validation_score_improved
         if not smoke_decreased:
-            raise RuntimeError("smoke loss did not decrease from the first to last window")
+            atomic_write_json(
+                output_run / "manifests" / "smoke_diagnostics.json",
+                {
+                    "train_window_decreased": train_window_decreased,
+                    "validation_score_improved": validation_score_improved,
+                    "validation_scores": validation_scores,
+                    "first_train_window_mean": (
+                        float(np.mean(losses[:span])) if span else None
+                    ),
+                    "last_train_window_mean": (
+                        float(np.mean(losses[-span:])) if span else None
+                    ),
+                },
+            )
+            raise RuntimeError(
+                "smoke showed no improvement in either the fixed validation suite "
+                "or the train-loss windows"
+            )
     summary = {
         "passed": True,
         "smoke": smoke,
@@ -487,6 +523,9 @@ def train(
         "first_loss": losses[0],
         "last_loss": losses[-1],
         "smoke_loss_decreased": smoke_decreased,
+        "smoke_train_window_decreased": train_window_decreased,
+        "smoke_validation_score_improved": validation_score_improved,
+        "validation_scores": validation_scores,
         "best_checkpoint": str(best_path),
         "last_checkpoint": str(output_run / "checkpoints" / "last.pt"),
     }
