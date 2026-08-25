@@ -16,6 +16,11 @@ from .models import build_model
 from .util import atomic_write_json, atomic_write_text, file_sha256, seed_everything
 
 
+SAMPLE_TASKS = TASK_NAMES + (
+    "forward_one", "forward_rollout", "forward_cold", "history_action", "arbitrary"
+)
+
+
 def _batch_sample(sample: dict[str, Any], device: torch.device) -> dict[str, Any]:
     return {
         key: value[None].to(device) if isinstance(value, torch.Tensor) else [value]
@@ -50,6 +55,30 @@ def _sample_from_npz(
             values.get("dynamics_context", np.empty((dataset.dynamics_context_dim,))),
             dtype=np.float32,
         )
+        action_before = np.asarray(
+            values.get("action_before_window", np.zeros(29)), dtype=np.float32
+        )
+        joint_robot = np.asarray(
+            values.get("joint_robot_information", np.empty((29, dataset.joint_robot_info_dim))),
+            dtype=np.float32,
+        )
+        actuator_type = np.asarray(
+            values.get("joint_actuator_type", np.zeros(29)), dtype=np.int64
+        )
+        global_robot = np.asarray(
+            values.get("global_robot_information", np.empty((dataset.global_robot_info_dim,))),
+            dtype=np.float32,
+        )
+        if dataset.physics_v4 and any(
+            name not in values
+            for name in (
+                "action_before_window", "joint_robot_information",
+                "joint_actuator_type", "global_robot_information",
+            )
+        ):
+            raise ValueError(
+                "Physics CVAE v4 NPZ requires action_before_window and structured robot information"
+            )
         normalized = bool(np.asarray(values.get("normalized", False)).item())
         valid_state = np.asarray(
             values.get("valid_state", np.ones(state.shape[0], dtype=bool)), dtype=bool
@@ -80,6 +109,10 @@ def _sample_from_npz(
         "action_scale": (29,),
         "robot_information": (dataset.robot_info_dim,),
         "dynamics_context": (dataset.dynamics_context_dim,),
+        "action_before_window": (29,),
+        "joint_robot_information": (29, dataset.joint_robot_info_dim),
+        "joint_actuator_type": (29,),
+        "global_robot_information": (dataset.global_robot_info_dim,),
     }
     actual = {
         "physical_state": state.shape,
@@ -88,6 +121,10 @@ def _sample_from_npz(
         "action_scale": scale.shape,
         "robot_information": robot_information.shape,
         "dynamics_context": dynamics_context.shape,
+        "action_before_window": action_before.shape,
+        "joint_robot_information": joint_robot.shape,
+        "joint_actuator_type": actuator_type.shape,
+        "global_robot_information": global_robot.shape,
     }
     for name, shape in expected.items():
         if actual[name] != shape:
@@ -102,13 +139,26 @@ def _sample_from_npz(
         dynamics_context = (
             dynamics_context - dataset.dynamics_mean
         ) / dataset.dynamics_std
+        action_before = (action_before - dataset.action_mean) / dataset.action_std
+        if dataset.physics_v4:
+            joint_robot = (
+                joint_robot - dataset.joint_robot_mean
+            ) / dataset.joint_robot_std
+            global_robot = (
+                global_robot - dataset.global_robot_mean
+            ) / dataset.global_robot_std
     sample = {
         "physical_state": torch.from_numpy(state),
         "previous_action": torch.from_numpy(previous),
         "action": torch.from_numpy(action),
+        "action_before_window": torch.from_numpy(action_before),
         "action_scale": torch.from_numpy(scale),
         "robot_information": torch.from_numpy(robot_information),
+        "joint_robot_information": torch.from_numpy(joint_robot),
+        "joint_actuator_type": torch.from_numpy(actuator_type),
+        "global_robot_information": torch.from_numpy(global_robot),
         "dynamics_context": torch.from_numpy(dynamics_context),
+        "auxiliary_transition": torch.zeros((action.shape[0], dataset.auxiliary_dim)),
         "valid_state": torch.from_numpy(valid_state),
         "valid_action": torch.from_numpy(valid_action),
         "progress": torch.from_numpy(progress),
@@ -168,10 +218,10 @@ def _explicit_mask_batch(
         state.clone(),
         previous_loss,
         action.clone(),
-        TASK_NAMES.index(task),
+        0 if task.startswith("forward") else 1 if task in {"inverse", "history_action"} else 2,
         task,
         "external",
-        task == "forward",
+        task.startswith("forward") or task == "history_action",
     )
 
 
@@ -235,13 +285,36 @@ def sample(
     generated_action = []
     for _ in range(latent_samples):
         output = model(batch, masks, sample_from_prior=True, deterministic=False)
+        state_prediction = output.physical_state
+        if output.forward_contact_logits is not None and masks.forward_transition is not None:
+            forward_steps = masks.forward_transition[:, :, None].expand(
+                -1, -1, state_prediction.shape[-1]
+            )
+            forward_state = batch["physical_state"][:, :-1] + output.forward_delta
+            state_prediction = state_prediction.clone()
+            state_prediction[:, 1:] = torch.where(
+                forward_steps, forward_state, state_prediction[:, 1:]
+            )
+        action_prediction = output.action
+        if output.inverse_action is not None and masks.inverse_transition is not None:
+            inverse_steps = masks.inverse_transition[:, :, None].expand_as(action_prediction)
+            action_prediction = torch.where(
+                inverse_steps, output.inverse_action, action_prediction
+            )
+        if output.history_action is not None and masks.history_action_transition is not None:
+            history_steps = masks.history_action_transition[:, :, None].expand_as(
+                action_prediction
+            )
+            action_prediction = torch.where(
+                history_steps, output.history_action, action_prediction
+            )
         completed_state = torch.where(
-            masks.state_input, output.physical_state, batch["physical_state"]
+            masks.state_input, state_prediction, batch["physical_state"]
         )
         completed_previous = torch.where(
             masks.previous_input, output.previous_action, batch["previous_action"]
         )
-        completed_action = torch.where(masks.action_input, output.action, batch["action"])
+        completed_action = torch.where(masks.action_input, action_prediction, batch["action"])
         generated_state.append(completed_state[0].float().cpu().numpy())
         generated_previous.append(completed_previous[0].float().cpu().numpy())
         generated_action.append(completed_action[0].float().cpu().numpy())
@@ -274,6 +347,10 @@ def sample(
             valid_action=batch["valid_action"][0].cpu().numpy(),
             action_scale=batch["action_scale"][0].cpu().numpy(),
             robot_information=batch["robot_information"][0].cpu().numpy(),
+            action_before_window=batch["action_before_window"][0].cpu().numpy(),
+            joint_robot_information=batch["joint_robot_information"][0].cpu().numpy(),
+            joint_actuator_type=batch["joint_actuator_type"][0].cpu().numpy(),
+            global_robot_information=batch["global_robot_information"][0].cpu().numpy(),
             dynamics_context=batch["dynamics_context"][0].cpu().numpy(),
         )
     os.replace(temporary, output_path)
@@ -311,7 +388,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path)
     parser.add_argument("--episode")
     parser.add_argument("--start", type=int, default=0)
-    parser.add_argument("--task", choices=TASK_NAMES, default="completion")
+    parser.add_argument("--task", choices=SAMPLE_TASKS, default="completion")
     parser.add_argument("--completion", choices=("element", "step", "feature"), default="step")
     parser.add_argument("--latent-samples", type=int, default=8)
     return parser.parse_args()

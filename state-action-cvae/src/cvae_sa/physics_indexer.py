@@ -18,13 +18,17 @@ from .indexer import RunningStats, _high_frequency_energy, stratified_motion_spl
 from .physics_schema import (
     AUXILIARY_TRANSITION_DIM,
     DYNAMICS_CONTEXT_DIM,
+    GLOBAL_ROBOT_INFO_DIM,
+    JOINT_ROBOT_INFO_DIM,
     PHYSICS_STATE_DIM,
     ROBOT_INFO_DIM,
+    actuator_type_names,
     dynamics_context_vector,
     load_physics_schema,
     read_physics_states,
     read_auxiliary_transitions,
     robot_information_vector,
+    structured_robot_information,
 )
 from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
 
@@ -102,6 +106,8 @@ def build_physics_index(
     for child in ("data", "manifests", "markers", "logs", "checkpoints", "videos"):
         (output_run / child).mkdir(parents=True, exist_ok=True)
     sources = [_source(path) for path in source_paths]
+    if not sources:
+        raise ValueError("at least one Physics State-Action source run is required")
     if expected_motions == 768 and len(sources) != 4:
         raise ValueError(f"production physics index requires four source runs, found {len(sources)}")
     if expected_motions == 768:
@@ -118,6 +124,29 @@ def build_physics_index(
             raise ValueError(
                 f"physics source cohort/profile composition is invalid: {signatures}"
             )
+    if expected_motions == 2048:
+        signatures = Counter((source.cohort, source.profile) for source in sources)
+        expected_signatures = Counter(
+            {
+                ("m2048", "startup"): 1,
+                ("m2048", "initial_state_mild"): 1,
+            }
+        )
+        if signatures != expected_signatures:
+            raise ValueError(
+                "2048-motion physics index requires exactly one startup and one "
+                f"initial_state_mild source: {signatures}"
+            )
+    actuator_types = sorted(
+        {
+            name
+            for source in sources
+            for name in actuator_type_names(source.schema)
+        }
+    )
+    if "unknown" not in actuator_types:
+        actuator_types.insert(0, "unknown")
+    actuator_type_to_id = {name: index for index, name in enumerate(actuator_types)}
     records: list[dict[str, Any]] = []
     motion_meta: dict[str, dict[str, Any]] = {}
     identities: set[tuple[str, int]] = set()
@@ -211,11 +240,17 @@ def build_physics_index(
             raise ValueError(f"unexpected cohort balance: {cohort_counts}")
         if package_counts != {package: 96 for package in PACKAGES}:
             raise ValueError(f"unexpected package balance: {package_counts}")
+    if expected_motions == 2048:
+        package_counts = Counter(meta["package"] for meta in motion_meta.values())
+        if package_counts != {package: 256 for package in PACKAGES}:
+            raise ValueError(f"unexpected 2048-motion package balance: {package_counts}")
     motions = sorted(motion_meta.values(), key=lambda item: item["motion_key"])
     split_by_key = stratified_motion_split(motions, split_counts, seed)
     state_stats = RunningStats(PHYSICS_STATE_DIM)
     action_stats = RunningStats(ACTION_DIM)
     robot_stats = RunningStats(ROBOT_INFO_DIM)
+    joint_robot_stats = RunningStats(JOINT_ROBOT_INFO_DIM)
+    global_robot_stats = RunningStats(GLOBAL_ROBOT_INFO_DIM)
     dynamics_stats = RunningStats(DYNAMICS_CONTEXT_DIM)
     auxiliary_stats = RunningStats(AUXILIARY_TRANSITION_DIM)
     handles: dict[str, h5py.File] = {}
@@ -232,11 +267,16 @@ def build_physics_index(
             actions = np.asarray(episode["actions/action_target_canonical"], dtype=np.float32)
             context = stream[f"contexts/{record['context_id']}"]
             robot_info = robot_information_vector(schema, context, record["env_id"])
+            joint_robot, _, global_robot = structured_robot_information(
+                schema, context, record["env_id"], actuator_type_to_id
+            )
             dynamics_context = dynamics_context_vector(context)
             auxiliary = read_auxiliary_transitions(episode["diagnostics"])
             state_stats.update(states)
             action_stats.update(actions)
             robot_stats.update(robot_info[None])
+            joint_robot_stats.update(joint_robot)
+            global_robot_stats.update(global_robot[None])
             dynamics_stats.update(dynamics_context[None])
             auxiliary_stats.update(auxiliary)
     finally:
@@ -249,6 +289,8 @@ def build_physics_index(
     state_std[68:70] = 1.0
     action_mean, action_std = action_stats.finalize()
     robot_mean, robot_std = robot_stats.finalize()
+    joint_robot_mean, joint_robot_std = joint_robot_stats.finalize()
+    global_robot_mean, global_robot_std = global_robot_stats.finalize()
     dynamics_mean, dynamics_std = dynamics_stats.finalize()
     auxiliary_mean, auxiliary_std = auxiliary_stats.finalize()
     normalization_path = output_run / "data/normalization.npz"
@@ -262,6 +304,10 @@ def build_physics_index(
             action_std=action_std,
             robot_info_mean=robot_mean,
             robot_info_std=robot_std,
+            joint_robot_info_mean=joint_robot_mean,
+            joint_robot_info_std=joint_robot_std,
+            global_robot_info_mean=global_robot_mean,
+            global_robot_info_std=global_robot_std,
             dynamics_context_mean=dynamics_mean,
             dynamics_context_std=dynamics_std,
             auxiliary_transition_mean=auxiliary_mean,
@@ -294,7 +340,7 @@ def build_physics_index(
         }
     atomic_write_json(output_run / "data/action_feature_audit.json", audit)
     manifest = {
-        "schema_version": "sonic_physics_state_action_cvae_dataset_v3",
+        "schema_version": "sonic_physics_state_action_cvae_dataset_v4",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "seed": seed,
         "source_runs": [str(source.run_dir) for source in sources],
@@ -315,7 +361,34 @@ def build_physics_index(
             "physical_state": {"dimension": 70, "fields": [name for name, _ in (("joint_pos_canonical",29),("joint_vel",29),("base_lin_vel_robot",3),("base_ang_vel_robot",3),("gravity_robot",3),("base_height",1),("foot_contact",2))]},
             "previous_action": {"dimension": 0, "duplicated": False},
             "action": {"dimension": 29, "definition": "processed_joint_target_abs - nominal_default_joint_pos"},
-            "robot_information": {"dimension": ROBOT_INFO_DIM},
+            "robot_information": {
+                "dimension": ROBOT_INFO_DIM,
+                "legacy_compatibility": True,
+                "model_input": False,
+            },
+            "joint_robot_information": {
+                "shape": [29, JOINT_ROBOT_INFO_DIM],
+                "fields": [
+                    "nominal_joint_pos", "position_limit_low_canonical",
+                    "position_limit_high_canonical", "velocity_limit", "effort_limit",
+                    "stiffness_kp", "damping_kd", "armature", "joint_friction",
+                    "actuator_min_delay_control_steps",
+                    "actuator_max_delay_control_steps",
+                ],
+                "excludes": ["action_scale", "action_offset", "action_clip"],
+            },
+            "joint_actuator_type": {
+                "shape": [29],
+                "vocabulary": actuator_types,
+            },
+            "global_robot_information": {
+                "dimension": GLOBAL_ROBOT_INFO_DIM,
+                "fields": [
+                    "sim_dt", "control_dt", "decimation", "gravity_w_x",
+                    "gravity_w_y", "gravity_w_z", "solver_position_iterations",
+                    "solver_velocity_iterations", "foot_contact_threshold_n",
+                ],
+            },
             "dynamics_context": {
                 "dimension": DYNAMICS_CONTEXT_DIM,
                 "fields": [
@@ -329,7 +402,11 @@ def build_physics_index(
                 "fields": ["applied_joint_torque_mean", "foot_contact_impulse"],
                 "model_input": False,
             },
-            "token_layout": "interleaved_S0_A0_S1_A1_to_ST",
+            "action_before_window": {
+                "dimension": 29,
+                "definition": "actions[start-1] or initial_processed_target_canonical",
+            },
+            "token_layout": "A_before_S0_A0_S1_A1_to_ST",
         },
         "normalization": {"path": str(normalization_path), "training_split_only": True, "gravity": "unit_vector", "contact": "binary"},
         "episodes_index_sha256": file_sha256(episodes_path),

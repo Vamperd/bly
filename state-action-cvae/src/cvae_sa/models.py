@@ -24,6 +24,13 @@ class ModelOutput:
     prior_mean: torch.Tensor
     prior_logvar: torch.Tensor
     latent: torch.Tensor
+    state_contact_logits: torch.Tensor | None = None
+    forward_contact_logits: torch.Tensor | None = None
+    inverse_action: torch.Tensor | None = None
+    history_action: torch.Tensor | None = None
+    rollout_state: torch.Tensor | None = None
+    cycle_state: torch.Tensor | None = None
+    cycle_action: torch.Tensor | None = None
 
 
 class MLPTokenizer(nn.Module):
@@ -419,6 +426,428 @@ class TransformerCVAE(nn.Module):
         )
 
 
+class PhysicsTransformerCVAE(nn.Module):
+    """Joint-aware CVAE for the unique Physics v3 S/A sequence.
+
+    Temporal relation heads are deliberately formed from S_t and A_t (or from
+    S_t and S_{t+1} for inverse dynamics).  They never use the target token that
+    they are supposed to predict.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.width = int(config["d_model"])
+        self.latent_dim = int(config["latent_dim"])
+        self.auxiliary_dim = int(config.get("auxiliary_dim", 35))
+        self.context_mode = str(config.get("context_mode", "hidden"))
+        self.dynamics_context_dim = int(config.get("dynamics_context_dim", 0))
+        joint_width = int(config.get("joint_width", 128))
+        dropout = float(config["dropout"])
+        actuator_types = int(config.get("actuator_type_count", 1))
+
+        self.joint_id = nn.Embedding(ACTION_DIM, joint_width)
+        self.actuator_type = nn.Embedding(max(1, actuator_types), joint_width)
+        self.robot_joint = MLPTokenizer(int(config.get("joint_robot_info_dim", 11)), joint_width)
+        robot_layer = nn.TransformerEncoderLayer(
+            d_model=joint_width,
+            nhead=4,
+            dim_feedforward=joint_width * 4,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.robot_encoder = nn.TransformerEncoder(robot_layer, num_layers=2)
+        self.global_robot = MLPTokenizer(int(config.get("global_robot_info_dim", 9)), self.width)
+        self.robot_pool = nn.Linear(joint_width, self.width)
+        self.oracle_context = (
+            MLPTokenizer(self.dynamics_context_dim, self.width)
+            if self.context_mode in {"oracle", "explicit"} and self.dynamics_context_dim
+            else None
+        )
+
+        self.state_joint = MLPTokenizer(joint_width + 4, joint_width)
+        self.action_joint = MLPTokenizer(joint_width + 2, joint_width)
+        self.state_joint_pool = nn.Linear(joint_width, self.width)
+        self.action_joint_pool = nn.Linear(joint_width, self.width)
+        self.state_base = MLPTokenizer(12 * 2 + 1, self.width)
+        self.state_fusion = MLPTokenizer(self.width * 2, self.width)
+        self.action_fusion = MLPTokenizer(self.width + 1, self.width)
+        self.before_fusion = MLPTokenizer(self.width, self.width)
+        self.type_embedding = nn.Embedding(3, self.width)
+        self.mask_group_embedding = nn.Embedding(3, self.width)
+
+        self.encoder = TransformerStack(
+            int(config["encoder_layers"]), self.width, int(config["heads"]),
+            int(config["ffn_dim"]), dropout
+        )
+        self.decoder = TransformerStack(
+            int(config["decoder_layers"]), self.width, int(config["heads"]),
+            int(config["ffn_dim"]), dropout
+        )
+        self.prior = nn.Linear(self.width, self.latent_dim * 2)
+        self.posterior = nn.Linear(self.width, self.latent_dim * 2)
+        self.latent_projection = nn.Linear(self.latent_dim, self.width)
+
+        self.state_joint_decoder = MLPTokenizer(self.width + joint_width, joint_width)
+        self.state_joint_output = nn.Linear(joint_width, 2)
+        self.state_base_output = nn.Linear(self.width, 10)
+        self.state_contact_output = nn.Linear(self.width, 2)
+        self.action_joint_decoder = MLPTokenizer(self.width + joint_width, joint_width)
+        self.action_joint_output = nn.Linear(joint_width, 1)
+
+        relation_width = self.width * 2
+        self.forward_relation = MLPTokenizer(relation_width, self.width)
+        self.inverse_relation = MLPTokenizer(relation_width, self.width)
+        self.history_relation = MLPTokenizer(self.width, self.width)
+        self.relation_prior = nn.Linear(self.width, self.latent_dim * 2)
+        self.forward_continuous = nn.Linear(self.width, 68)
+        self.forward_contact = nn.Linear(self.width, 2)
+        self.auxiliary_head = (
+            nn.Linear(self.width, self.auxiliary_dim) if self.auxiliary_dim else None
+        )
+
+    @staticmethod
+    def _distribution(parameters: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        mean, logvar = parameters.chunk(2, dim=-1)
+        return mean, logvar.clamp(-12.0, 8.0)
+
+    @staticmethod
+    def _sample(mean: torch.Tensor, logvar: torch.Tensor, deterministic: bool) -> torch.Tensor:
+        return mean if deterministic else mean + torch.randn_like(mean) * torch.exp(0.5 * logvar)
+
+    def _local_relation_condition(
+        self, relation: torch.Tensor, robot_summary: torch.Tensor
+    ) -> torch.Tensor:
+        """Infer target-safe local dynamics context from a permitted relation input."""
+        mean, _ = self._distribution(self.relation_prior(relation))
+        while robot_summary.ndim < relation.ndim:
+            robot_summary = robot_summary[:, None]
+        return robot_summary + self.latent_projection(mean)
+
+    def _robot_memory(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        joint = batch["joint_robot_information"]
+        actuator = batch["joint_actuator_type"].long().clamp(0, self.actuator_type.num_embeddings - 1)
+        ids = torch.arange(ACTION_DIM, device=joint.device)
+        memory = self.robot_joint(joint) + self.joint_id(ids)[None] + self.actuator_type(actuator)
+        memory = self.robot_encoder(memory)
+        summary = self.robot_pool(memory.mean(dim=1)) + self.global_robot(
+            batch["global_robot_information"]
+        )
+        if self.oracle_context is not None:
+            summary = summary + self.oracle_context(batch["dynamics_context"])
+        return memory, summary
+
+    def _state_embed(
+        self,
+        state: torch.Tensor,
+        mask: torch.Tensor,
+        progress: torch.Tensor,
+        robot_memory: torch.Tensor,
+    ) -> torch.Tensor:
+        qdq = torch.stack((state[..., :29], state[..., 29:58]), dim=-1)
+        qdq_mask = torch.stack((mask[..., :29], mask[..., 29:58]), dim=-1).to(state.dtype)
+        memory = robot_memory[:, None].expand(-1, state.shape[1], -1, -1)
+        joint = self.state_joint(torch.cat((qdq, qdq_mask, memory), dim=-1)).mean(dim=2)
+        base = self.state_base(
+            torch.cat(
+                (state[..., 58:], mask[..., 58:].to(state.dtype), progress[..., None]), dim=-1
+            )
+        )
+        return self.state_fusion(torch.cat((self.state_joint_pool(joint), base), dim=-1))
+
+    def _action_embed(
+        self,
+        action: torch.Tensor,
+        mask: torch.Tensor,
+        progress: torch.Tensor,
+        robot_memory: torch.Tensor,
+    ) -> torch.Tensor:
+        memory = robot_memory[:, None].expand(-1, action.shape[1], -1, -1)
+        joint = self.action_joint(
+            torch.cat((action[..., None], mask.to(action.dtype)[..., None], memory), dim=-1)
+        ).mean(dim=2)
+        return self.action_fusion(
+            torch.cat((self.action_joint_pool(joint), progress[..., None]), dim=-1)
+        )
+
+    def _tokenize(
+        self,
+        batch: dict[str, torch.Tensor],
+        masks: MaskBatch,
+        full: bool,
+        robot_memory: torch.Tensor,
+        robot_summary: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        inputs = masked_inputs(batch, masks, full=full)
+        state = inputs["physical_state"]
+        action = inputs["action"]
+        state_mask = torch.zeros_like(masks.state_input) if full else masks.state_input
+        action_mask = torch.zeros_like(masks.action_input) if full else masks.action_input
+        state_token = self._state_embed(state, state_mask, batch["progress"], robot_memory)
+        action_progress = batch["progress"][:, :-1]
+        action_token = self._action_embed(action, action_mask, action_progress, robot_memory)
+        before_mask = torch.zeros_like(batch["action_before_window"], dtype=torch.bool)
+        before = self._action_embed(
+            batch["action_before_window"][:, None],
+            before_mask[:, None],
+            torch.zeros_like(batch["progress"][:, :1]),
+            robot_memory,
+        )
+        interleaved = torch.stack((state_token[:, :-1], action_token), dim=2).flatten(1, 2)
+        tokens = torch.cat((self.before_fusion(before), interleaved, state_token[:, -1:]), dim=1)
+        type_ids = torch.empty(tokens.shape[1], dtype=torch.long, device=tokens.device)
+        type_ids[0] = 0
+        type_ids[1::2] = 1
+        type_ids[2::2] = 2
+        tokens = tokens + self.type_embedding(type_ids)[None]
+        tokens = tokens + robot_summary[:, None] + self.mask_group_embedding(
+            torch.full((tokens.shape[0],), masks.task_id, device=tokens.device, dtype=torch.long)
+        )[:, None]
+        valid_interleaved = torch.stack(
+            (batch["valid_state"][:, :-1], batch["valid_action"]), dim=2
+        ).flatten(1, 2)
+        valid = torch.cat(
+            (
+                torch.ones((tokens.shape[0], 1), dtype=torch.bool, device=tokens.device),
+                valid_interleaved,
+                batch["valid_state"][:, -1:],
+            ), dim=1
+        )
+        times = torch.arange(tokens.shape[1], device=tokens.device, dtype=torch.long)
+        state_indices = torch.arange(1, tokens.shape[1], 2, device=tokens.device)
+        action_indices = torch.arange(2, tokens.shape[1] - 1, 2, device=tokens.device)
+        return tokens, valid, times, state_indices, action_indices
+
+    def _decode_state(
+        self, hidden: torch.Tensor, robot_memory: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        memory = robot_memory[:, None].expand(-1, hidden.shape[1], -1, -1)
+        query = hidden[:, :, None].expand(-1, -1, ACTION_DIM, -1)
+        joint = self.state_joint_output(
+            self.state_joint_decoder(torch.cat((query, memory), dim=-1))
+        )
+        continuous_base_raw = self.state_base_output(hidden)
+        continuous_base = torch.cat(
+            (
+                continuous_base_raw[..., :6],
+                F.normalize(continuous_base_raw[..., 6:9], dim=-1, eps=1e-6),
+                continuous_base_raw[..., 9:],
+            ), dim=-1
+        )
+        contact_logits = self.state_contact_output(hidden)
+        state = torch.cat(
+            (joint[..., 0], joint[..., 1], continuous_base, torch.sigmoid(contact_logits)), dim=-1
+        )
+        return state, contact_logits
+
+    def _decode_action(self, hidden: torch.Tensor, robot_memory: torch.Tensor) -> torch.Tensor:
+        memory = robot_memory[:, None].expand(-1, hidden.shape[1], -1, -1)
+        query = hidden[:, :, None].expand(-1, -1, ACTION_DIM, -1)
+        return self.action_joint_output(
+            self.action_joint_decoder(torch.cat((query, memory), dim=-1))
+        ).squeeze(-1)
+
+    def _forward_values(
+        self,
+        state: torch.Tensor,
+        action: torch.Tensor,
+        progress: torch.Tensor,
+        robot_memory: torch.Tensor,
+        condition: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        state_hidden = self._state_embed(
+            state[:, None], torch.zeros_like(state[:, None], dtype=torch.bool),
+            progress[:, None], robot_memory
+        )[:, 0]
+        action_hidden = self._action_embed(
+            action[:, None], torch.zeros_like(action[:, None], dtype=torch.bool),
+            progress[:, None], robot_memory
+        )[:, 0]
+        relation = self.forward_relation(torch.cat((state_hidden, action_hidden), dim=-1)) + condition
+        raw_delta = self.forward_continuous(relation)
+        contact_logits = self.forward_contact(relation)
+        continuous_next = state[:, :68] + raw_delta
+        continuous_next = torch.cat(
+            (
+                continuous_next[:, :64],
+                F.normalize(continuous_next[:, 64:67], dim=-1, eps=1e-6),
+                continuous_next[:, 67:68],
+            ), dim=-1
+        )
+        delta = continuous_next - state[:, :68]
+        next_state = torch.cat(
+            (continuous_next, torch.sigmoid(contact_logits)), dim=-1
+        )
+        return next_state, delta, contact_logits
+
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+        masks: MaskBatch,
+        sample_from_prior: bool = False,
+        deterministic: bool = False,
+    ) -> ModelOutput:
+        robot_memory, robot_summary = self._robot_memory(batch)
+        visible, valid, times, state_indices, action_indices = self._tokenize(
+            batch, masks, False, robot_memory, robot_summary
+        )
+        full, _, _, _, _ = self._tokenize(batch, masks, True, robot_memory, robot_summary)
+        prior_encoded = self.encoder(visible, valid, times, masks.causal)
+        posterior_encoded = self.encoder(full, valid, times, masks.causal)
+        weights = valid.to(visible.dtype)
+        prior_pool = (prior_encoded * weights[:, :, None]).sum(1) / weights.sum(1, keepdim=True).clamp_min(1)
+        posterior_pool = (posterior_encoded * weights[:, :, None]).sum(1) / weights.sum(1, keepdim=True).clamp_min(1)
+        prior_mean, prior_logvar = self._distribution(self.prior(prior_pool))
+        posterior_mean, posterior_logvar = self._distribution(self.posterior(posterior_pool))
+        mean = prior_mean if sample_from_prior else posterior_mean
+        logvar = prior_logvar if sample_from_prior else posterior_logvar
+        latent = self._sample(mean, logvar, deterministic)
+        condition = robot_summary + self.latent_projection(latent)
+        decoded = self.decoder(visible + condition[:, None], valid, times, masks.causal)
+        state_hidden = decoded[:, state_indices]
+        action_hidden = decoded[:, action_indices]
+        relation_state_hidden = prior_encoded[:, state_indices]
+        relation_action_hidden = prior_encoded[:, action_indices]
+        state_output, state_contact_logits = self._decode_state(state_hidden, robot_memory)
+        action_output = self._decode_action(action_hidden, robot_memory)
+
+        forward_relation = self.forward_relation(
+            torch.cat((relation_state_hidden[:, :-1], relation_action_hidden), dim=-1)
+        )
+        forward_condition = self._local_relation_condition(
+            forward_relation, robot_summary
+        )
+        transition = forward_relation + forward_condition
+        raw_continuous_delta = self.forward_continuous(transition)
+        current_continuous = batch["physical_state"][:, :-1, :68]
+        predicted_continuous = current_continuous + raw_continuous_delta
+        predicted_continuous = torch.cat(
+            (
+                predicted_continuous[..., :64],
+                F.normalize(predicted_continuous[..., 64:67], dim=-1, eps=1e-6),
+                predicted_continuous[..., 67:68],
+            ), dim=-1
+        )
+        continuous_delta = predicted_continuous - current_continuous
+        forward_contact_logits = self.forward_contact(transition)
+        contact_delta = torch.sigmoid(forward_contact_logits) - batch["physical_state"][:, :-1, 68:]
+        forward_delta = torch.cat((continuous_delta, contact_delta), dim=-1)
+        auxiliary = (
+            self.auxiliary_head(transition)
+            if self.auxiliary_head is not None
+            else transition.new_empty(transition.shape[0], transition.shape[1], 0)
+        )
+
+        visible_inputs = masked_inputs(batch, masks, full=False)
+        direct_state_hidden = self._state_embed(
+            visible_inputs["physical_state"], masks.state_input,
+            batch["progress"], robot_memory
+        )
+        inverse_relation = self.inverse_relation(
+            torch.cat((direct_state_hidden[:, :-1], direct_state_hidden[:, 1:]), dim=-1)
+        )
+        inverse_condition = self._local_relation_condition(
+            inverse_relation, robot_summary
+        )
+        inverse_hidden = inverse_relation + inverse_condition
+        inverse_action = self._decode_action(inverse_hidden, robot_memory)
+        history_relation = self.history_relation(relation_state_hidden[:, :-1])
+        history_condition = self._local_relation_condition(
+            history_relation, robot_summary
+        )
+        history_action = self._decode_action(
+            history_relation + history_condition, robot_memory
+        )
+
+        cycle_state = None
+        if masks.inverse_transition is not None and bool(masks.inverse_transition.any()):
+            cycle_next, _, _ = self._forward_values(
+                batch["physical_state"][:, :-1].reshape(-1, 70),
+                inverse_action.reshape(-1, ACTION_DIM),
+                batch["progress"][:, :-1].reshape(-1),
+                robot_memory[:, None].expand(-1, inverse_action.shape[1], -1, -1).reshape(
+                    -1, ACTION_DIM, robot_memory.shape[-1]
+                ),
+                inverse_condition.reshape(-1, self.width),
+            )
+            cycle_state = cycle_next.reshape(batch["physical_state"].shape[0], -1, 70)
+        cycle_action = None
+        if masks.forward_transition is not None and bool(masks.forward_transition.any()):
+            predicted_next = batch["physical_state"][:, :-1] + forward_delta
+            cycle_state_hidden = self._state_embed(
+                predicted_next,
+                torch.zeros_like(predicted_next, dtype=torch.bool),
+                batch["progress"][:, 1:],
+                robot_memory,
+            )
+            cycle_inverse_relation = self.inverse_relation(
+                torch.cat((direct_state_hidden[:, :-1], cycle_state_hidden), dim=-1)
+            )
+            cycle_inverse_hidden = cycle_inverse_relation + self._local_relation_condition(
+                cycle_inverse_relation, robot_summary
+            )
+            cycle_action = self._decode_action(cycle_inverse_hidden, robot_memory)
+
+        if masks.rollout_horizon is not None and bool((masks.rollout_horizon > 0).any()):
+            max_rollout = 8
+            current = torch.stack(
+                [batch["physical_state"][i, int(masks.rollout_start[i])] for i in range(batch["physical_state"].shape[0])]
+            )
+            rollout_values = []
+            for offset in range(max_rollout):
+                action_at = torch.stack(
+                    [
+                        batch["action"][i, min(int(masks.rollout_start[i]) + offset, batch["action"].shape[1] - 1)]
+                        for i in range(batch["action"].shape[0])
+                    ]
+                )
+                progress_at = torch.stack(
+                    [
+                        batch["progress"][i, min(int(masks.rollout_start[i]) + offset, batch["progress"].shape[1] - 1)]
+                        for i in range(batch["progress"].shape[0])
+                    ]
+                )
+                condition_at = torch.stack(
+                    [
+                        forward_condition[
+                            i,
+                            min(
+                                int(masks.rollout_start[i]) + offset,
+                                forward_condition.shape[1] - 1,
+                            ),
+                        ]
+                        for i in range(forward_condition.shape[0])
+                    ]
+                )
+                current, _, _ = self._forward_values(
+                    current, action_at, progress_at, robot_memory, condition_at
+                )
+                rollout_values.append(current)
+            rollout_state = torch.stack(rollout_values, dim=1)
+        else:
+            rollout_state = state_output.new_empty(state_output.shape[0], 0, 70)
+        return ModelOutput(
+            state_output,
+            state_output.new_empty(state_output.shape[0], state_output.shape[1], 0),
+            action_output,
+            forward_delta,
+            auxiliary,
+            posterior_mean,
+            posterior_logvar,
+            prior_mean,
+            prior_logvar,
+            latent,
+            state_contact_logits,
+            forward_contact_logits,
+            inverse_action,
+            history_action,
+            rollout_state,
+            cycle_state,
+            cycle_action,
+        )
+
+
 class TemporalResidualBlock(nn.Module):
     def __init__(self, width: int, dilation: int, kernel_size: int, dropout: float) -> None:
         super().__init__()
@@ -646,6 +1075,8 @@ def build_model(config: dict[str, Any]) -> nn.Module:
     kind = str(config.get("kind", "transformer"))
     if kind == "transformer":
         return TransformerCVAE(config)
+    if kind == "physics_transformer":
+        return PhysicsTransformerCVAE(config)
     if kind == "tcn":
         return TCNCVAE(config)
     raise ValueError(f"unsupported model kind {kind!r}")

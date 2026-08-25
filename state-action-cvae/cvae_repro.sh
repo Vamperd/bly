@@ -128,8 +128,8 @@ build_physics_index() {
   capture_environment "$run_dir"
   local sources=()
   IFS=':' read -r -a sources <<< "$CVAE_SOURCE_RUNS"
-  [[ "${#sources[@]}" -eq 4 ]] \
-    || die "build-physics-index requires four collection runs; found ${#sources[@]}"
+  [[ "${#sources[@]}" -ge 1 ]] \
+    || die "build-physics-index requires at least one collection run"
   local source_args=()
   local source
   for source in "${sources[@]}"; do
@@ -139,9 +139,9 @@ build_physics_index() {
     "$PYTHON" -m cvae_sa.physics_indexer \
       "${source_args[@]}" \
       --output-run "$run_dir" \
-      --expected-motions "${CVAE_EXPECTED_MOTIONS:-768}" \
-      --expected-episodes "${CVAE_EXPECTED_EPISODES:-6144}" \
-      --split-counts "${CVAE_SPLIT_COUNTS:-616,76,76}" \
+      --expected-motions "${CVAE_EXPECTED_MOTIONS:-2048}" \
+      --expected-episodes "${CVAE_EXPECTED_EPISODES:-16384}" \
+      --split-counts "${CVAE_SPLIT_COUNTS:-1638,205,205}" \
       --seed "$SEED"
   [[ -f "$run_dir/markers/cvae_physics_dataset.ok" ]] \
     || die "physics indexer exited without cvae_physics_dataset.ok: $run_dir"

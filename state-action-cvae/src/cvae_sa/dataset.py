@@ -21,6 +21,7 @@ from .physics_schema import (
     read_auxiliary_transitions,
     resolve_parameter as resolve_physics_parameter,
     robot_information_vector,
+    structured_robot_information,
 )
 from .schema import load_schema, raw_action_to_relative, resolve_parameter
 from .util import file_sha256, load_json
@@ -63,9 +64,14 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         if manifest_version not in {
             "sonic_state_action_cvae_dataset_v1",
             "sonic_physics_state_action_cvae_dataset_v3",
+            "sonic_physics_state_action_cvae_dataset_v4",
         }:
             raise ValueError("unsupported CVAE dataset manifest")
-        self.physics_v3 = manifest_version == "sonic_physics_state_action_cvae_dataset_v3"
+        self.physics_v3 = manifest_version in {
+            "sonic_physics_state_action_cvae_dataset_v3",
+            "sonic_physics_state_action_cvae_dataset_v4",
+        }
+        self.physics_v4 = manifest_version == "sonic_physics_state_action_cvae_dataset_v4"
         self.state_dim = PHYSICS_STATE_DIM if self.physics_v3 else PHYSICAL_STATE_DIM
         self.include_previous_action = not self.physics_v3
         episodes_path = self.dataset_run / "manifests" / "episodes.jsonl"
@@ -91,6 +97,16 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
                 self.previous_std = np.empty((0,), dtype=np.float32)
                 self.robot_mean = normalization["robot_info_mean"].astype(np.float32)
                 self.robot_std = normalization["robot_info_std"].astype(np.float32)
+                if self.physics_v4:
+                    self.joint_robot_mean = normalization["joint_robot_info_mean"].astype(np.float32)
+                    self.joint_robot_std = normalization["joint_robot_info_std"].astype(np.float32)
+                    self.global_robot_mean = normalization["global_robot_info_mean"].astype(np.float32)
+                    self.global_robot_std = normalization["global_robot_info_std"].astype(np.float32)
+                else:
+                    self.joint_robot_mean = np.empty((0,), dtype=np.float32)
+                    self.joint_robot_std = np.empty((0,), dtype=np.float32)
+                    self.global_robot_mean = np.empty((0,), dtype=np.float32)
+                    self.global_robot_std = np.empty((0,), dtype=np.float32)
                 self.dynamics_mean = normalization["dynamics_context_mean"].astype(np.float32)
                 self.dynamics_std = normalization["dynamics_context_std"].astype(np.float32)
                 self.auxiliary_mean = normalization["auxiliary_transition_mean"].astype(np.float32)
@@ -100,6 +116,10 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
                 self.previous_std = normalization["previous_action_std"].astype(np.float32)
                 self.robot_mean = np.empty((0,), dtype=np.float32)
                 self.robot_std = np.empty((0,), dtype=np.float32)
+                self.joint_robot_mean = np.empty((0,), dtype=np.float32)
+                self.joint_robot_std = np.empty((0,), dtype=np.float32)
+                self.global_robot_mean = np.empty((0,), dtype=np.float32)
+                self.global_robot_std = np.empty((0,), dtype=np.float32)
                 self.dynamics_mean = np.empty((0,), dtype=np.float32)
                 self.dynamics_std = np.empty((0,), dtype=np.float32)
                 self.auxiliary_mean = np.empty((0,), dtype=np.float32)
@@ -109,8 +129,16 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         if self.state_mean.shape != (self.state_dim,):
             raise ValueError("invalid physical state normalization")
         self.robot_info_dim = int(self.robot_mean.size)
+        self.joint_robot_info_dim = int(self.joint_robot_mean.size)
+        self.global_robot_info_dim = int(self.global_robot_mean.size)
         self.dynamics_context_dim = int(self.dynamics_mean.size)
         self.auxiliary_dim = int(self.auxiliary_mean.size)
+        vocabulary = self.manifest.get("representations", {}).get(
+            "joint_actuator_type", {}
+        ).get("vocabulary", ["unknown"])
+        self.actuator_type_to_id = {
+            str(name): index for index, name in enumerate(vocabulary)
+        }
         self.refs: list[WindowRef] = []
         for episode_index, item in enumerate(self.episodes):
             steps = int(item["steps"])
@@ -221,8 +249,12 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
             "physical_state": torch.from_numpy(state_output),
             "previous_action": torch.from_numpy(previous_output),
             "action": torch.from_numpy(action_output),
+            "action_before_window": torch.zeros(ACTION_DIM, dtype=torch.float32),
             "action_scale": torch.from_numpy(action_scale.copy()),
             "robot_information": torch.empty(0, dtype=torch.float32),
+            "joint_robot_information": torch.empty((29, 0), dtype=torch.float32),
+            "joint_actuator_type": torch.zeros(29, dtype=torch.long),
+            "global_robot_information": torch.empty(0, dtype=torch.float32),
             "dynamics_context": torch.empty(0, dtype=torch.float32),
             "auxiliary_transition": torch.empty((self.window, 0), dtype=torch.float32),
             "valid_state": torch.from_numpy(valid_state),
@@ -257,9 +289,29 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         )
         context = stream[f"contexts/{metadata['context_id']}"]
         robot_info = robot_information_vector(schema, context, env_id)
+        if self.physics_v4:
+            joint_robot, actuator_type, global_robot = structured_robot_information(
+                schema, context, env_id, self.actuator_type_to_id
+            )
+        else:
+            joint_robot = np.empty((29, 0), dtype=np.float32)
+            actuator_type = np.zeros(29, dtype=np.int64)
+            global_robot = np.empty((0,), dtype=np.float32)
         dynamics_context = dynamics_context_vector(context)
         auxiliary = read_auxiliary_transitions(episode["diagnostics"], start, end)
         action_scale = resolve_physics_parameter(schema["action_scale"], env_id)
+        if start > 0:
+            action_before = np.asarray(
+                episode["actions/action_target_canonical"][start - 1], dtype=np.float32
+            )
+        elif self.physics_v4:
+            action_before = np.asarray(
+                episode["actions/initial_processed_target_canonical"], dtype=np.float32
+            )
+        else:
+            action_before = np.zeros(ACTION_DIM, dtype=np.float32)
+        if action_before.shape != (ACTION_DIM,) or not np.isfinite(action_before).all():
+            raise ValueError(f"{episode.name}: invalid action_before_window")
 
         state_output = np.zeros((self.window + 1, self.state_dim), dtype=np.float32)
         action_output = np.zeros((self.window, ACTION_DIM), dtype=np.float32)
@@ -283,9 +335,21 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
             "physical_state": torch.from_numpy(state_output),
             "previous_action": torch.empty((self.window + 1, 0), dtype=torch.float32),
             "action": torch.from_numpy(action_output),
+            "action_before_window": torch.from_numpy(
+                ((action_before - self.action_mean) / self.action_std).astype(np.float32)
+            ),
             "action_scale": torch.from_numpy(action_scale.copy()),
             "robot_information": torch.from_numpy(
                 ((robot_info - self.robot_mean) / self.robot_std).astype(np.float32)
+            ),
+            "joint_robot_information": torch.from_numpy(
+                ((joint_robot - self.joint_robot_mean) / self.joint_robot_std).astype(np.float32)
+                if self.physics_v4 else joint_robot
+            ),
+            "joint_actuator_type": torch.from_numpy(actuator_type),
+            "global_robot_information": torch.from_numpy(
+                ((global_robot - self.global_robot_mean) / self.global_robot_std).astype(np.float32)
+                if self.physics_v4 else global_robot
             ),
             "dynamics_context": torch.from_numpy(
                 ((dynamics_context - self.dynamics_mean) / self.dynamics_std).astype(np.float32)

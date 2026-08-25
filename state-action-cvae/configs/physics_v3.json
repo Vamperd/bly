@@ -1,0 +1,66 @@
+{
+  "seed": 20260830,
+  "data": {
+    "window_transitions": 128,
+    "validation_stride": 64,
+    "num_workers": 4,
+    "max_train_episodes": null,
+    "max_validation_episodes": null
+  },
+  "model": {
+    "kind": "physics_transformer",
+    "d_model": 384,
+    "encoder_layers": 6,
+    "decoder_layers": 8,
+    "heads": 8,
+    "ffn_dim": 1536,
+    "latent_dim": 96,
+    "joint_width": 128,
+    "dropout": 0.1,
+    "context_mode": "hidden"
+  },
+  "masking": {
+    "strategy": "physics_bidirectional_v1",
+    "task_probabilities": [0.35, 0.25, 0.40],
+    "completion_probabilities": [0.40, 0.30, 0.30],
+    "element_fraction": [0.10, 0.40],
+    "step_count": [1, 8],
+    "feature_fraction": [0.10, 0.40],
+    "relation_probabilities": [0.40, 0.35, 0.25],
+    "forward_subprobabilities": [0.25, 0.50, 0.25],
+    "calibration_steps": [16, 32],
+    "physics_step_count": [1, 32],
+    "physics_element_fraction": [0.10, 0.50],
+    "physics_feature_fraction": [0.10, 0.50],
+    "structured_overlay_max_fraction": 0.10,
+    "rollout_start_step": 20000
+  },
+  "training": {
+    "micro_batch": 8,
+    "gradient_accumulation": 8,
+    "max_optimizer_steps": 120000,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.0001,
+    "gradient_clip": 1.0,
+    "warmup_steps": 8000,
+    "validation_interval": 2000,
+    "validation_max_batches": 200,
+    "early_stopping_patience": 15,
+    "kl_warmup_steps": 30000,
+    "kl_beta": 0.001,
+    "free_bits": 0.05,
+    "forward_weight": 1.5,
+    "inverse_weight": 1.0,
+    "history_action_weight": 1.0,
+    "rollout_weight": 1.0,
+    "cycle_weight": 0.1,
+    "gravity_weight": 0.1,
+    "auxiliary_weight": 0.1,
+    "amp": "bf16"
+  },
+  "evaluation": {
+    "latent_samples": 8,
+    "max_batches": null,
+    "negative_control_min_degradation": 0.10
+  }
+}

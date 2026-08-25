@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from .constants import COMPLETION_NAMES, TASK_NAMES
+from .constants import ACTION_DIM, COMPLETION_NAMES, TASK_NAMES
 
 
 @dataclass
@@ -20,6 +20,11 @@ class MaskBatch:
     task_name: str
     completion_name: str | None
     causal: bool
+    forward_transition: torch.Tensor | None = None
+    inverse_transition: torch.Tensor | None = None
+    history_action_transition: torch.Tensor | None = None
+    rollout_start: torch.Tensor | None = None
+    rollout_horizon: torch.Tensor | None = None
 
     def to(self, device: torch.device) -> "MaskBatch":
         return MaskBatch(
@@ -33,11 +38,18 @@ class MaskBatch:
             self.task_name,
             self.completion_name,
             self.causal,
+            None if self.forward_transition is None else self.forward_transition.to(device),
+            None if self.inverse_transition is None else self.inverse_transition.to(device),
+            None if self.history_action_transition is None else self.history_action_transition.to(device),
+            None if self.rollout_start is None else self.rollout_start.to(device),
+            None if self.rollout_horizon is None else self.rollout_horizon.to(device),
         )
 
 
 class MaskGenerator:
     def __init__(self, config: dict[str, Any]) -> None:
+        self.strategy = str(config.get("strategy", "legacy"))
+        self.optimizer_step = 0
         self.task_probabilities = torch.tensor(
             config["task_probabilities"], dtype=torch.float32
         )
@@ -47,6 +59,24 @@ class MaskGenerator:
         self.element_fraction = tuple(float(x) for x in config["element_fraction"])
         self.step_count = tuple(int(x) for x in config["step_count"])
         self.feature_fraction = tuple(float(x) for x in config["feature_fraction"])
+        self.relation_probabilities = torch.tensor(
+            config.get("relation_probabilities", (0.40, 0.35, 0.25)),
+            dtype=torch.float32,
+        )
+        self.forward_subprobabilities = torch.tensor(
+            config.get("forward_subprobabilities", (0.25, 0.50, 0.25)),
+            dtype=torch.float32,
+        )
+        self.calibration_steps = tuple(int(x) for x in config.get("calibration_steps", (16, 32)))
+        self.physics_step_count = tuple(int(x) for x in config.get("physics_step_count", (1, 32)))
+        self.physics_element_fraction = tuple(
+            float(x) for x in config.get("physics_element_fraction", (0.10, 0.50))
+        )
+        self.physics_feature_fraction = tuple(
+            float(x) for x in config.get("physics_feature_fraction", (0.10, 0.50))
+        )
+        self.overlay_fraction = float(config.get("structured_overlay_max_fraction", 0.10))
+        self.rollout_start_step = int(config.get("rollout_start_step", 20_000))
         if self.task_probabilities.shape != (3,) or not torch.isclose(
             self.task_probabilities.sum(), torch.tensor(1.0), atol=1e-5
         ):
@@ -55,6 +85,17 @@ class MaskGenerator:
             self.completion_probabilities.sum(), torch.tensor(1.0), atol=1e-5
         ):
             raise ValueError("completion probabilities must contain three values summing to one")
+        if self.relation_probabilities.shape != (3,) or not torch.isclose(
+            self.relation_probabilities.sum(), torch.tensor(1.0), atol=1e-5
+        ):
+            raise ValueError("relation probabilities must contain three values summing to one")
+        if self.forward_subprobabilities.shape != (3,) or not torch.isclose(
+            self.forward_subprobabilities.sum(), torch.tensor(1.0), atol=1e-5
+        ):
+            raise ValueError("forward subprobabilities must contain three values summing to one")
+
+    def set_step(self, optimizer_step: int) -> None:
+        self.optimizer_step = int(optimizer_step)
 
     @staticmethod
     def _fraction(low: float, high: float, device: torch.device) -> float:
@@ -74,6 +115,8 @@ class MaskGenerator:
         force_task: str | None = None,
         force_completion: str | None = None,
     ) -> MaskBatch:
+        if self.strategy == "physics_bidirectional_v1":
+            return self._generate_physics(batch, force_task, force_completion)
         device = batch["physical_state"].device
         valid_state = batch["valid_state"].bool()
         valid_action = batch["valid_action"].bool()
@@ -141,6 +184,261 @@ class MaskGenerator:
             task_name,
             completion_name,
             task_name == "forward",
+            torch.zeros_like(batch["valid_action"], dtype=torch.bool),
+            torch.zeros_like(batch["valid_action"], dtype=torch.bool),
+            torch.zeros_like(batch["valid_action"], dtype=torch.bool),
+            torch.zeros(batch["physical_state"].shape[0], dtype=torch.long, device=device),
+            torch.ones(batch["physical_state"].shape[0], dtype=torch.long, device=device),
+        )
+
+    @staticmethod
+    def _random_span(valid_count: int, low: int, high: int, device: torch.device) -> tuple[int, int]:
+        if valid_count <= 0:
+            return 0, 0
+        length = int(torch.randint(low, min(high, valid_count) + 1, (), device=device).item())
+        start = int(torch.randint(0, valid_count - length + 1, (), device=device).item())
+        return start, length
+
+    def _overlay_random_elements(
+        self,
+        state_input: torch.Tensor,
+        state_loss: torch.Tensor,
+        action_input: torch.Tensor,
+        action_loss: torch.Tensor,
+        valid_state: torch.Tensor,
+        valid_action: torch.Tensor,
+    ) -> None:
+        if self.overlay_fraction <= 0:
+            return
+        device = state_input.device
+        state_fraction = float(torch.rand((), device=device).item()) * self.overlay_fraction
+        action_fraction = float(torch.rand((), device=device).item()) * self.overlay_fraction
+        state_extra = (
+            torch.rand(state_input.shape, device=device) < state_fraction
+        ) & valid_state[:, :, None]
+        action_extra = (
+            torch.rand(action_input.shape, device=device) < action_fraction
+        ) & valid_action[:, :, None]
+        state_input |= state_extra
+        state_loss |= state_extra
+        action_input |= action_extra
+        action_loss |= action_extra
+
+    def _generate_physics(
+        self,
+        batch: dict[str, torch.Tensor],
+        force_task: str | None,
+        force_completion: str | None,
+    ) -> MaskBatch:
+        del force_completion
+        device = batch["physical_state"].device
+        valid_state = batch["valid_state"].bool()
+        valid_action = batch["valid_action"].bool()
+        state_input, previous_input, action_input = self._empty(batch)
+        state_loss, previous_loss, action_loss = self._empty(batch)
+        forward_transition = torch.zeros_like(valid_action)
+        inverse_transition = torch.zeros_like(valid_action)
+        history_transition = torch.zeros_like(valid_action)
+        batch_size = valid_state.shape[0]
+        rollout_start = torch.zeros(batch_size, dtype=torch.long, device=device)
+        rollout_horizon = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+        if force_task is None:
+            group = int(torch.multinomial(self.relation_probabilities.to(device), 1).item())
+            task_name = ("forward", "action_inference", "arbitrary")[group]
+        else:
+            aliases = {"inverse": "inverse", "completion": "arbitrary"}
+            task_name = aliases.get(force_task, force_task)
+            group = 0 if task_name.startswith("forward") else 1 if task_name in {
+                "action_inference", "inverse", "history_action"
+            } else 2
+
+        causal = group == 0
+        completion_name: str | None = None
+        if group == 0:
+            if task_name == "forward" or task_name == "action_inference":
+                subtype = int(torch.multinomial(self.forward_subprobabilities.to(device), 1).item())
+                if force_task is None and self.optimizer_step < self.rollout_start_step:
+                    subtype = 0
+                task_name = ("forward_one", "forward_rollout", "forward_cold")[subtype]
+            else:
+                subtype = {"forward_one": 0, "forward_rollout": 1, "forward_cold": 2}.get(
+                    task_name, 0
+                )
+            for index in range(batch_size):
+                count = int(valid_action[index].sum().item())
+                if count <= 0:
+                    continue
+                if subtype == 0 or count == 1:
+                    start = int(torch.randint(0, count, (), device=device).item())
+                    horizon = 1
+                elif subtype == 1:
+                    low = min(self.calibration_steps[0], max(1, count - 1))
+                    high = min(self.calibration_steps[1], max(1, count - 1))
+                    prefix = int(torch.randint(low, high + 1, (), device=device).item())
+                    max_horizon = min(self.physics_step_count[1], count - prefix)
+                    if max_horizon <= 0:
+                        prefix, max_horizon = count - 1, 1
+                    start = prefix
+                    if force_task == "forward_rollout":
+                        horizon = min(8, max_horizon)
+                    else:
+                        horizon = int(
+                            torch.randint(1, max_horizon + 1, (), device=device).item()
+                        )
+                else:
+                    start, horizon = 0, count
+                state_input[index, start + 1 : start + horizon + 1] = True
+                state_loss[index, start + 1 : start + horizon + 1] = True
+                forward_transition[index, start : start + horizon] = True
+                rollout_start[index] = start
+                if self.optimizer_step >= self.rollout_start_step and subtype in {1, 2}:
+                    if force_task == "forward_rollout":
+                        rollout_horizon[index] = min(8, horizon)
+                    else:
+                        choices = [value for value in (2, 4, 8) if value <= horizon]
+                        if choices:
+                            choice = int(
+                                torch.randint(0, len(choices), (), device=device).item()
+                            )
+                            rollout_horizon[index] = choices[choice]
+            self._overlay_random_elements(
+                state_input, state_loss, action_input, action_loss, valid_state, valid_action
+            )
+            # S_t and A_t are the declared inputs of every supervised forward
+            # transition. The overlay may hide unrelated context, but never
+            # either boundary input of the dynamics head.
+            for index in range(batch_size):
+                targets = torch.nonzero(forward_transition[index], as_tuple=False).flatten()
+                if targets.numel():
+                    state_input[index, targets] = False
+                    state_loss[index, targets] = False
+            # The controls whose effects are supervised must remain observable.
+            action_input &= ~forward_transition[:, :, None]
+            action_loss &= ~forward_transition[:, :, None]
+        elif group == 1:
+            if task_name == "action_inference":
+                task_name = "inverse" if bool(torch.randint(0, 7, (), device=device).item() < 4) else "history_action"
+            causal = task_name == "history_action"
+            for index in range(batch_size):
+                count = int(valid_action[index].sum().item())
+                start, length = self._random_span(
+                    count,
+                    self.physics_step_count[0],
+                    min(
+                        self.physics_step_count[1],
+                        8 if self.optimizer_step < self.rollout_start_step else self.physics_step_count[1],
+                    ),
+                    device,
+                )
+                if length == 0:
+                    continue
+                action_input[index, start : start + length] = True
+                action_loss[index, start : start + length] = True
+                if task_name == "history_action":
+                    history_transition[index, start : start + length] = True
+                    state_input[index, start + 1 : count + 1] = True
+                else:
+                    inverse_transition[index, start : start + length] = True
+            self._overlay_random_elements(
+                state_input, state_loss, action_input, action_loss, valid_state, valid_action
+            )
+            # Inverse dynamics requires both transition boundary States.
+            if task_name == "inverse":
+                for index in range(batch_size):
+                    targets = torch.nonzero(inverse_transition[index], as_tuple=False).flatten()
+                    if targets.numel():
+                        state_input[index, targets] = False
+                        state_input[index, targets + 1] = False
+                        state_loss[index, targets] = False
+                        state_loss[index, targets + 1] = False
+        else:
+            task_name = "arbitrary"
+            completion_name = "mixed"
+            for index in range(batch_size):
+                target_choice = int(torch.multinomial(torch.tensor((0.25, 0.25, 0.50), device=device), 1).item())
+                mask_state = target_choice != 1
+                mask_action = target_choice != 0
+                granularity = int(torch.randint(0, 4, (), device=device).item())
+                if granularity == 0:
+                    if mask_state:
+                        fraction = self._fraction(*self.physics_element_fraction, device)
+                        selected = (torch.rand_like(state_input[index], dtype=torch.float32) < fraction)
+                        state_input[index] |= selected & valid_state[index, :, None]
+                    if mask_action:
+                        fraction = self._fraction(*self.physics_element_fraction, device)
+                        selected = (torch.rand_like(action_input[index], dtype=torch.float32) < fraction)
+                        action_input[index] |= selected & valid_action[index, :, None]
+                elif granularity == 1:
+                    count = int(valid_action[index].sum().item())
+                    start, length = self._random_span(
+                        count,
+                        1,
+                        min(
+                            self.physics_step_count[1],
+                            8 if self.optimizer_step < self.rollout_start_step else self.physics_step_count[1],
+                        ),
+                        device,
+                    )
+                    if mask_state:
+                        state_input[index, start : start + length + 1] = True
+                    if mask_action:
+                        action_input[index, start : start + length] = True
+                elif granularity == 2:
+                    if mask_state:
+                        width = state_input.shape[-1]
+                        count = max(1, round(width * self._fraction(*self.physics_feature_fraction, device)))
+                        dims = torch.randperm(width, device=device)[:count]
+                        state_input[index, :, dims] = valid_state[index, :, None]
+                    if mask_action:
+                        count = max(1, round(ACTION_DIM * self._fraction(*self.physics_feature_fraction, device)))
+                        dims = torch.randperm(ACTION_DIM, device=device)[:count]
+                        action_input[index, :, dims] = valid_action[index, :, None]
+                else:
+                    joint_groups = ((0, 6), (6, 12), (12, 15), (15, 22), (22, 29))
+                    semantic = int(torch.randint(0, 9, (), device=device).item())
+                    if semantic < len(joint_groups):
+                        low, high = joint_groups[semantic]
+                        if mask_state:
+                            state_input[index, :, low:high] = valid_state[index, :, None]
+                            state_input[index, :, 29 + low : 29 + high] = valid_state[index, :, None]
+                        if mask_action:
+                            action_input[index, :, low:high] = valid_action[index, :, None]
+                    elif mask_state:
+                        low, high = ((58, 61), (61, 64), (64, 67), (68, 70))[semantic - 5]
+                        state_input[index, :, low:high] = valid_state[index, :, None]
+            state_loss.copy_(state_input)
+            action_loss.copy_(action_input)
+
+        state_input &= valid_state[:, :, None]
+        action_input &= valid_action[:, :, None]
+        state_loss |= state_input
+        action_loss |= action_input
+        state_loss &= valid_state[:, :, None]
+        action_loss &= valid_action[:, :, None]
+        if task_name == "history_action":
+            # Future States are hidden solely to enforce causality. They are
+            # not reconstruction targets for the history-Action objective.
+            for index in range(batch_size):
+                targets = torch.nonzero(history_transition[index], as_tuple=False).flatten()
+                if targets.numel():
+                    state_loss[index, int(targets.min().item()) + 1 :] = False
+        return MaskBatch(
+            state_input,
+            previous_input,
+            action_input,
+            state_loss,
+            previous_loss,
+            action_loss,
+            0 if group == 0 else 1 if group == 1 else 2,
+            task_name,
+            completion_name,
+            causal,
+            forward_transition,
+            inverse_transition,
+            history_transition,
+            rollout_start,
+            rollout_horizon,
         )
 
     def _element_masks(

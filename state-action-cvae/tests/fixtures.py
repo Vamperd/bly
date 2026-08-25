@@ -141,7 +141,23 @@ def write_physics_collection_run(
         "action_clip": None,
         "wrapper_action_transform_enabled": False,
         "action_term_type": "JointPositionAction",
-        "simulation": {"sim_dt": 0.005, "control_dt": 0.02, "decimation": 4},
+        "simulation": {
+            "sim_dt": 0.005,
+            "control_dt": 0.02,
+            "decimation": 4,
+            "gravity_w": [0.0, 0.0, -9.81],
+            "solver_position_iteration_count": 8,
+            "solver_velocity_iteration_count": 4,
+        },
+        "contact": {"threshold_n": 10.0},
+        "actuator_groups": {
+            "all": {
+                "type": "ImplicitActuator",
+                "joint_names": [f"joint_{index}" for index in range(29)],
+                "min_delay": 0,
+                "max_delay": 0,
+            }
+        },
         "motion_id_to_key": {"0": motion_key},
         "motion_collection": {
             "randomization_profile": "startup" if min(variants) == 0 else "initial_state_mild",
@@ -200,6 +216,10 @@ def write_physics_collection_run(
             actions = episode.create_group("actions")
             action = np.ones((steps, 29), dtype=np.float32) * (variant + 1) / 100
             actions.create_dataset("action_target_canonical", data=action)
+            actions.create_dataset(
+                "initial_processed_target_canonical",
+                data=np.ones(29, dtype=np.float32) * variant / 100,
+            )
             diagnostics = episode.create_group("diagnostics")
             diagnostics.create_dataset(
                 "applied_joint_torque_mean", data=np.ones((steps, 29), dtype=np.float32)

@@ -19,6 +19,8 @@ PHYSICS_STATE_FIELDS = (
 )
 PHYSICS_STATE_DIM = 70
 ROBOT_INFO_DIM = 293
+JOINT_ROBOT_INFO_DIM = 11
+GLOBAL_ROBOT_INFO_DIM = 9
 DYNAMICS_CONTEXT_DIM = 648
 AUXILIARY_TRANSITION_DIM = 35
 
@@ -101,6 +103,96 @@ def robot_information_vector(
     if result.shape != (ROBOT_INFO_DIM,) or not np.isfinite(result).all():
         raise ValueError(f"invalid robot information vector {result.shape}")
     return result
+
+
+def actuator_type_names(schema: dict[str, Any]) -> tuple[str, ...]:
+    """Return a stable vocabulary for runtime actuator implementations."""
+    names = {
+        str(group.get("type", "unknown"))
+        for group in schema.get("actuator_groups", {}).values()
+    }
+    return tuple(sorted({"unknown", *names}))
+
+
+def structured_robot_information(
+    schema: dict[str, Any],
+    context: Any,
+    env_id: int,
+    actuator_type_to_id: dict[str, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build joint-aligned controller data without raw-Action mapping fields.
+
+    Physics v3 Action is already the processed canonical joint target.  Scale,
+    offset and clip therefore belong to replay metadata, not to the dynamics
+    condition consumed by the model.
+    """
+    joint_names = list(schema["joint_names"])
+    nominal = resolve_parameter(schema["nominal_default_joint_pos"], env_id).reshape(29)
+    limits = np.asarray(context["joint_position_limits"], dtype=np.float32).reshape(29, 2)
+    stiffness = np.asarray(context["joint_stiffness"], dtype=np.float32).reshape(29)
+    damping = np.asarray(context["joint_damping"], dtype=np.float32).reshape(29)
+    armature = np.asarray(context["joint_armature"], dtype=np.float32).reshape(29)
+    friction = np.asarray(context["joint_friction"], dtype=np.float32).reshape(29)
+    effort = np.asarray(context["joint_effort_limits"], dtype=np.float32).reshape(29)
+    velocity = np.asarray(context["joint_velocity_limits"], dtype=np.float32).reshape(29)
+
+    actuator_type = np.full(29, actuator_type_to_id.get("unknown", 0), dtype=np.int64)
+    delay = np.zeros((29, 2), dtype=np.float32)
+    joint_to_index = {name: index for index, name in enumerate(joint_names)}
+    assigned: set[int] = set()
+    for group in schema.get("actuator_groups", {}).values():
+        name = str(group.get("type", "unknown"))
+        type_id = actuator_type_to_id.get(name, actuator_type_to_id.get("unknown", 0))
+        group_delay = (
+            float(group.get("min_delay", 0)),
+            float(group.get("max_delay", 0)),
+        )
+        for joint_name in group.get("joint_names", []):
+            if joint_name not in joint_to_index:
+                raise ValueError(f"actuator metadata references unknown joint {joint_name!r}")
+            index = joint_to_index[joint_name]
+            if index in assigned:
+                raise ValueError(f"joint {joint_name!r} appears in multiple actuator groups")
+            assigned.add(index)
+            actuator_type[index] = type_id
+            delay[index] = group_delay
+
+    joint = np.column_stack(
+        (
+            nominal,
+            limits[:, 0] - nominal,
+            limits[:, 1] - nominal,
+            velocity,
+            effort,
+            stiffness,
+            damping,
+            armature,
+            friction,
+            delay[:, 0],
+            delay[:, 1],
+        )
+    ).astype(np.float32, copy=False)
+    simulation = schema["simulation"]
+    gravity = np.asarray(simulation.get("gravity_w", (0.0, 0.0, -9.81)), dtype=np.float32)
+    global_info = np.asarray(
+        [
+            float(simulation["sim_dt"]),
+            float(simulation["control_dt"]),
+            float(simulation["decimation"]),
+            *gravity.tolist(),
+            float(simulation.get("solver_position_iteration_count", 0)),
+            float(simulation.get("solver_velocity_iteration_count", 0)),
+            float(schema.get("contact", {}).get("threshold_n", 10.0)),
+        ],
+        dtype=np.float32,
+    )
+    if joint.shape != (29, JOINT_ROBOT_INFO_DIM):
+        raise ValueError(f"invalid joint robot information shape {joint.shape}")
+    if actuator_type.shape != (29,) or global_info.shape != (GLOBAL_ROBOT_INFO_DIM,):
+        raise ValueError("invalid structured robot information shape")
+    if not np.isfinite(joint).all() or not np.isfinite(global_info).all():
+        raise ValueError("structured robot information contains NaN/Inf")
+    return joint, actuator_type, global_info
 
 
 def dynamics_context_vector(context: Any) -> np.ndarray:

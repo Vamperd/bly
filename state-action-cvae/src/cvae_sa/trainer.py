@@ -11,7 +11,7 @@ from typing import Any, Iterator
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from .dataset import StateActionWindowDataset, worker_seed
 from .losses import compute_loss
@@ -64,6 +64,10 @@ def validate(
     max_batches: int,
 ) -> dict[str, float]:
     model.eval()
+    if getattr(model, "__class__", type(model)).__name__ == "PhysicsTransformerCVAE":
+        result = _validate_physics(model, loader, masker, device, amp, max_batches)
+        model.train()
+        return result
     tasks = (
         ("forward", None),
         ("inverse", None),
@@ -118,6 +122,87 @@ def validate(
     return result
 
 
+@torch.no_grad()
+def _validate_physics(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    masker: MaskGenerator,
+    device: torch.device,
+    amp: str,
+    max_batches: int,
+) -> dict[str, float]:
+    tasks = ("forward_one", "forward_rollout", "inverse", "history_action", "arbitrary")
+    values: dict[str, list[float]] = {name: [] for name in tasks}
+    masker.set_step(max(masker.optimizer_step, masker.rollout_start_step))
+    for batch_index, cpu_batch in enumerate(loader):
+        if batch_index >= max_batches:
+            break
+        task = tasks[batch_index % len(tasks)]
+        batch = _device_batch(cpu_batch, device)
+        masks = masker.generate(batch, force_task=task)
+        with _autocast(device, amp):
+            output = model(batch, masks, sample_from_prior=True, deterministic=True)
+        if task.startswith("forward"):
+            if task == "forward_rollout" and output.rollout_state is not None:
+                errors = []
+                for index in range(output.rollout_state.shape[0]):
+                    horizon = int(masks.rollout_horizon[index].item())
+                    start = int(masks.rollout_start[index].item())
+                    available = min(horizon, output.rollout_state.shape[1], batch["physical_state"].shape[1] - start - 1)
+                    if available > 0:
+                        errors.append(torch.square(
+                            output.rollout_state[index, :available] -
+                            batch["physical_state"][index, start + 1 : start + available + 1]
+                        ).mean())
+                if errors:
+                    values[task].append(float(torch.sqrt(torch.stack(errors).mean()).cpu()))
+            else:
+                target = batch["physical_state"][:, 1:] - batch["physical_state"][:, :-1]
+                mask = masks.forward_transition[:, :, None].expand_as(target)
+                error = _masked_squared_error(output.forward_delta.float(), target.float(), mask)
+                if error is not None:
+                    values[task].append(float(torch.sqrt(error).cpu()))
+        elif task == "inverse":
+            mask = masks.inverse_transition[:, :, None].expand_as(output.inverse_action)
+            error = _masked_squared_error(output.inverse_action.float(), batch["action"].float(), mask)
+            if error is not None:
+                values[task].append(float(torch.sqrt(error).cpu()))
+        elif task == "history_action":
+            mask = masks.history_action_transition[:, :, None].expand_as(output.history_action)
+            error = _masked_squared_error(output.history_action.float(), batch["action"].float(), mask)
+            if error is not None:
+                values[task].append(float(torch.sqrt(error).cpu()))
+        else:
+            errors = []
+            for prediction, target, mask in (
+                (output.physical_state, batch["physical_state"], masks.state_loss),
+                (output.action, batch["action"], masks.action_loss),
+            ):
+                error = _masked_squared_error(prediction.float(), target.float(), mask)
+                if error is not None:
+                    errors.append(error)
+            if errors:
+                values[task].append(float(torch.sqrt(torch.stack(errors).mean()).cpu()))
+    means = {
+        name: float(np.mean(items)) if items else math.inf for name, items in values.items()
+    }
+    score = (
+        0.20 * means["forward_one"]
+        + 0.20 * means["forward_rollout"]
+        + 0.20 * means["inverse"]
+        + 0.15 * means["history_action"]
+        + 0.25 * means["arbitrary"]
+    )
+    return {
+        "selection_score": score,
+        "forward_one_normalized_rmse": means["forward_one"],
+        "forward_rollout_normalized_rmse": means["forward_rollout"],
+        "inverse_action_normalized_rmse": means["inverse"],
+        "history_action_normalized_rmse": means["history_action"],
+        "arbitrary_mask_normalized_rmse": means["arbitrary"],
+    }
+
+
 def _checkpoint_state(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -129,7 +214,11 @@ def _checkpoint_state(
     dataset_manifest_hash: str,
 ) -> dict[str, Any]:
     return {
-        "format_version": "sonic_state_action_cvae_checkpoint_v1",
+        "format_version": (
+            "sonic_state_action_cvae_checkpoint_v2"
+            if config["model"]["kind"] == "physics_transformer"
+            else "sonic_state_action_cvae_checkpoint_v1"
+        ),
         "step": step,
         "best_score": best_score,
         "model": model.state_dict(),
@@ -188,17 +277,36 @@ def train(
     config["model"]["robot_info_dim"] = train_dataset.robot_info_dim
     config["model"]["dynamics_context_dim"] = train_dataset.dynamics_context_dim
     config["model"]["auxiliary_dim"] = train_dataset.auxiliary_dim
-    if config["model"].get("context_mode", "hidden") == "explicit" and not train_dataset.physics_v3:
-        raise ValueError("explicit dynamics context requires a Physics State-Action v3 dataset")
+    config["model"]["joint_robot_info_dim"] = train_dataset.joint_robot_info_dim
+    config["model"]["global_robot_info_dim"] = train_dataset.global_robot_info_dim
+    config["model"]["actuator_type_count"] = len(train_dataset.actuator_type_to_id)
+    if config["model"].get("context_mode", "hidden") in {"explicit", "oracle"} and not train_dataset.physics_v3:
+        raise ValueError("oracle dynamics context requires a Physics State-Action v3 dataset")
     config["model"]["token_layout"] = (
         "interleaved" if train_dataset.physics_v3 else "grouped"
     )
+    if config["model"]["kind"] == "physics_transformer" and not train_dataset.physics_v4:
+        raise ValueError("physics_transformer requires a Physics State-Action CVAE v4 index")
     training = config["training"]
     generator = torch.Generator().manual_seed(seed)
+    sampler = None
+    if config["model"]["kind"] == "physics_transformer":
+        statuses = [train_dataset.episodes[ref.episode_index]["status"] for ref in train_dataset.refs]
+        failed = sum(status != "completed" for status in statuses)
+        completed = len(statuses) - failed
+        if failed and completed:
+            weights = [
+                0.10 / failed if status != "completed" else 0.90 / completed
+                for status in statuses
+            ]
+            sampler = WeightedRandomSampler(
+                weights, num_samples=len(weights), replacement=True, generator=generator
+            )
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(training["micro_batch"]),
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=int(data_config["num_workers"]),
         pin_memory=device.type == "cuda",
         persistent_workers=int(data_config["num_workers"]) > 0,
@@ -219,12 +327,16 @@ def train(
         raise ValueError("training split is smaller than one micro batch")
     model = build_model(config["model"]).to(device)
     reference_config = dict(config["model"])
-    reference_config["kind"] = (
-        "tcn" if config["model"]["kind"] == "transformer" else "transformer"
-    )
-    reference_model = build_model(reference_config)
-    reference_parameter_count = parameter_count(reference_model)
-    del reference_model
+    if config["model"]["kind"] == "physics_transformer":
+        reference_config["kind"] = None
+        reference_parameter_count = None
+    else:
+        reference_config["kind"] = (
+            "tcn" if config["model"]["kind"] == "transformer" else "transformer"
+        )
+        reference_model = build_model(reference_config)
+        reference_parameter_count = parameter_count(reference_model)
+        del reference_model
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(training["learning_rate"]),
@@ -254,7 +366,10 @@ def train(
             "parameter_count": parameter_count(model),
             "comparison_kind": reference_config["kind"],
             "comparison_parameter_count": reference_parameter_count,
-            "parameter_count_ratio": parameter_count(model) / reference_parameter_count,
+            "parameter_count_ratio": (
+                parameter_count(model) / reference_parameter_count
+                if reference_parameter_count else None
+            ),
             "device": str(device),
             "cuda_device": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
             "dataset_run": str(dataset_run),
@@ -270,6 +385,7 @@ def train(
     model.train()
     optimizer.zero_grad(set_to_none=True)
     for optimizer_step in range(1, max_steps + 1):
+        masker.set_step(optimizer_step)
         accumulated: dict[str, float] = {}
         for _ in range(accumulation):
             batch = _device_batch(next(stream), device)
@@ -347,7 +463,12 @@ def train(
 
     best_path = output_run / "checkpoints" / "best.pt"
     reopened = torch.load(best_path, map_location="cpu", weights_only=False)
-    if reopened.get("format_version") != "sonic_state_action_cvae_checkpoint_v1":
+    expected_format = (
+        "sonic_state_action_cvae_checkpoint_v2"
+        if config["model"]["kind"] == "physics_transformer"
+        else "sonic_state_action_cvae_checkpoint_v1"
+    )
+    if reopened.get("format_version") != expected_format:
         raise ValueError("atomically written checkpoint cannot be reopened")
     smoke_decreased = True
     if smoke:
@@ -383,10 +504,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-run", type=Path, required=True)
     parser.add_argument("--output-run", type=Path, required=True)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--model-kind", choices=("transformer", "tcn"))
+    parser.add_argument("--model-kind", choices=("transformer", "tcn", "physics_transformer"))
     parser.add_argument("--seed", type=int)
     parser.add_argument("--smoke", action="store_true")
-    parser.add_argument("--context-mode", choices=("hidden", "explicit"))
+    parser.add_argument("--context-mode", choices=("hidden", "oracle", "explicit"))
     parser.set_defaults(project_root=project_root)
     return parser.parse_args()
 

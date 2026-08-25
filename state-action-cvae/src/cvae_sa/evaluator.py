@@ -100,6 +100,197 @@ def _shuffled_action_batch(
 
 
 @torch.no_grad()
+def _evaluate_physics_bidirectional(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    masker: MaskGenerator,
+    dataset: StateActionWindowDataset,
+    device: torch.device,
+    amp: str,
+    output_run: Path,
+    checkpoint_path: Path,
+    dataset_run: Path,
+    max_batches: int | None,
+    threshold: float,
+) -> dict[str, Any]:
+    metrics = {
+        name: Metric() for name in (
+            "forward_one_normalized", "rollout_normalized", "inverse_action_normalized",
+            "history_action_normalized", "arbitrary_state_normalized",
+            "arbitrary_action_normalized", "forward_joint_position_rad",
+            "forward_joint_velocity_rad_s", "inverse_action_rad", "history_action_rad",
+        )
+    }
+    forward_baseline = Metric()
+    forward_shuffled = Metric()
+    inverse_baseline = Metric()
+    inverse_shuffled = Metric()
+    history_future_max_abs = 0.0
+    action_mean = torch.as_tensor(dataset.action_mean, device=device)
+    action_std = torch.as_tensor(dataset.action_std, device=device)
+    state_mean = torch.as_tensor(dataset.state_mean, device=device)
+    state_std = torch.as_tensor(dataset.state_std, device=device)
+    masker.set_step(max(masker.rollout_start_step, 20_000))
+    batches = 0
+    for batch_index, cpu_batch in enumerate(loader):
+        if max_batches is not None and batch_index >= max_batches:
+            break
+        batch = _device_batch(cpu_batch, device)
+        batches += 1
+
+        forward_masks = masker.generate(batch, force_task="forward_one")
+        with _autocast(device, amp):
+            forward = model(batch, forward_masks, sample_from_prior=True, deterministic=True)
+        target_delta = batch["physical_state"][:, 1:] - batch["physical_state"][:, :-1]
+        forward_mask = forward_masks.forward_transition[:, :, None].expand_as(target_delta)
+        metrics["forward_one_normalized"].add(forward.forward_delta - target_delta, forward_mask)
+        forward_baseline.add(forward.forward_delta - target_delta, forward_mask)
+        predicted_next = (batch["physical_state"][:, :-1] + forward.forward_delta) * state_std + state_mean
+        target_next = batch["physical_state"][:, 1:] * state_std + state_mean
+        metrics["forward_joint_position_rad"].add(
+            predicted_next[..., :29] - target_next[..., :29],
+            forward_masks.forward_transition[:, :, None],
+        )
+        metrics["forward_joint_velocity_rad_s"].add(
+            predicted_next[..., 29:58] - target_next[..., 29:58],
+            forward_masks.forward_transition[:, :, None],
+        )
+        shuffled = _shuffled_action_batch(batch, {
+            "action_std": action_std, "action_mean": action_mean,
+            "previous_mean": torch.empty(0, device=device),
+            "previous_std": torch.empty(0, device=device),
+        })
+        with _autocast(device, amp):
+            shuffled_output = model(
+                shuffled, forward_masks, sample_from_prior=True, deterministic=True
+            )
+        forward_shuffled.add(shuffled_output.forward_delta - target_delta, forward_mask)
+
+        rollout_masks = masker.generate(batch, force_task="forward_rollout")
+        with _autocast(device, amp):
+            rollout = model(batch, rollout_masks, sample_from_prior=True, deterministic=True)
+        for index in range(batch["physical_state"].shape[0]):
+            horizon = int(rollout_masks.rollout_horizon[index].item())
+            start = int(rollout_masks.rollout_start[index].item())
+            available = min(horizon, rollout.rollout_state.shape[1], batch["physical_state"].shape[1] - start - 1)
+            if available > 0:
+                metrics["rollout_normalized"].add(
+                    rollout.rollout_state[index, :available] -
+                    batch["physical_state"][index, start + 1 : start + available + 1]
+                )
+
+        inverse_masks = masker.generate(batch, force_task="inverse")
+        with _autocast(device, amp):
+            inverse = model(batch, inverse_masks, sample_from_prior=True, deterministic=True)
+        inverse_mask = inverse_masks.inverse_transition[:, :, None].expand_as(inverse.inverse_action)
+        metrics["inverse_action_normalized"].add(
+            inverse.inverse_action - batch["action"], inverse_mask
+        )
+        inverse_baseline.add(inverse.inverse_action - batch["action"], inverse_mask)
+        metrics["inverse_action_rad"].add(
+            (inverse.inverse_action - batch["action"]) * action_std, inverse_mask
+        )
+        negative_state = batch["physical_state"].clone()
+        negative_state[:, 1:] = torch.roll(negative_state[:, 1:], shifts=1, dims=0)
+        inverse_negative_batch = dict(batch)
+        inverse_negative_batch["physical_state"] = negative_state
+        with _autocast(device, amp):
+            inverse_negative = model(
+                inverse_negative_batch, inverse_masks,
+                sample_from_prior=True, deterministic=True,
+            )
+        inverse_shuffled.add(
+            inverse_negative.inverse_action - batch["action"], inverse_mask
+        )
+
+        history_masks = masker.generate(batch, force_task="history_action")
+        with _autocast(device, amp):
+            history = model(batch, history_masks, sample_from_prior=True, deterministic=True)
+        history_mask = history_masks.history_action_transition[:, :, None].expand_as(
+            history.history_action
+        )
+        metrics["history_action_normalized"].add(
+            history.history_action - batch["action"], history_mask
+        )
+        metrics["history_action_rad"].add(
+            (history.history_action - batch["action"]) * action_std, history_mask
+        )
+        changed_batch = dict(batch)
+        changed_state = batch["physical_state"].clone()
+        changed_state = torch.where(
+            history_masks.state_input,
+            changed_state + torch.randn_like(changed_state) * 10.0,
+            changed_state,
+        )
+        changed_batch["physical_state"] = changed_state
+        with _autocast(device, amp):
+            changed_history = model(
+                changed_batch, history_masks, sample_from_prior=True, deterministic=True
+            )
+        if bool(history_mask.any()):
+            history_future_max_abs = max(
+                history_future_max_abs,
+                float((changed_history.history_action - history.history_action).abs().masked_select(history_mask).max().cpu()),
+            )
+
+        arbitrary_masks = masker.generate(batch, force_task="arbitrary")
+        with _autocast(device, amp):
+            arbitrary = model(batch, arbitrary_masks, sample_from_prior=True, deterministic=True)
+        metrics["arbitrary_state_normalized"].add(
+            arbitrary.physical_state - batch["physical_state"], arbitrary_masks.state_loss
+        )
+        metrics["arbitrary_action_normalized"].add(
+            arbitrary.action - batch["action"], arbitrary_masks.action_loss
+        )
+
+    forward_base = float(forward_baseline.result()["rmse"])
+    forward_bad = float(forward_shuffled.result()["rmse"])
+    inverse_base = float(inverse_baseline.result()["rmse"])
+    inverse_bad = float(inverse_shuffled.result()["rmse"])
+    forward_degradation = forward_bad / forward_base - 1.0 if forward_base > 0 else math.inf
+    inverse_degradation = inverse_bad / inverse_base - 1.0 if inverse_base > 0 else math.inf
+    history_invariant = history_future_max_abs <= 1.0e-6
+    summary = {
+        "passed": bool(
+            forward_degradation >= threshold
+            and inverse_degradation >= threshold
+            and history_invariant
+        ),
+        "checkpoint": str(checkpoint_path.expanduser().resolve()),
+        "dataset_run": str(dataset_run),
+        "split": "test",
+        "batches": batches,
+        "prior_mode": "prior_mean",
+        "metrics": {name: metric.result() for name, metric in metrics.items()},
+        "negative_controls": {
+            "shuffled_action_forward": {
+                "baseline_rmse": forward_base,
+                "shuffled_rmse": forward_bad,
+                "relative_degradation": forward_degradation,
+                "required": threshold,
+                "passed": bool(forward_degradation >= threshold),
+            },
+            "shuffled_next_state_inverse": {
+                "baseline_rmse": inverse_base,
+                "shuffled_rmse": inverse_bad,
+                "relative_degradation": inverse_degradation,
+                "required": threshold,
+                "passed": bool(inverse_degradation >= threshold),
+            },
+            "history_future_invariance": {
+                "max_abs": history_future_max_abs,
+                "tolerance": 1.0e-6,
+                "passed": history_invariant,
+            },
+        },
+    }
+    atomic_write_json(output_run / "manifests/evaluation.json", summary)
+    if summary["passed"]:
+        atomic_write_text(output_run / "markers/cvae_eval.ok", "PASS\n")
+    return summary
+
+
+@torch.no_grad()
 def evaluate(
     dataset_run: Path,
     checkpoint_path: Path,
@@ -110,7 +301,10 @@ def evaluate(
     for child in ("data", "manifests", "markers", "logs", "checkpoints", "videos"):
         (output_run / child).mkdir(parents=True, exist_ok=True)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if checkpoint.get("format_version") != "sonic_state_action_cvae_checkpoint_v1":
+    if checkpoint.get("format_version") not in {
+        "sonic_state_action_cvae_checkpoint_v1",
+        "sonic_state_action_cvae_checkpoint_v2",
+    }:
         raise ValueError("unsupported checkpoint format")
     config = checkpoint["config"]
     seed_everything(int(config["seed"]))
@@ -139,6 +333,14 @@ def evaluate(
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     masker = MaskGenerator(config["masking"])
+    if checkpoint.get("format_version") == "sonic_state_action_cvae_checkpoint_v2":
+        summary = _evaluate_physics_bidirectional(
+            model, loader, masker, dataset, device, str(config["training"]["amp"]),
+            output_run, checkpoint_path, dataset_run, max_batches,
+            float(config["evaluation"]["negative_control_min_degradation"]),
+        )
+        dataset.close()
+        return summary
     norm = _normalization_tensors(dataset, device)
     task_specs = (
         ("forward", None),
