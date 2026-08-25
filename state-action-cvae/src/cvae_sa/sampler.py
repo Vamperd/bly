@@ -28,10 +28,28 @@ def _sample_from_npz(
 ) -> tuple[dict[str, Any], tuple[np.ndarray, np.ndarray, np.ndarray] | None]:
     with np.load(path) as values:
         action_key = "action" if "action" in values else "action_rel"
+        if dataset.physics_v3 and (
+            "robot_information" not in values or "dynamics_context" not in values
+        ):
+            raise ValueError(
+                "Physics v3 NPZ inputs must include robot_information and "
+                "dynamics_context; use an indexed HDF5 episode when possible"
+            )
         state = np.asarray(values["physical_state"], dtype=np.float32)
-        previous = np.asarray(values["previous_action"], dtype=np.float32)
+        previous = np.asarray(
+            values.get("previous_action", np.empty((state.shape[0], 0))),
+            dtype=np.float32,
+        )
         action = np.asarray(values[action_key], dtype=np.float32)
         scale = np.asarray(values["action_scale"], dtype=np.float32)
+        robot_information = np.asarray(
+            values.get("robot_information", np.empty((dataset.robot_info_dim,))),
+            dtype=np.float32,
+        )
+        dynamics_context = np.asarray(
+            values.get("dynamics_context", np.empty((dataset.dynamics_context_dim,))),
+            dtype=np.float32,
+        )
         normalized = bool(np.asarray(values.get("normalized", False)).item())
         valid_state = np.asarray(
             values.get("valid_state", np.ones(state.shape[0], dtype=bool)), dtype=bool
@@ -43,21 +61,54 @@ def _sample_from_npz(
             values.get("progress", np.linspace(0.0, 1.0, state.shape[0])),
             dtype=np.float32,
         )
-        mask_names = ("mask_physical_state", "mask_previous_action", "mask_action")
-        explicit_masks = (
-            tuple(np.asarray(values[name], dtype=bool) for name in mask_names)
-            if all(name in values for name in mask_names)
-            else None
-        )
+        state_mask = values.get("mask_physical_state")
+        action_mask = values.get("mask_action")
+        if state_mask is not None and action_mask is not None:
+            previous_mask = values.get(
+                "mask_previous_action", np.zeros_like(previous, dtype=bool)
+            )
+            explicit_masks = tuple(
+                np.asarray(value, dtype=bool)
+                for value in (state_mask, previous_mask, action_mask)
+            )
+        else:
+            explicit_masks = None
+    expected = {
+        "physical_state": (state.shape[0], dataset.state_dim),
+        "previous_action": (state.shape[0], dataset.previous_mean.size),
+        "action": (state.shape[0] - 1, 29),
+        "action_scale": (29,),
+        "robot_information": (dataset.robot_info_dim,),
+        "dynamics_context": (dataset.dynamics_context_dim,),
+    }
+    actual = {
+        "physical_state": state.shape,
+        "previous_action": previous.shape,
+        "action": action.shape,
+        "action_scale": scale.shape,
+        "robot_information": robot_information.shape,
+        "dynamics_context": dynamics_context.shape,
+    }
+    for name, shape in expected.items():
+        if actual[name] != shape:
+            raise ValueError(f"{name}: expected {shape}, found {actual[name]}")
     if not normalized:
         state = (state - dataset.state_mean) / dataset.state_std
         previous = (previous - dataset.previous_mean) / dataset.previous_std
         action = (action - dataset.action_mean) / dataset.action_std
+        robot_information = (
+            robot_information - dataset.robot_mean
+        ) / dataset.robot_std
+        dynamics_context = (
+            dynamics_context - dataset.dynamics_mean
+        ) / dataset.dynamics_std
     sample = {
         "physical_state": torch.from_numpy(state),
         "previous_action": torch.from_numpy(previous),
         "action": torch.from_numpy(action),
         "action_scale": torch.from_numpy(scale),
+        "robot_information": torch.from_numpy(robot_information),
+        "dynamics_context": torch.from_numpy(dynamics_context),
         "valid_state": torch.from_numpy(valid_state),
         "valid_action": torch.from_numpy(valid_action),
         "progress": torch.from_numpy(progress),
@@ -105,9 +156,11 @@ def _explicit_mask_batch(
     previous &= batch["valid_state"][:, :, None]
     action &= batch["valid_action"][:, :, None]
     previous_input = previous.clone()
-    previous_input[:, 1:] |= action
+    if previous_input.shape[-1]:
+        previous_input[:, 1:] |= action
     previous_loss = previous.clone()
-    previous_loss[:, 1:] &= ~action
+    if previous_loss.shape[-1]:
+        previous_loss[:, 1:] &= ~action
     return MaskBatch(
         state,
         previous_input,
@@ -198,7 +251,8 @@ def sample(
     state_values = state_normalized * dataset.state_std + dataset.state_mean
     previous_values = previous_normalized * dataset.previous_std + dataset.previous_mean
     action_values = action_normalized * dataset.action_std + dataset.action_mean
-    previous_values[:, 1:] = action_values
+    if previous_values.shape[-1]:
+        previous_values[:, 1:] = action_values
     output_path = output_run / "data" / "samples.npz"
     temporary = output_path.with_name(f".{output_path.name}.tmp.{os.getpid()}")
     with temporary.open("wb") as stream:
@@ -219,6 +273,8 @@ def sample(
             valid_state=batch["valid_state"][0].cpu().numpy(),
             valid_action=batch["valid_action"][0].cpu().numpy(),
             action_scale=batch["action_scale"][0].cpu().numpy(),
+            robot_information=batch["robot_information"][0].cpu().numpy(),
+            dynamics_context=batch["dynamics_context"][0].cpu().numpy(),
         )
     os.replace(temporary, output_path)
     manifest = {
@@ -234,6 +290,9 @@ def sample(
             "joint_position": "rad",
             "joint_velocity": "rad/s",
             "base_angular_velocity": "rad/s",
+            "base_linear_velocity": "m/s",
+            "base_height": "m",
+            "foot_contact": "binary",
             "gravity": "unit vector",
             "action": "relative target joint angle, rad",
         },

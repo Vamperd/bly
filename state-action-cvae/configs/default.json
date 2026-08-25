@@ -16,6 +16,7 @@
     "ffn_dim": 1024,
     "latent_dim": 64,
     "dropout": 0.1,
+    "context_mode": "hidden",
     "tcn_channels": 360,
     "tcn_encoder_layers": 5,
     "tcn_decoder_layers": 5,
@@ -45,6 +46,7 @@
     "forward_weight": 2.0,
     "inverse_weight": 1.0,
     "gravity_weight": 0.1,
+    "auxiliary_weight": 0.1,
     "amp": "bf16"
   },
   "evaluation": {

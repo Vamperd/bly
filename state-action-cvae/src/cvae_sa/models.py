@@ -18,6 +18,7 @@ class ModelOutput:
     previous_action: torch.Tensor
     action: torch.Tensor
     forward_delta: torch.Tensor
+    auxiliary_transition: torch.Tensor
     posterior_mean: torch.Tensor
     posterior_logvar: torch.Tensor
     prior_mean: torch.Tensor
@@ -152,10 +153,24 @@ class TransformerCVAE(nn.Module):
         dropout = float(config["dropout"])
         self.width = width
         self.latent_dim = latent
-        self.state_tokenizer = MLPTokenizer(PHYSICAL_STATE_DIM * 2 + 1, width)
-        self.previous_tokenizer = MLPTokenizer(ACTION_DIM * 2 + 1, width)
+        self.state_dim = int(config.get("state_dim", PHYSICAL_STATE_DIM))
+        self.include_previous_action = bool(config.get("include_previous_action", True))
+        self.robot_info_dim = int(config.get("robot_info_dim", 0))
+        self.dynamics_context_dim = int(config.get("dynamics_context_dim", 0))
+        self.auxiliary_dim = int(config.get("auxiliary_dim", 0))
+        self.context_mode = str(config.get("context_mode", "hidden"))
+        self.token_layout = str(config.get("token_layout", "grouped"))
+        self.state_tokenizer = MLPTokenizer(self.state_dim * 2 + 1, width)
+        self.previous_tokenizer = (
+            MLPTokenizer(ACTION_DIM * 2 + 1, width)
+            if self.include_previous_action
+            else None
+        )
         self.action_tokenizer = MLPTokenizer(ACTION_DIM * 2 + 1, width)
-        self.scale_tokenizer = MLPTokenizer(ACTION_DIM, width)
+        condition_dim = self.robot_info_dim if self.robot_info_dim else ACTION_DIM
+        if self.context_mode == "explicit":
+            condition_dim += self.dynamics_context_dim
+        self.scale_tokenizer = MLPTokenizer(condition_dim, width)
         self.task_base = nn.Parameter(torch.zeros(1, 1, width))
         self.task_embedding = nn.Embedding(3, width)
         self.type_embedding = nn.Embedding(5, width)
@@ -176,16 +191,27 @@ class TransformerCVAE(nn.Module):
         self.posterior = nn.Linear(width, latent * 2)
         self.prior = nn.Linear(width, latent * 2)
         self.latent_projection = nn.Linear(latent, width)
-        self.state_head = nn.Linear(width, PHYSICAL_STATE_DIM)
-        self.previous_head = nn.Linear(width, ACTION_DIM)
+        self.state_head = nn.Linear(width, self.state_dim)
+        self.previous_head = (
+            nn.Linear(width, ACTION_DIM) if self.include_previous_action else None
+        )
         self.action_head = nn.Linear(width, ACTION_DIM)
         self.forward_head = nn.Sequential(
-            nn.Linear(width, width), nn.GELU(), nn.Linear(width, PHYSICAL_STATE_DIM)
+            nn.Linear(width, width), nn.GELU(), nn.Linear(width, self.state_dim)
+        )
+        self.auxiliary_head = (
+            nn.Sequential(
+                nn.Linear(width, width), nn.GELU(), nn.Linear(width, self.auxiliary_dim)
+            )
+            if self.auxiliary_dim
+            else None
         )
 
     def _tokenize(
         self, batch: dict[str, torch.Tensor], masks: MaskBatch, full: bool
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[slice, slice, slice]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[Any, Any, Any]]:
+        if self.token_layout == "interleaved":
+            return self._tokenize_interleaved(batch, masks, full)
         inputs = masked_inputs(batch, masks, full=full)
         state = inputs["physical_state"]
         previous = inputs["previous_action"]
@@ -249,6 +275,72 @@ class TransformerCVAE(nn.Module):
         action_slice = slice(previous_slice.stop, previous_slice.stop + state_steps)
         return tokens, valid, times, (state_slice, previous_slice, action_slice)
 
+    def _tokenize_interleaved(
+        self, batch: dict[str, torch.Tensor], masks: MaskBatch, full: bool
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[Any, Any, Any]]:
+        inputs = masked_inputs(batch, masks, full=full)
+        state = inputs["physical_state"]
+        action = inputs["action"]
+        batch_size, state_steps, _ = state.shape
+        action_padded = F.pad(action, (0, 0, 0, 1))
+        action_mask = F.pad(masks.action_input, (0, 0, 0, 1))
+        state_token = self.state_tokenizer(
+            torch.cat(
+                (state, masks.state_input.to(state.dtype), batch["progress"][..., None]), -1
+            )
+        )
+        action_progress = torch.cat(
+            (batch["progress"][:, 1:], torch.zeros_like(batch["progress"][:, :1])), dim=1
+        )
+        action_token = self.action_tokenizer(
+            torch.cat((action_padded, action_mask.to(action.dtype), action_progress[..., None]), -1)
+        )
+        task_ids = torch.full(
+            (batch_size,), masks.task_id, dtype=torch.long, device=state.device
+        )
+        task_token = self.task_base.expand(batch_size, -1, -1) + self.task_embedding(task_ids)[:, None]
+        condition = batch["robot_information"] if self.robot_info_dim else batch["action_scale"]
+        if self.context_mode == "explicit":
+            condition = torch.cat((condition, batch["dynamics_context"]), dim=-1)
+        robot_token = self.scale_tokenizer(condition)[:, None]
+        interleaved = torch.stack((state_token, action_token), dim=2).flatten(1, 2)[:, :-1]
+        tokens = torch.cat((task_token, robot_token, interleaved), dim=1)
+        pair_types = torch.stack(
+            (
+                torch.full((state_steps,), 2, dtype=torch.long, device=state.device),
+                torch.full((state_steps,), 4, dtype=torch.long, device=state.device),
+            ),
+            dim=1,
+        ).flatten()[:-1]
+        type_ids = torch.cat(
+            (
+                torch.zeros(1, dtype=torch.long, device=state.device),
+                torch.ones(1, dtype=torch.long, device=state.device),
+                pair_types,
+            )
+        )
+        tokens = tokens + self.type_embedding(type_ids)[None]
+        valid_action = F.pad(batch["valid_action"], (0, 1), value=False)
+        valid_interleaved = torch.stack(
+            (batch["valid_state"], valid_action), dim=2
+        ).flatten(1, 2)[:, :-1]
+        valid = torch.cat(
+            (
+                torch.ones((batch_size, 2), dtype=torch.bool, device=state.device),
+                valid_interleaved,
+            ),
+            dim=1,
+        )
+        state_times = torch.arange(state_steps, device=state.device)
+        action_times = state_times + 1
+        pair_times = torch.stack((state_times, action_times), dim=1).flatten()[:-1]
+        times = torch.cat(
+            (torch.full((2,), -1, dtype=torch.long, device=state.device), pair_times)
+        )
+        state_indices = 2 + torch.arange(0, 2 * state_steps - 1, 2, device=state.device)
+        action_indices = 2 + torch.arange(1, 2 * state_steps - 1, 2, device=state.device)
+        return tokens, valid, times, (state_indices, None, action_indices)
+
     @staticmethod
     def _distribution(parameters: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         mean, logvar = parameters.chunk(2, dim=-1)
@@ -257,6 +349,19 @@ class TransformerCVAE(nn.Module):
     @staticmethod
     def _sample(mean: torch.Tensor, logvar: torch.Tensor, deterministic: bool) -> torch.Tensor:
         return mean if deterministic else mean + torch.randn_like(mean) * torch.exp(0.5 * logvar)
+
+    def _latent_summary(
+        self, encoded: torch.Tensor, valid: torch.Tensor
+    ) -> torch.Tensor:
+        if self.token_layout != "interleaved":
+            return encoded[:, 0]
+        # In a causal forward task the time=-1 task token cannot attend to any
+        # sequence token. Pool valid S/A tokens so p(z|visible) and q(z|full)
+        # remain conditional on the actual trajectory rather than a constant.
+        data_valid = valid[:, 2:].to(encoded.dtype)
+        return (
+            encoded[:, 2:] * data_valid[:, :, None]
+        ).sum(dim=1) / data_valid.sum(dim=1, keepdim=True).clamp_min(1.0)
 
     def forward(
         self,
@@ -269,9 +374,11 @@ class TransformerCVAE(nn.Module):
         full, _, _, _ = self._tokenize(batch, masks, full=True)
         prior_encoded = self.encoder(visible, valid, times, masks.causal)
         posterior_encoded = self.encoder(full, valid, times, masks.causal)
-        prior_mean, prior_logvar = self._distribution(self.prior(prior_encoded[:, 0]))
+        prior_summary = self._latent_summary(prior_encoded, valid)
+        posterior_summary = self._latent_summary(posterior_encoded, valid)
+        prior_mean, prior_logvar = self._distribution(self.prior(prior_summary))
         posterior_mean, posterior_logvar = self._distribution(
-            self.posterior(posterior_encoded[:, 0])
+            self.posterior(posterior_summary)
         )
         latent = self._sample(
             prior_mean if sample_from_prior else posterior_mean,
@@ -283,13 +390,27 @@ class TransformerCVAE(nn.Module):
         )
         state_slice, previous_slice, action_slice = slices
         state_hidden = decoded[:, state_slice]
-        previous_hidden = decoded[:, previous_slice]
+        previous_hidden = decoded[:, previous_slice] if previous_slice is not None else None
         action_hidden = decoded[:, action_slice]
+        previous_output = (
+            self.previous_head(previous_hidden)
+            if self.previous_head is not None and previous_hidden is not None
+            else state_hidden.new_empty(state_hidden.shape[0], state_hidden.shape[1], 0)
+        )
+        action_output = self.action_head(action_hidden)
+        if self.token_layout != "interleaved":
+            action_output = action_output[:, :-1]
+        auxiliary_output = (
+            self.auxiliary_head(state_hidden[:, 1:])
+            if self.auxiliary_head is not None
+            else state_hidden.new_empty(state_hidden.shape[0], state_hidden.shape[1] - 1, 0)
+        )
         return ModelOutput(
             self.state_head(state_hidden),
-            self.previous_head(previous_hidden),
-            self.action_head(action_hidden[:, :-1]),
+            previous_output,
+            action_output,
             self.forward_head(state_hidden[:, 1:]),
+            auxiliary_output,
             posterior_mean,
             posterior_logvar,
             prior_mean,
@@ -357,10 +478,24 @@ class TCNCVAE(nn.Module):
         latent = int(config["latent_dim"])
         dropout = float(config["dropout"])
         self.latent_dim = latent
-        self.state_tokenizer = MLPTokenizer(PHYSICAL_STATE_DIM * 2 + 1, width)
-        self.previous_tokenizer = MLPTokenizer(ACTION_DIM * 2 + 1, width)
+        self.state_dim = int(config.get("state_dim", PHYSICAL_STATE_DIM))
+        self.include_previous_action = bool(config.get("include_previous_action", True))
+        self.robot_info_dim = int(config.get("robot_info_dim", 0))
+        self.dynamics_context_dim = int(config.get("dynamics_context_dim", 0))
+        self.auxiliary_dim = int(config.get("auxiliary_dim", 0))
+        self.context_mode = str(config.get("context_mode", "hidden"))
+        self.token_layout = str(config.get("token_layout", "grouped"))
+        self.state_tokenizer = MLPTokenizer(self.state_dim * 2 + 1, width)
+        self.previous_tokenizer = (
+            MLPTokenizer(ACTION_DIM * 2 + 1, width)
+            if self.include_previous_action
+            else None
+        )
         self.action_tokenizer = MLPTokenizer(ACTION_DIM * 2 + 1, width)
-        self.scale_tokenizer = MLPTokenizer(ACTION_DIM, width)
+        condition_dim = self.robot_info_dim if self.robot_info_dim else ACTION_DIM
+        if self.context_mode == "explicit":
+            condition_dim += self.dynamics_context_dim
+        self.scale_tokenizer = MLPTokenizer(condition_dim, width)
         self.task_embedding = nn.Embedding(3, width)
         self.encoder = TemporalStack(
             width,
@@ -377,10 +512,15 @@ class TCNCVAE(nn.Module):
         self.prior = nn.Linear(width, latent * 2)
         self.posterior = nn.Linear(width, latent * 2)
         self.latent_projection = nn.Linear(latent, width)
-        self.state_head = nn.Conv1d(width, PHYSICAL_STATE_DIM, 1)
-        self.previous_head = nn.Conv1d(width, ACTION_DIM, 1)
+        self.state_head = nn.Conv1d(width, self.state_dim, 1)
+        self.previous_head = (
+            nn.Conv1d(width, ACTION_DIM, 1) if self.include_previous_action else None
+        )
         self.action_head = nn.Conv1d(width, ACTION_DIM, 1)
-        self.forward_head = nn.Conv1d(width, PHYSICAL_STATE_DIM, 1)
+        self.forward_head = nn.Conv1d(width, self.state_dim, 1)
+        self.auxiliary_head = (
+            nn.Conv1d(width, self.auxiliary_dim, 1) if self.auxiliary_dim else None
+        )
 
     def _tokens(
         self, batch: dict[str, torch.Tensor], masks: MaskBatch, full: bool
@@ -398,16 +538,18 @@ class TCNCVAE(nn.Module):
                 -1,
             )
         )
-        previous = self.previous_tokenizer(
-            torch.cat(
-                (
-                    inputs["previous_action"],
-                    masks.previous_input.to(inputs["previous_action"].dtype),
-                    batch["progress"][..., None],
-                ),
-                -1,
+        previous = None
+        if self.previous_tokenizer is not None:
+            previous = self.previous_tokenizer(
+                torch.cat(
+                    (
+                        inputs["previous_action"],
+                        masks.previous_input.to(inputs["previous_action"].dtype),
+                        batch["progress"][..., None],
+                    ),
+                    -1,
+                )
             )
-        )
         action_progress = torch.cat(
             (batch["progress"][:, 1:], torch.zeros_like(batch["progress"][:, :1])), dim=1
         )
@@ -417,7 +559,19 @@ class TCNCVAE(nn.Module):
         task_ids = torch.full(
             (state.shape[0],), masks.task_id, dtype=torch.long, device=state.device
         )
-        condition = self.scale_tokenizer(batch["action_scale"]) + self.task_embedding(task_ids)
+        condition_input = (
+            batch["robot_information"] if self.robot_info_dim else batch["action_scale"]
+        )
+        if self.context_mode == "explicit":
+            condition_input = torch.cat(
+                (condition_input, batch["dynamics_context"]), dim=-1
+            )
+        condition = self.scale_tokenizer(condition_input) + self.task_embedding(task_ids)
+        if self.token_layout == "interleaved":
+            tokens = torch.stack((state, action), dim=2).flatten(1, 2)[:, :-1]
+            return (tokens + condition[:, None]).transpose(1, 2)
+        if previous is None:
+            raise RuntimeError("grouped TCN requires previous Action tokens")
         return (state + previous + action + condition[:, None]).transpose(1, 2)
 
     @staticmethod
@@ -434,7 +588,14 @@ class TCNCVAE(nn.Module):
     ) -> ModelOutput:
         visible_tokens = self._tokens(batch, masks, False)
         full_tokens = self._tokens(batch, masks, True)
-        valid = batch["valid_state"].to(visible_tokens.dtype)[:, None]
+        if self.token_layout == "interleaved":
+            valid_action = F.pad(batch["valid_action"], (0, 1), value=False)
+            valid_values = torch.stack(
+                (batch["valid_state"], valid_action), dim=2
+            ).flatten(1, 2)[:, :-1]
+        else:
+            valid_values = batch["valid_state"]
+        valid = valid_values.to(visible_tokens.dtype)[:, None]
         visible = self.encoder(visible_tokens, masks.causal, valid)
         full = self.encoder(full_tokens, masks.causal, valid)
         prior_pool = (visible * valid).sum(-1) / valid.sum(-1).clamp_min(1.0)
@@ -447,15 +608,32 @@ class TCNCVAE(nn.Module):
         decoded = self.decoder(
             visible + self.latent_projection(latent)[:, :, None], masks.causal, valid
         )
-        state = self.state_head(decoded).transpose(1, 2)
-        previous = self.previous_head(decoded).transpose(1, 2)
-        action = self.action_head(decoded).transpose(1, 2)[:, :-1]
-        delta = self.forward_head(decoded).transpose(1, 2)[:, :-1]
+        if self.token_layout == "interleaved":
+            state_hidden = decoded[:, :, 0::2]
+            action_hidden = decoded[:, :, 1::2]
+            state = self.state_head(state_hidden).transpose(1, 2)
+            previous = state.new_empty(state.shape[0], state.shape[1], 0)
+            action = self.action_head(action_hidden).transpose(1, 2)
+            delta = self.forward_head(state_hidden[:, :, 1:]).transpose(1, 2)
+            auxiliary = (
+                self.auxiliary_head(state_hidden[:, :, 1:]).transpose(1, 2)
+                if self.auxiliary_head is not None
+                else state.new_empty(state.shape[0], state.shape[1] - 1, 0)
+            )
+        else:
+            state = self.state_head(decoded).transpose(1, 2)
+            if self.previous_head is None:
+                raise RuntimeError("grouped TCN requires previous Action head")
+            previous = self.previous_head(decoded).transpose(1, 2)
+            action = self.action_head(decoded).transpose(1, 2)[:, :-1]
+            delta = self.forward_head(decoded).transpose(1, 2)[:, :-1]
+            auxiliary = state.new_empty(state.shape[0], state.shape[1] - 1, 0)
         return ModelOutput(
             state,
             previous,
             action,
             delta,
+            auxiliary,
             posterior_mean,
             posterior_logvar,
             prior_mean,

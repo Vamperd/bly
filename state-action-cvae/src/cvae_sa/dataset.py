@@ -12,6 +12,16 @@ import torch
 from torch.utils.data import Dataset
 
 from .constants import ACTION_DIM, PHYSICAL_STATE_DIM, PHYSICAL_STATE_FIELDS
+from .physics_schema import (
+    AUXILIARY_TRANSITION_DIM,
+    dynamics_context_vector,
+    PHYSICS_STATE_DIM,
+    load_physics_schema,
+    read_physics_states,
+    read_auxiliary_transitions,
+    resolve_parameter as resolve_physics_parameter,
+    robot_information_vector,
+)
 from .schema import load_schema, raw_action_to_relative, resolve_parameter
 from .util import file_sha256, load_json
 
@@ -49,8 +59,15 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         if not marker.is_file():
             raise FileNotFoundError(f"dataset marker is missing: {marker}")
         self.manifest = load_json(self.dataset_run / "manifests" / "dataset_manifest.json")
-        if self.manifest.get("schema_version") != "sonic_state_action_cvae_dataset_v1":
+        manifest_version = self.manifest.get("schema_version")
+        if manifest_version not in {
+            "sonic_state_action_cvae_dataset_v1",
+            "sonic_physics_state_action_cvae_dataset_v3",
+        }:
             raise ValueError("unsupported CVAE dataset manifest")
+        self.physics_v3 = manifest_version == "sonic_physics_state_action_cvae_dataset_v3"
+        self.state_dim = PHYSICS_STATE_DIM if self.physics_v3 else PHYSICAL_STATE_DIM
+        self.include_previous_action = not self.physics_v3
         episodes_path = self.dataset_run / "manifests" / "episodes.jsonl"
         expected_hash = self.manifest.get("episodes_index_sha256")
         if expected_hash and file_sha256(episodes_path) != expected_hash:
@@ -69,12 +86,31 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         with np.load(self.dataset_run / "data" / "normalization.npz") as normalization:
             self.state_mean = normalization["physical_state_mean"].astype(np.float32)
             self.state_std = normalization["physical_state_std"].astype(np.float32)
-            self.previous_mean = normalization["previous_action_mean"].astype(np.float32)
-            self.previous_std = normalization["previous_action_std"].astype(np.float32)
+            if self.physics_v3:
+                self.previous_mean = np.empty((0,), dtype=np.float32)
+                self.previous_std = np.empty((0,), dtype=np.float32)
+                self.robot_mean = normalization["robot_info_mean"].astype(np.float32)
+                self.robot_std = normalization["robot_info_std"].astype(np.float32)
+                self.dynamics_mean = normalization["dynamics_context_mean"].astype(np.float32)
+                self.dynamics_std = normalization["dynamics_context_std"].astype(np.float32)
+                self.auxiliary_mean = normalization["auxiliary_transition_mean"].astype(np.float32)
+                self.auxiliary_std = normalization["auxiliary_transition_std"].astype(np.float32)
+            else:
+                self.previous_mean = normalization["previous_action_mean"].astype(np.float32)
+                self.previous_std = normalization["previous_action_std"].astype(np.float32)
+                self.robot_mean = np.empty((0,), dtype=np.float32)
+                self.robot_std = np.empty((0,), dtype=np.float32)
+                self.dynamics_mean = np.empty((0,), dtype=np.float32)
+                self.dynamics_std = np.empty((0,), dtype=np.float32)
+                self.auxiliary_mean = np.empty((0,), dtype=np.float32)
+                self.auxiliary_std = np.empty((0,), dtype=np.float32)
             self.action_mean = normalization["action_mean"].astype(np.float32)
             self.action_std = normalization["action_std"].astype(np.float32)
-        if self.state_mean.shape != (PHYSICAL_STATE_DIM,):
+        if self.state_mean.shape != (self.state_dim,):
             raise ValueError("invalid physical state normalization")
+        self.robot_info_dim = int(self.robot_mean.size)
+        self.dynamics_context_dim = int(self.dynamics_mean.size)
+        self.auxiliary_dim = int(self.auxiliary_mean.size)
         self.refs: list[WindowRef] = []
         for episode_index, item in enumerate(self.episodes):
             steps = int(item["steps"])
@@ -119,7 +155,7 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
     def _schema(self, path: str) -> dict[str, Any]:
         schema = self._schema_cache.get(path)
         if schema is None:
-            schema = load_schema(Path(path))
+            schema = load_physics_schema(Path(path)) if self.physics_v3 else load_schema(Path(path))
             self._schema_cache[path] = schema
         return schema
 
@@ -134,6 +170,8 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         return np.concatenate(arrays, axis=-1)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        if self.physics_v3:
+            return self._physics_item(index)
         ref = self.refs[index]
         metadata = self.episodes[ref.episode_index]
         steps = int(metadata["steps"])
@@ -184,6 +222,75 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
             "previous_action": torch.from_numpy(previous_output),
             "action": torch.from_numpy(action_output),
             "action_scale": torch.from_numpy(action_scale.copy()),
+            "robot_information": torch.empty(0, dtype=torch.float32),
+            "dynamics_context": torch.empty(0, dtype=torch.float32),
+            "auxiliary_transition": torch.empty((self.window, 0), dtype=torch.float32),
+            "valid_state": torch.from_numpy(valid_state),
+            "valid_action": torch.from_numpy(valid_action),
+            "progress": torch.from_numpy(progress),
+            "motion_key": metadata["motion_key"],
+            "package": metadata["package"],
+            "status": metadata["status"],
+            "variant_id": int(metadata["variant_id"]),
+            "window_start": start,
+            "episode_ref": f"{metadata['source_run']}::{metadata['episode']}",
+        }
+
+    def _physics_item(self, index: int) -> dict[str, Any]:
+        ref = self.refs[index]
+        metadata = self.episodes[ref.episode_index]
+        steps = int(metadata["steps"])
+        if ref.fixed_start is None:
+            max_start = max(0, steps - self.window)
+            start = int(np.random.randint(0, max_start + 1)) if max_start else 0
+        else:
+            start = ref.fixed_start
+        end = min(start + self.window, steps)
+        count = end - start
+        stream = self._handle(metadata["hdf5_path"])
+        episode = stream[f"data/{metadata['episode']}"]
+        schema = self._schema(metadata["schema_path"])
+        env_id = int(metadata["env_id"])
+        physical = read_physics_states(episode["states"], start, end + 1)
+        actions = np.asarray(
+            episode["actions/action_target_canonical"][start:end], dtype=np.float32
+        )
+        context = stream[f"contexts/{metadata['context_id']}"]
+        robot_info = robot_information_vector(schema, context, env_id)
+        dynamics_context = dynamics_context_vector(context)
+        auxiliary = read_auxiliary_transitions(episode["diagnostics"], start, end)
+        action_scale = resolve_physics_parameter(schema["action_scale"], env_id)
+
+        state_output = np.zeros((self.window + 1, self.state_dim), dtype=np.float32)
+        action_output = np.zeros((self.window, ACTION_DIM), dtype=np.float32)
+        auxiliary_output = np.zeros(
+            (self.window, AUXILIARY_TRANSITION_DIM), dtype=np.float32
+        )
+        state_output[: count + 1] = (physical - self.state_mean) / self.state_std
+        action_output[:count] = (actions - self.action_mean) / self.action_std
+        auxiliary_output[:count] = (
+            auxiliary - self.auxiliary_mean
+        ) / self.auxiliary_std
+        valid_state = np.zeros(self.window + 1, dtype=bool)
+        valid_action = np.zeros(self.window, dtype=bool)
+        valid_state[: count + 1] = True
+        valid_action[:count] = True
+        progress = np.zeros(self.window + 1, dtype=np.float32)
+        progress[: count + 1] = np.minimum(
+            (start + np.arange(count + 1, dtype=np.float32)) / max(steps, 1), 1.0
+        )
+        return {
+            "physical_state": torch.from_numpy(state_output),
+            "previous_action": torch.empty((self.window + 1, 0), dtype=torch.float32),
+            "action": torch.from_numpy(action_output),
+            "action_scale": torch.from_numpy(action_scale.copy()),
+            "robot_information": torch.from_numpy(
+                ((robot_info - self.robot_mean) / self.robot_std).astype(np.float32)
+            ),
+            "dynamics_context": torch.from_numpy(
+                ((dynamics_context - self.dynamics_mean) / self.dynamics_std).astype(np.float32)
+            ),
+            "auxiliary_transition": torch.from_numpy(auxiliary_output),
             "valid_state": torch.from_numpy(valid_state),
             "valid_action": torch.from_numpy(valid_action),
             "progress": torch.from_numpy(progress),

@@ -62,6 +62,8 @@ def _normalization_tensors(
         "previous_std": torch.as_tensor(dataset.previous_std, device=device),
         "action_mean": torch.as_tensor(dataset.action_mean, device=device),
         "action_std": torch.as_tensor(dataset.action_std, device=device),
+        "auxiliary_mean": torch.as_tensor(dataset.auxiliary_mean, device=device),
+        "auxiliary_std": torch.as_tensor(dataset.auxiliary_std, device=device),
     }
 
 
@@ -88,9 +90,10 @@ def _shuffled_action_batch(
         shuffled_action * normalization["action_std"] + normalization["action_mean"]
     )
     shuffled_previous = batch["previous_action"].clone()
-    shuffled_previous[:, 1:] = (
-        action_relative - normalization["previous_mean"]
-    ) / normalization["previous_std"]
+    if shuffled_previous.shape[-1]:
+        shuffled_previous[:, 1:] = (
+            action_relative - normalization["previous_mean"]
+        ) / normalization["previous_std"]
     shuffled["action"] = shuffled_action
     shuffled["previous_action"] = shuffled_previous
     return shuffled
@@ -159,6 +162,8 @@ def evaluate(
         "gravity_angular_degrees": Metric(),
         "forward_one_step_joint_position_rad": Metric(),
         "forward_one_step_joint_velocity_rad_s": Metric(),
+        "applied_joint_torque_mean_nm": Metric(),
+        "foot_contact_impulse_ns": Metric(),
     }
     horizons = {horizon: Metric() for horizon in (1, 8, 32, 128)}
     per_package: dict[str, Metric] = defaultdict(Metric)
@@ -216,13 +221,35 @@ def evaluate(
             physical_metrics["action_relative_rad"].add(
                 action_prediction - action_target, masks.action_loss
             )
-            gravity_mask = masks.state_loss[..., 61:64].any(-1)
+            gravity_slice = slice(64, 67) if dataset.state_dim == 70 else slice(61, 64)
+            gravity_mask = masks.state_loss[..., gravity_slice].any(-1)
             physical_metrics["gravity_angular_degrees"].add(
-                _gravity_angle(state_prediction[..., 61:64], state_target[..., 61:64]),
+                _gravity_angle(
+                    state_prediction[..., gravity_slice], state_target[..., gravity_slice]
+                ),
                 gravity_mask,
             )
             if task != "forward":
                 continue
+            if output.auxiliary_transition.shape[-1]:
+                auxiliary_prediction = _denormalize(
+                    output.auxiliary_transition,
+                    norm["auxiliary_mean"],
+                    norm["auxiliary_std"],
+                )
+                auxiliary_target = _denormalize(
+                    batch["auxiliary_transition"],
+                    norm["auxiliary_mean"],
+                    norm["auxiliary_std"],
+                )
+                physical_metrics["applied_joint_torque_mean_nm"].add(
+                    auxiliary_prediction[..., :29] - auxiliary_target[..., :29],
+                    batch["valid_action"][:, :, None],
+                )
+                physical_metrics["foot_contact_impulse_ns"].add(
+                    auxiliary_prediction[..., 29:] - auxiliary_target[..., 29:],
+                    batch["valid_action"][:, :, None],
+                )
             posterior_means.append(output.posterior_mean.float().cpu().numpy())
             q_var = torch.exp(output.posterior_logvar)
             p_var = torch.exp(output.prior_logvar)

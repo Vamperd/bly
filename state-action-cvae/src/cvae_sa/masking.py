@@ -121,8 +121,9 @@ class MaskGenerator:
 
         # action_t and state_{t+1}.previous_action encode the same control command.
         # Hide the duplicate from the input, but never add a second target loss for it.
-        previous_input[:, 1:] |= action_input
-        previous_loss[:, 1:] &= ~action_loss
+        if previous_input.shape[-1]:
+            previous_input[:, 1:] |= action_input
+            previous_loss[:, 1:] &= ~action_loss
         state_input &= valid_state[:, :, None]
         previous_input &= valid_state[:, :, None]
         action_input &= valid_action[:, :, None]
@@ -210,11 +211,24 @@ class MaskGenerator:
             (action, valid_action),
         ):
             width = target.shape[-1]
+            if width == 0:
+                continue
             count = max(1, round(width * self._fraction(low, high, device)))
             dimensions = torch.randperm(width, device=device)[:count]
             target[:, :, dimensions] = valid[:, :, None]
         # Occasionally preserve the physical meaning of base angular velocity or gravity.
-        semantic_group = (58, 61) if bool(torch.randint(0, 2, (), device=device).item()) else (61, 64)
+        if state.shape[-1] == 70:
+            semantic_group = (
+                (61, 64)
+                if bool(torch.randint(0, 2, (), device=device).item())
+                else (64, 67)
+            )
+        else:
+            semantic_group = (
+                (58, 61)
+                if bool(torch.randint(0, 2, (), device=device).item())
+                else (61, 64)
+            )
         state[:, :, semantic_group[0] : semantic_group[1]] |= valid_state[:, :, None]
 
 
@@ -235,4 +249,3 @@ def masked_inputs(
         "previous_action": previous,
         "action": action,
     }
-

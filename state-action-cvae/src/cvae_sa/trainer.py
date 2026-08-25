@@ -178,6 +178,21 @@ def train(
         data_config.get("max_validation_episodes"),
         random_crop=False,
     )
+    if (
+        train_dataset.state_dim != validation_dataset.state_dim
+        or train_dataset.include_previous_action != validation_dataset.include_previous_action
+    ):
+        raise ValueError("train/validation dataset representations differ")
+    config["model"]["state_dim"] = train_dataset.state_dim
+    config["model"]["include_previous_action"] = train_dataset.include_previous_action
+    config["model"]["robot_info_dim"] = train_dataset.robot_info_dim
+    config["model"]["dynamics_context_dim"] = train_dataset.dynamics_context_dim
+    config["model"]["auxiliary_dim"] = train_dataset.auxiliary_dim
+    if config["model"].get("context_mode", "hidden") == "explicit" and not train_dataset.physics_v3:
+        raise ValueError("explicit dynamics context requires a Physics State-Action v3 dataset")
+    config["model"]["token_layout"] = (
+        "interleaved" if train_dataset.physics_v3 else "grouped"
+    )
     training = config["training"]
     generator = torch.Generator().manual_seed(seed)
     train_loader = DataLoader(
@@ -371,6 +386,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-kind", choices=("transformer", "tcn"))
     parser.add_argument("--seed", type=int)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--context-mode", choices=("hidden", "explicit"))
     parser.set_defaults(project_root=project_root)
     return parser.parse_args()
 
@@ -384,6 +400,8 @@ def main() -> int:
         config["model"]["kind"] = args.model_kind
     if args.seed is not None:
         config["seed"] = args.seed
+    if args.context_mode is not None:
+        config["model"]["context_mode"] = args.context_mode
     summary = train(args.dataset_run, args.output_run, config, smoke=args.smoke)
     print("CVAE training: PASS")
     print(json.dumps(summary, ensure_ascii=False, indent=2))

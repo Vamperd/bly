@@ -120,6 +120,35 @@ build_index() {
   printf '%s\n' "$run_dir"
 }
 
+build_physics_index() {
+  [[ -n "${CVAE_SOURCE_RUNS:-}" ]] \
+    || die "CVAE_SOURCE_RUNS is required for build-physics-index"
+  local run_dir
+  run_dir="$(new_run_dir cvae_physics_dataset)"
+  capture_environment "$run_dir"
+  local sources=()
+  IFS=':' read -r -a sources <<< "$CVAE_SOURCE_RUNS"
+  [[ "${#sources[@]}" -eq 4 ]] \
+    || die "build-physics-index requires four collection runs; found ${#sources[@]}"
+  local source_args=()
+  local source
+  for source in "${sources[@]}"; do
+    source_args+=(--source-run "$source")
+  done
+  run_logged "$run_dir" build_physics_index.log \
+    "$PYTHON" -m cvae_sa.physics_indexer \
+      "${source_args[@]}" \
+      --output-run "$run_dir" \
+      --expected-motions "${CVAE_EXPECTED_MOTIONS:-768}" \
+      --expected-episodes "${CVAE_EXPECTED_EPISODES:-6144}" \
+      --split-counts "${CVAE_SPLIT_COUNTS:-616,76,76}" \
+      --seed "$SEED"
+  [[ -f "$run_dir/markers/cvae_physics_dataset.ok" ]] \
+    || die "physics indexer exited without cvae_physics_dataset.ok: $run_dir"
+  update_latest cvae_physics_dataset "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 train_model() {
   local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}" prefix config run_dir
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
@@ -140,6 +169,7 @@ train_model() {
       --output-run "$run_dir" \
       --config "$config" \
       --model-kind "${CVAE_MODEL_KIND:-transformer}" \
+      --context-mode "${CVAE_CONTEXT_MODE:-hidden}" \
       --seed "$SEED" \
       "${smoke_args[@]}"
   local marker="cvae_train.ok"
@@ -275,10 +305,11 @@ export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
 case "${1:-}" in
   build-index) build_index ;;
+  build-physics-index) build_physics_index ;;
   smoke-train) train_model true ;;
   train) train_model false ;;
   evaluate) evaluate_model ;;
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|smoke-train|train|evaluate|sample|validate-action-mask-replay}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|smoke-train|train|evaluate|sample|validate-action-mask-replay}" ;;
 esac

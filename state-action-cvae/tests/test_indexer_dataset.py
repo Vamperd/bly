@@ -9,7 +9,8 @@ import numpy as np
 
 from cvae_sa.dataset import StateActionWindowDataset
 from cvae_sa.indexer import build_index
-from tests.fixtures import write_collection_run
+from cvae_sa.physics_indexer import build_physics_index
+from tests.fixtures import write_collection_run, write_physics_collection_run
 
 
 class IndexerDatasetTest(unittest.TestCase):
@@ -45,7 +46,37 @@ class IndexerDatasetTest(unittest.TestCase):
             self.assertTrue(np.isfinite(value["physical_state"].numpy()).all())
             dataset.close()
 
+    def test_builds_physics_v3_index_and_unique_state_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = (
+                write_physics_collection_run(root / "sources", "a0", "motion_a", "Locomotion", (0, 1, 2, 3)),
+                write_physics_collection_run(root / "sources", "a1", "motion_a", "Locomotion", (4, 5, 6, 7)),
+                write_physics_collection_run(root / "sources", "b0", "motion_b", "Dances", (0, 1, 2, 3)),
+                write_physics_collection_run(root / "sources", "b1", "motion_b", "Dances", (4, 5, 6, 7)),
+            )
+            output = root / "physics_dataset"
+            manifest = build_physics_index(
+                sources,
+                output,
+                expected_motions=2,
+                expected_episodes=16,
+                split_counts=(1, 1, 0),
+                seed=11,
+            )
+            self.assertEqual(manifest["canonical_episode_count"], 16)
+            dataset = StateActionWindowDataset(output, "train", window_transitions=8)
+            value = dataset[0]
+            self.assertEqual(tuple(value["physical_state"].shape), (9, 70))
+            self.assertEqual(tuple(value["previous_action"].shape), (9, 0))
+            self.assertEqual(tuple(value["action"].shape), (8, 29))
+            self.assertEqual(tuple(value["robot_information"].shape), (293,))
+            self.assertEqual(tuple(value["dynamics_context"].shape), (648,))
+            self.assertEqual(tuple(value["auxiliary_transition"].shape), (8, 35))
+            self.assertEqual(int(value["valid_state"].sum()), 7)
+            self.assertEqual(int(value["valid_action"].sum()), 6)
+            dataset.close()
+
 
 if __name__ == "__main__":
     unittest.main()
-

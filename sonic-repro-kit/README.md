@@ -95,9 +95,10 @@ PATCH_2="$PATCH_DIR/0002-fix-preserve-per-environment-joint-defaults.patch"
 PATCH_3="$PATCH_DIR/0003-feat-collect-repeated-motion-randomized-dataset.patch"
 PATCH_4="$PATCH_DIR/0004-fix-record-runtime-termination-terms.patch"
 PATCH_5="$PATCH_DIR/0005-feat-add-external-action-physics-replay.patch"
-git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5"
+PATCH_6="$PATCH_DIR/0006-feat-collect-physics-state-action-v3.patch"
+git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6"
 git switch -c codex/minimal-state-action-recorder
-git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5"
+git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6"
 ```
 
 不要在 Ubuntu 手工编辑补丁内容。如果配置文件已存在，应先检查当前提交和工作树，
@@ -117,6 +118,20 @@ git am "$PATCH_5"
 
 `0005` 只在显式设置 `external_action_replay_path` 时覆盖 eval 的 raw Action；所有既有
 SONIC eval、采集与训练行为默认不变。补丁不改 Isaac Lab。
+
+已经应用 `0001`–`0005` 的执行端只应用新增 v3 补丁：
+
+```bash
+cd ~/bly/sonic-repro/GR00T-WholeBodyControl
+git status --short --branch
+git rev-parse HEAD
+PATCH_6=~/bly/sonic-repro-kit/patches/0006-feat-collect-physics-state-action-v3.patch
+git apply --check "$PATCH_6"
+git am "$PATCH_6"
+```
+
+`0006` 只增加默认关闭的 Physics v3 recorder 和 4 帧 contact history 配置；旧 collector、
+SONIC 策略输入与训练行为不变，也不修改 Isaac Lab。
 
 ```bash
 ./sonic_repro.sh collect-state-action
@@ -159,6 +174,64 @@ bash ./sonic_repro.sh verify-state-action
 soft joint limit 裁剪，因此即使 startup 未启用 reset 随机化也可能非零。验证器要求它
 在 episode 内恒定且有限，并在 summary 审计最大绝对值；root pose/velocity 与 joint
 velocity 仍按所选随机化 profile 的配置范围严格验收。
+
+## Physics State–Action v3 正式采集
+
+v3 使用新命令 `collect-physics-state-action`，每条 episode 最终只保存
+`states[T+1,70]` 与 `actions[T,29]`，并另存 raw/processed Action、控制周期平均力矩、
+足端接触冲量、reset delta、root/body replay 状态及按 `context_id` 引用的 runtime
+物理参数。它强制平面地形、关闭 camera/RTX 与 eval push；旧 HDF5 保持只读且不会混入。
+
+```bash
+cd /home/helloworld/bly/sonic-repro-kit
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+
+PREP_256=/home/helloworld/bly/runs/bones_seed_ingest_20260823_203201
+PREP_512=/home/helloworld/bly/runs/bones_seed_ingest_512_20260823_223831
+
+COLLECT_MOTION_FILE="$PREP_256/data/robot_filtered" \
+COLLECT_MOTION_MANIFEST="$PREP_256/manifests/motion_manifest.jsonl" \
+COLLECT_MOTION_COUNT=256 COLLECT_BATCH_MOTIONS=8 \
+COLLECT_VARIANTS_PER_MOTION=4 COLLECT_VARIANT_OFFSET=0 \
+COLLECT_RANDOMIZATION_PROFILE=startup COLLECT_SEED=20260825 \
+bash ./sonic_repro.sh collect-physics-state-action
+RUN_256_STARTUP="$(cat ~/bly/runs/latest_collect_physics_sa_run_dir.txt)"
+
+COLLECT_MOTION_FILE="$PREP_256/data/robot_filtered" \
+COLLECT_MOTION_MANIFEST="$PREP_256/manifests/motion_manifest.jsonl" \
+COLLECT_MOTION_COUNT=256 COLLECT_BATCH_MOTIONS=8 \
+COLLECT_VARIANTS_PER_MOTION=4 COLLECT_VARIANT_OFFSET=4 \
+COLLECT_RANDOMIZATION_PROFILE=initial_state_mild COLLECT_SEED=20260826 \
+bash ./sonic_repro.sh collect-physics-state-action
+RUN_256_MILD="$(cat ~/bly/runs/latest_collect_physics_sa_run_dir.txt)"
+
+COLLECT_MOTION_FILE="$PREP_512/data/robot_filtered" \
+COLLECT_MOTION_MANIFEST="$PREP_512/manifests/motion_manifest.jsonl" \
+COLLECT_MOTION_COUNT=512 COLLECT_BATCH_MOTIONS=8 \
+COLLECT_VARIANTS_PER_MOTION=4 COLLECT_VARIANT_OFFSET=0 \
+COLLECT_RANDOMIZATION_PROFILE=startup COLLECT_SEED=20260827 \
+bash ./sonic_repro.sh collect-physics-state-action
+RUN_512_STARTUP="$(cat ~/bly/runs/latest_collect_physics_sa_run_dir.txt)"
+
+COLLECT_MOTION_FILE="$PREP_512/data/robot_filtered" \
+COLLECT_MOTION_MANIFEST="$PREP_512/manifests/motion_manifest.jsonl" \
+COLLECT_MOTION_COUNT=512 COLLECT_BATCH_MOTIONS=8 \
+COLLECT_VARIANTS_PER_MOTION=4 COLLECT_VARIANT_OFFSET=4 \
+COLLECT_RANDOMIZATION_PROFILE=initial_state_mild COLLECT_SEED=20260828 \
+bash ./sonic_repro.sh collect-physics-state-action
+RUN_512_MILD="$(cat ~/bly/runs/latest_collect_physics_sa_run_dir.txt)"
+
+printf '%s\n' \
+  "RUN_256_STARTUP=$RUN_256_STARTUP" \
+  "RUN_256_MILD=$RUN_256_MILD" \
+  "RUN_512_STARTUP=$RUN_512_STARTUP" \
+  "RUN_512_MILD=$RUN_512_MILD"
+```
+
+四个路径必须立即保存，不能依赖后一次运行覆盖后的 latest pointer。成功 run 包含
+`data/sonic_physics_sa_v3.hdf5`、schema、canonical/additional-attempt index、summary 和
+`collect_physics_state_action.ok`。禁止使用已删除且错误的 `512_bones_seed_insight`；512
+动作只允许来自上面的 `bones_seed_ingest_512_20260823_223831`。
 
 `render-offline` 是当前机器的推荐渲染入口。它先用已跑通的 Isaac Lab headless
 物理链路记录一段轨迹，再在独立进程中使用 MuJoCo OSMesa 生成 MP4，不会启用

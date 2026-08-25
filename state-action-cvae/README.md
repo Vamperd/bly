@@ -1,7 +1,8 @@
 # SONIC State–Action CVAE
 
-这是独立于 SONIC/Isaac Lab 的只读训练项目。它从四个已通过门禁的
-`sonic_minimal_sa.hdf5` 构建索引，训练 Transformer-CVAE 或参数量相近的
+这是独立于 SONIC/Isaac Lab 的只读训练项目。它既保留旧版
+`sonic_minimal_sa.hdf5` 入口，也支持从四个 Physics State–Action v3 采集 run
+构建新索引，训练 Transformer-CVAE 或参数量相近的
 TCN-CVAE。源码树不保存数据、checkpoint 或日志；全部运行产物写入
 `/home/helloworld/bly/runs/<run_id>/`。
 
@@ -116,6 +117,51 @@ done
 step validation、12 次无改善 early stop。若显存门禁在实际 4090 上失败，只允许通过新
 JSON override 降低 micro batch 并等比例增加梯度累积，不修改原默认配置或依赖。
 
+## Physics State–Action v3 索引与训练
+
+v3 不与旧数据混合。它直接读取每条 episode 的唯一连续序列
+`states[T+1,70]` 和 `actions[T,29]`，模型 token 顺序为
+`S0,A0,S1,A1,...,S_T`，不再构造重复的 `state_tp1`，也不再在 State 中保存
+`previous_action`。四个源 run 必须分别是 256/512 动作的 startup 与
+initial_state_mild 采集，并共同精确覆盖 768 个 motion key、6144 条 canonical episode。
+
+```bash
+export RUN_256_STARTUP=/home/helloworld/bly/runs/collect_physics_state_action_<timestamp>
+export RUN_256_MILD=/home/helloworld/bly/runs/collect_physics_state_action_<timestamp>
+export RUN_512_STARTUP=/home/helloworld/bly/runs/collect_physics_state_action_<timestamp>
+export RUN_512_MILD=/home/helloworld/bly/runs/collect_physics_state_action_<timestamp>
+
+CVAE_SOURCE_RUNS="$RUN_256_STARTUP:$RUN_256_MILD:$RUN_512_STARTUP:$RUN_512_MILD" \
+bash ./cvae_repro.sh build-physics-index
+
+export CVAE_DATASET_RUN="$(cat /home/helloworld/bly/runs/latest_cvae_physics_dataset_run_dir.txt)"
+test -f "$CVAE_DATASET_RUN/markers/cvae_physics_dataset.ok"
+```
+
+默认 `CVAE_CONTEXT_MODE=hidden`：模型始终看到 293 维 robot/controller information，
+但隐藏 648 维随机 dynamics context（刚体 mass/inertia/COM、robot/ground material），
+让 latent 表示未观测动力学。对照实验使用全新的训练 run：
+
+```bash
+CVAE_DATASET_RUN="$CVAE_DATASET_RUN" \
+CVAE_MODEL_KIND=transformer \
+CVAE_CONTEXT_MODE=hidden \
+CVAE_SEED=20260825 \
+bash ./cvae_repro.sh train
+
+CVAE_DATASET_RUN="$CVAE_DATASET_RUN" \
+CVAE_MODEL_KIND=transformer \
+CVAE_CONTEXT_MODE=explicit \
+CVAE_SEED=20260825 \
+bash ./cvae_repro.sh train
+```
+
+v3 的 293 维 robot information 包含 nominal 姿态、action scale、Kp/Kd、armature、
+joint friction、effort/velocity/position limits 与控制时序。所有 normalization 仍只从
+train split 计算；gravity 与 contact 分别保持单位向量和二值语义。逐 transition 的
+29 维平均 applied torque 与 6 维左右脚世界系接触冲量组成 35 维辅助监督目标，默认
+loss 权重为 0.1，但不会作为模型输入或主 State。
+
 ## Test 评测
 
 测试集只在基于 validation 完成模型选择后运行一次：
@@ -146,9 +192,12 @@ bash ./cvae_repro.sh sample
 ```
 
 也可令 `CVAE_SAMPLE_INPUT` 指向 NPZ，或指向已被 dataset index 收录的 HDF5。HDF5
-输入还需设置 `CVAE_SAMPLE_EPISODE=demo_x` 和可选 `CVAE_SAMPLE_START`。NPZ 必须包含
+输入还需设置 `CVAE_SAMPLE_EPISODE=demo_x` 和可选 `CVAE_SAMPLE_START`。旧版 NPZ 必须包含
 `physical_state [129,64]`、`previous_action [129,29]`、`action_rel [128,29]`、
 `action_scale [29]`；可选显式三个布尔 mask、valid mask、progress 和 `normalized`。
+Physics v3 NPZ 改为 `physical_state [129,70]`、空的 `previous_action [129,0]`，并必须
+附带 `robot_information [293]` 与 `dynamics_context [648]`；优先使用已索引 HDF5，避免
+手工构造 context。
 输出 `data/samples.npz` 保存物理单位下的 8 条样本、均值与方差。
 
 ## 通用 Action Mask 物理重放与视频

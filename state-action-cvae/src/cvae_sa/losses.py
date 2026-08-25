@@ -18,11 +18,14 @@ class LossOutput:
     inverse: torch.Tensor
     kl: torch.Tensor
     gravity: torch.Tensor
+    auxiliary: torch.Tensor
 
     def detached(self) -> dict[str, float]:
         return {
             name: float(getattr(self, name).detach().cpu())
-            for name in ("total", "masked", "forward", "inverse", "kl", "gravity")
+            for name in (
+                "total", "masked", "forward", "inverse", "kl", "gravity", "auxiliary"
+            )
         }
 
 
@@ -89,18 +92,32 @@ def compute_loss(
         output.prior_logvar,
         float(config["free_bits"]),
     )
-    gravity_steps = masks.state_loss[..., 61:64].any(dim=-1)
+    gravity_slice = slice(64, 67) if batch["physical_state"].shape[-1] == 70 else slice(61, 64)
+    gravity_steps = masks.state_loss[..., gravity_slice].any(dim=-1)
     if bool(gravity_steps.any()):
-        gravity_norm = torch.linalg.vector_norm(output.physical_state[..., 61:64], dim=-1)
+        gravity_norm = torch.linalg.vector_norm(
+            output.physical_state[..., gravity_slice], dim=-1
+        )
         gravity = torch.square(gravity_norm - 1.0).masked_select(gravity_steps).mean()
     else:
         gravity = output.physical_state.sum() * 0.0
+    if output.auxiliary_transition.shape[-1]:
+        auxiliary_mask = batch["valid_action"][:, :, None].expand_as(
+            output.auxiliary_transition
+        )
+        auxiliary = _masked_huber(
+            output.auxiliary_transition,
+            batch["auxiliary_transition"],
+            auxiliary_mask,
+        )
+    else:
+        auxiliary = output.forward_delta.sum() * 0.0
     total = (
         masked
         + float(config["forward_weight"]) * forward
         + float(config["inverse_weight"]) * inverse
         + float(kl_beta) * kl
         + float(config["gravity_weight"]) * gravity
+        + float(config.get("auxiliary_weight", 0.1)) * auxiliary
     )
-    return LossOutput(total, masked, forward, inverse, kl, gravity)
-
+    return LossOutput(total, masked, forward, inverse, kl, gravity, auxiliary)

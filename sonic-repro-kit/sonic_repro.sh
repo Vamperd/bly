@@ -514,12 +514,29 @@ phase_render() {
 }
 
 phase_collect_state_action() {
+  local collection_format="${1:-minimal}"
+  [[ "$collection_format" == "minimal" || "$collection_format" == "physics_v3" ]] \
+    || die "Unsupported collection format: $collection_format"
   activate_env
   prepare_dirs
   require_run_gpu_capacity
   [[ -f "$SONIC_DIR/sonic_release/last.pt" ]] \
     || die "Checkpoint missing; run download-sample first."
-  [[ -f "$SONIC_DIR/gear_sonic/config/manager_env/recorders/minimal_state_action.yaml" ]] \
+  local recorder_config="minimal_state_action"
+  local recorder_config_path="$SONIC_DIR/gear_sonic/config/manager_env/recorders/minimal_state_action.yaml"
+  local dataset_name="$COLLECT_DATASET_NAME"
+  local run_prefix="collect_state_action"
+  local schema_filename="state_action_schema.json"
+  local success_marker="collect_state_action.ok"
+  if [[ "$collection_format" == "physics_v3" ]]; then
+    recorder_config="physics_state_action"
+    recorder_config_path="$SONIC_DIR/gear_sonic/config/manager_env/recorders/physics_state_action.yaml"
+    dataset_name="sonic_physics_sa_raw"
+    run_prefix="collect_physics_state_action"
+    schema_filename="physics_state_action_raw_schema.json"
+    success_marker="collect_physics_state_action.ok"
+  fi
+  [[ -f "$recorder_config_path" ]] \
     || die "SONIC collector patch is not applied; follow sonic-repro-kit/README.md."
   [[ "$COLLECT_BATCH_MOTIONS" =~ ^[1-9][0-9]*$ ]] \
     || die "COLLECT_BATCH_MOTIONS must be a positive integer; found $COLLECT_BATCH_MOTIONS"
@@ -530,10 +547,11 @@ phase_collect_state_action() {
   [[ "$COLLECT_RANDOMIZATION_PROFILE" == "startup" \
       || "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]] \
     || die "Unsupported COLLECT_RANDOMIZATION_PROFILE: $COLLECT_RANDOMIZATION_PROFILE"
-  [[ "$COLLECT_DATASET_NAME" =~ ^[A-Za-z0-9._-]+$ ]] \
-    || die "COLLECT_DATASET_NAME contains unsupported characters: $COLLECT_DATASET_NAME"
-  [[ "$COLLECT_DATASET_NAME" != *.hdf5 ]] \
+  [[ "$dataset_name" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || die "dataset name contains unsupported characters: $dataset_name"
+  [[ "$dataset_name" != *.hdf5 ]] \
     || die "COLLECT_DATASET_NAME must not include the .hdf5 extension"
+  COLLECT_DATASET_NAME="$dataset_name"
 
   local motion_path available_motion_count selected_motion_count batch_motion_count
   if [[ "$COLLECT_MOTION_FILE" = /* ]]; then
@@ -583,21 +601,27 @@ phase_collect_state_action() {
   (( free_gib >= BONES_MIN_STAGE_FREE_GIB )) \
     || die "Collection requires at least ${BONES_MIN_STAGE_FREE_GIB} GiB free; found ${free_gib} GiB"
   if [[ "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]]; then
-    [[ "$COLLECT_VARIANTS_PER_MOTION" == "2" ]] \
-      || die "initial_state_mild requires exactly 2 variants per motion"
+    if [[ "$collection_format" == "minimal" ]]; then
+      [[ "$COLLECT_VARIANTS_PER_MOTION" == "2" ]] \
+        || die "legacy initial_state_mild requires exactly 2 variants per motion"
+    fi
     [[ "$COLLECT_VARIANT_OFFSET" == "4" ]] \
       || die "initial_state_mild requires COLLECT_VARIANT_OFFSET=4"
-    [[ -f "$COLLECT_BASELINE_SUMMARY" ]] \
-      || die "Set COLLECT_BASELINE_SUMMARY to the passed startup collection summary"
     [[ -f "$COLLECT_MOTION_MANIFEST" ]] \
       || die "initial_state_mild requires COLLECT_MOTION_MANIFEST"
-    python "$SCRIPT_DIR/check_collection_gate.py" \
-      --summary "$COLLECT_BASELINE_SUMMARY" \
-      --overall-min 0.80 \
-      --package-min 0.60 \
-      --expected-canonical "$(( selected_motion_count * 4 ))" \
-      --expected-package-count 8 \
-      --expected-motion-manifest "$COLLECT_MOTION_MANIFEST"
+    if [[ -n "$COLLECT_BASELINE_SUMMARY" ]]; then
+      [[ -f "$COLLECT_BASELINE_SUMMARY" ]] \
+        || die "COLLECT_BASELINE_SUMMARY does not exist: $COLLECT_BASELINE_SUMMARY"
+      python "$SCRIPT_DIR/check_collection_gate.py" \
+        --summary "$COLLECT_BASELINE_SUMMARY" \
+        --overall-min 0.80 \
+        --package-min 0.60 \
+        --expected-canonical "$(( selected_motion_count * 4 ))" \
+        --expected-package-count 8 \
+        --expected-motion-manifest "$COLLECT_MOTION_MANIFEST"
+    elif [[ "$collection_format" == "minimal" ]]; then
+      die "Set COLLECT_BASELINE_SUMMARY to the passed startup collection summary"
+    fi
   fi
   if [[ -n "$COLLECT_MOTION_MANIFEST" ]]; then
     [[ -f "$COLLECT_MOTION_MANIFEST" ]] \
@@ -605,7 +629,7 @@ phase_collect_state_action() {
   fi
 
   local run_dir checkpoint_path runtime_manifest_path
-  run_dir="$(new_run_dir collect_state_action)"
+  run_dir="$(new_run_dir "$run_prefix")"
   if [[ -n "$COLLECT_MOTION_MANIFEST" ]]; then
     runtime_manifest_path="$run_dir/manifests/motion_manifest.jsonl"
     cp -- "$COLLECT_MOTION_MANIFEST" "$runtime_manifest_path"
@@ -618,7 +642,7 @@ phase_collect_state_action() {
   update_latest_run_pointer "$run_dir"
   log "Collecting $selected_motion_count motions x $COLLECT_VARIANTS_PER_MOTION variants"
   log "Batch layout: $batch_motion_count motions x $COLLECT_VARIANTS_PER_MOTION variants = $COLLECT_ENVS envs"
-  log "State-action collection run directory: $run_dir"
+  log "$collection_format collection run directory: $run_dir"
 
   local -a reset_randomization_args
   if [[ "$COLLECT_RANDOMIZATION_PROFILE" == "initial_state_mild" ]]; then
@@ -635,12 +659,21 @@ phase_collect_state_action() {
     )
   fi
 
+  local metadata_override
+  metadata_override="++manager_env.recorders.minimal_metadata.schema_output_path=$run_dir/manifests/$schema_filename"
+  local -a physics_config_args
+  physics_config_args=()
+  if [[ "$collection_format" == "physics_v3" ]]; then
+    metadata_override="++manager_env.recorders.physics_metadata.schema_output_path=$run_dir/manifests/$schema_filename"
+    physics_config_args=("++manager_env.config.contact_history_length=4")
+  fi
+
   if (
     cd "$SONIC_DIR"
     python gear_sonic/eval_agent_trl.py \
       "+checkpoint=$checkpoint_path" \
       +headless=True \
-      "hydra.run.dir=$run_dir/manifests/hydra_collect_state_action" \
+      "hydra.run.dir=$run_dir/manifests/hydra_$run_prefix" \
       "++eval_callbacks=[]" \
       ++run_eval_loop=True \
       ++run_once=True \
@@ -650,11 +683,13 @@ phase_collect_state_action() {
       ++use_encoder=g1 \
       ++manager_env.config.render_results=False \
       ++manager_env.config.enable_cameras=False \
+      ++manager_env.config.terrain_type=plane \
       "~manager_env/recorders=empty" \
-      "+manager_env/recorders=minimal_state_action" \
+      "+manager_env/recorders=$recorder_config" \
       "++manager_env.recorders.dataset_export_dir_path=$run_dir/data" \
-      "++manager_env.recorders.dataset_filename=$COLLECT_DATASET_NAME" \
-      "++manager_env.recorders.minimal_metadata.schema_output_path=$run_dir/manifests/state_action_schema.json" \
+      "++manager_env.recorders.dataset_filename=$dataset_name" \
+      "$metadata_override" \
+      "${physics_config_args[@]}" \
       ++manager_env.observations.policy.enable_corruption=False \
       ++manager_env.observations.tokenizer.enable_corruption=False \
       "+manager_env/terminations=tracking/eval" \
@@ -673,11 +708,11 @@ phase_collect_state_action() {
       "++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=$selected_motion_count" \
       "++manager_env.commands.motion.motion_lib_cfg.motion_file=$COLLECT_MOTION_FILE" \
       "++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=$COLLECT_SMPL_MOTION_FILE"
-  ) 2>&1 | tee "$run_dir/logs/collect_state_action.log"; then
+  ) 2>&1 | tee "$run_dir/logs/$run_prefix.log"; then
     :
   else
     local rc=$?
-    record_exit_code "$run_dir" collect_state_action "$rc"
+    record_exit_code "$run_dir" "$run_prefix" "$rc"
     return "$rc"
   fi
 
@@ -686,27 +721,52 @@ phase_collect_state_action() {
   if [[ -n "$runtime_manifest_path" ]]; then
     verifier_manifest_args=(--motion-manifest "$runtime_manifest_path")
   fi
-  if python "$SCRIPT_DIR/verify_state_action.py" \
-    --run-dir "$run_dir" \
-    --dataset-name "$COLLECT_DATASET_NAME" \
-    --expected-motion-count "$selected_motion_count" \
-    --expected-variants-per-motion "$COLLECT_VARIANTS_PER_MOTION" \
-    --variant-offset "$COLLECT_VARIANT_OFFSET" \
-    --randomization-profile "$COLLECT_RANDOMIZATION_PROFILE" \
-    "${verifier_manifest_args[@]}" \
-    2>&1 | tee "$run_dir/logs/verify_state_action.log"; then
+  local verify_ok=false
+  if [[ "$collection_format" == "physics_v3" ]]; then
+    if python "$SCRIPT_DIR/consolidate_physics_state_action.py" --run-dir "$run_dir" \
+      2>&1 | tee "$run_dir/logs/consolidate_physics_state_action.log" \
+      && python "$SCRIPT_DIR/verify_physics_state_action.py" \
+        --run-dir "$run_dir" \
+        --expected-motion-count "$selected_motion_count" \
+        --expected-variants-per-motion "$COLLECT_VARIANTS_PER_MOTION" \
+        --variant-offset "$COLLECT_VARIANT_OFFSET" \
+        --randomization-profile "$COLLECT_RANDOMIZATION_PROFILE" \
+        "${verifier_manifest_args[@]}" \
+        2>&1 | tee "$run_dir/logs/verify_physics_state_action.log"; then
+      verify_ok=true
+    fi
+  elif python "$SCRIPT_DIR/verify_state_action.py" \
+      --run-dir "$run_dir" \
+      --dataset-name "$dataset_name" \
+      --expected-motion-count "$selected_motion_count" \
+      --expected-variants-per-motion "$COLLECT_VARIANTS_PER_MOTION" \
+      --variant-offset "$COLLECT_VARIANT_OFFSET" \
+      --randomization-profile "$COLLECT_RANDOMIZATION_PROFILE" \
+      "${verifier_manifest_args[@]}" \
+      2>&1 | tee "$run_dir/logs/verify_state_action.log"; then
+    verify_ok=true
+  fi
+  if [[ "$verify_ok" == "true" ]]; then
     free_gib="$(free_gib_for_path "$run_dir")"
     if (( free_gib < BONES_MIN_STAGE_FREE_GIB )); then
-      record_exit_code "$run_dir" collect_state_action 1
+      record_exit_code "$run_dir" "$run_prefix" 1
       die "Collection finished with ${free_gib} GiB free; required >= ${BONES_MIN_STAGE_FREE_GIB} GiB"
     fi
-    record_exit_code "$run_dir" collect_state_action 0
-    mark_stage "$run_dir" collect_state_action.ok
+    record_exit_code "$run_dir" "$run_prefix" 0
+    mark_stage "$run_dir" "$success_marker"
+    if [[ "$collection_format" == "physics_v3" ]]; then
+      local latest_physics_tmp="$RUNS_ROOT/.latest_collect_physics_sa_run_dir.tmp.$$"
+      printf '%s\n' "$run_dir" > "$latest_physics_tmp"
+      mv -f -- "$latest_physics_tmp" "$RUNS_ROOT/latest_collect_physics_sa_run_dir.txt"
+    fi
   else
-    local rc=$?
-    record_exit_code "$run_dir" collect_state_action "$rc"
-    return "$rc"
+    record_exit_code "$run_dir" "$run_prefix" 1
+    return 1
   fi
+}
+
+phase_collect_physics_state_action() {
+  phase_collect_state_action physics_v3
 }
 
 phase_verify_state_action() {
@@ -1269,6 +1329,8 @@ Phases:
                   Render synchronized common-camera Action-mask comparison MP4s.
   collect-state-action
                   Record and verify minimal (s_t, g_t, a_t, s_t+1) HDF5 data.
+  collect-physics-state-action
+                  Record canonical 70-D State, 29-D Action, robot context, and replay data.
   verify-state-action
                   Revalidate an existing collection without rewriting its HDF5 data.
   bones-download-preflight
@@ -1312,6 +1374,7 @@ main() {
     replay-action-mask) phase_replay_action_mask ;;
     render-action-mask) phase_render_action_mask ;;
     collect-state-action) phase_collect_state_action ;;
+    collect-physics-state-action) phase_collect_physics_state_action ;;
     verify-state-action) phase_verify_state_action ;;
     bones-download-preflight) phase_bones_download_preflight ;;
     prepare-bones-subset) phase_prepare_bones_subset ;;

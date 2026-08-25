@@ -7,12 +7,17 @@ import sys
 def main() -> int:
     parser = argparse.ArgumentParser(description="SONIC State-Action CVAE command line")
     parser.add_argument(
-        "command", choices=("build-index", "smoke-train", "train", "evaluate", "sample")
+        "command",
+        choices=(
+            "build-index", "build-physics-index", "smoke-train", "train", "evaluate", "sample"
+        ),
     )
     args, remainder = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remainder]
     if args.command == "build-index":
         from .indexer import main as command_main
+    elif args.command == "build-physics-index":
+        from .physics_indexer import main as command_main
     elif args.command in {"smoke-train", "train"}:
         from .trainer import main as command_main
 
@@ -27,4 +32,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
