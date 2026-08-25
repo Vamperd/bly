@@ -64,6 +64,33 @@ def _write_dataset(group: h5py.Group, name: str, values: np.ndarray) -> None:
     group.create_dataset(name, data=values, **options)
 
 
+def _transition_count(episode: h5py.Group) -> int:
+    """Infer T from the v3 Action stream instead of Isaac Lab's generic attribute.
+
+    Isaac Lab only populates ``num_samples`` from a top-level ``actions`` tensor.
+    The raw v3 recorder deliberately stores several Action representations below
+    ``physics_action``, so the generic attribute is zero even for valid episodes.
+    """
+    action_path = "physics_action/action_target_canonical"
+    if action_path not in episode:
+        raise ValueError(f"{episode.name}: missing {action_path}")
+    action_shape = episode[action_path].shape
+    if len(action_shape) != 2 or action_shape[1:] != (29,):
+        raise ValueError(
+            f"{episode.name}/{action_path}: expected [T,29], found {action_shape}"
+        )
+    steps = int(action_shape[0])
+    if steps <= 0:
+        raise ValueError(f"{episode.name}: empty episode")
+
+    stored_steps = int(episode.attrs.get("num_samples", 0))
+    if stored_steps not in (0, steps):
+        raise ValueError(
+            f"{episode.name}: num_samples={stored_steps} differs from Action length {steps}"
+        )
+    return steps
+
+
 def _copy_attributes(source: h5py.Group, target: h5py.Group) -> None:
     for name, value in source.attrs.items():
         target.attrs[name] = value
@@ -168,11 +195,13 @@ def consolidate(run_dir: Path) -> dict[str, Any]:
             output_data = target.create_group("data")
             for episode_name in sorted(source["data"].keys()):
                 source_episode = source[f"data/{episode_name}"]
-                steps = int(source_episode.attrs["num_samples"])
-                if steps <= 0:
-                    raise ValueError(f"{source_episode.name}: empty episode")
+                steps = _transition_count(source_episode)
                 episode = output_data.create_group(episode_name)
                 _copy_attributes(source_episode, episode)
+                episode.attrs["raw_num_samples"] = int(
+                    source_episode.attrs.get("num_samples", 0)
+                )
+                episode.attrs["num_samples"] = steps
                 episode.attrs["num_transitions"] = steps
                 env_values = np.asarray(source_episode["motion/env_id"], dtype=np.int64)
                 if env_values.shape != (steps,) or not np.all(env_values == env_values[0]):
