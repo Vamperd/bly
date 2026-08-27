@@ -11,6 +11,10 @@ class StateMaskRendererTests(unittest.TestCase):
             "forward_rollout_32_ood_comparison.mp4",
         )
         self.assertEqual(
+            comparison_output_name("step_contiguous_32"),
+            "state_step_32_comparison.mp4",
+        )
+        self.assertEqual(
             comparison_output_name("step_contiguous_8"),
             "state_step_8_comparison.mp4",
         )

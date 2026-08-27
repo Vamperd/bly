@@ -288,7 +288,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 1/2/4/8步forward rollout属于训练分布内指标；32步由四段8步预测连续推进并明确标记为
 OOD。State-only场景不会Mask或改写Action，Mask外State也保持位级不变。8个latent只用于
 completion不确定性，不能利用真值挑选结果。`CVAE_STATE_RENDER=none`仅生成NPZ和指标，
-`all`为全部State场景生成三联视频。输出使用独立的`cvae_state_mask_eval_*`目录和latest
+`representatives`使用32步连续State补全替代原8步代表场景，`all`为全部State场景生成三联视频。
+输出使用独立的`cvae_state_mask_eval_*`目录和latest
 指针，不覆盖任何Action评测产物。
 
 ## 测试

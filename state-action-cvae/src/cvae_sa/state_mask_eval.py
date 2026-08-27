@@ -45,7 +45,7 @@ REPRESENTATIVE_VIDEOS = (
     "state_truth_reconstruction.mp4",
     "forward_rollout_8_comparison.mp4",
     "forward_rollout_32_ood_comparison.mp4",
-    "state_step_8_comparison.mp4",
+    "state_step_32_comparison.mp4",
     "state_feature_random_25_comparison.mp4",
     "state_semantic_base_motion_comparison.mp4",
     "state_semantic_left_leg_comparison.mp4",

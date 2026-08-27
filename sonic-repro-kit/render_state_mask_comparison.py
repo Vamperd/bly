@@ -23,15 +23,22 @@ from render_mujoco_trajectory import (
 REPRESENTATIVE_OUTPUTS = {
     "forward_rollout_8": "forward_rollout_8_comparison.mp4",
     "forward_rollout_32": "forward_rollout_32_ood_comparison.mp4",
-    "step_contiguous_8": "state_step_8_comparison.mp4",
+    "step_contiguous_32": "state_step_32_comparison.mp4",
     "feature_random_25": "state_feature_random_25_comparison.mp4",
     "semantic_base_motion": "state_semantic_base_motion_comparison.mp4",
     "semantic_left_leg": "state_semantic_left_leg_comparison.mp4",
 }
 
+NON_REPRESENTATIVE_OUTPUTS = {
+    "step_contiguous_8": "state_step_8_comparison.mp4",
+}
+
 
 def comparison_output_name(scenario: str) -> str:
-    return REPRESENTATIVE_OUTPUTS.get(scenario, f"state_{scenario}_comparison.mp4")
+    return REPRESENTATIVE_OUTPUTS.get(
+        scenario,
+        NON_REPRESENTATIVE_OUTPUTS.get(scenario, f"state_{scenario}_comparison.mp4"),
+    )
 
 
 def grid_shape(panel_count: int) -> tuple[int, int]:
@@ -352,4 +359,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
