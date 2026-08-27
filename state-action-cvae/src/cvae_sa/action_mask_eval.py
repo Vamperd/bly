@@ -949,10 +949,28 @@ def complete(
 
 
 def _quaternion_error_degrees(reference: np.ndarray, value: np.ndarray) -> np.ndarray:
-    reference = reference / np.linalg.norm(reference, axis=-1, keepdims=True).clip(1.0e-8)
-    value = value / np.linalg.norm(value, axis=-1, keepdims=True).clip(1.0e-8)
-    dot = np.abs(np.sum(reference * value, axis=-1)).clip(0.0, 1.0)
-    return np.degrees(2.0 * np.arccos(dot))
+    reference_input = np.asarray(reference)
+    value_input = np.asarray(value)
+    if reference_input.shape != value_input.shape or reference_input.shape[-1] != 4:
+        raise ValueError(
+            f"quaternion arrays must have matching [...,4] shapes, found "
+            f"{reference_input.shape} and {value_input.shape}"
+        )
+    # Float32 normalization can turn dot(q, q) into 0.99999988; applying
+    # arccos then reports a spurious ~0.056 degree error.  Preserve exact
+    # identity and use float64 for genuinely different orientations.
+    exactly_equal = np.all(reference_input == value_input, axis=-1)
+    reference64 = reference_input.astype(np.float64, copy=False)
+    value64 = value_input.astype(np.float64, copy=False)
+    reference64 = reference64 / np.linalg.norm(
+        reference64, axis=-1, keepdims=True
+    ).clip(1.0e-12)
+    value64 = value64 / np.linalg.norm(
+        value64, axis=-1, keepdims=True
+    ).clip(1.0e-12)
+    dot = np.abs(np.sum(reference64 * value64, axis=-1)).clip(0.0, 1.0)
+    angle = np.degrees(2.0 * np.arccos(dot))
+    return np.where(exactly_equal, 0.0, angle)
 
 
 def _trajectory_metrics(reference: dict[str, np.ndarray], value: dict[str, np.ndarray]) -> dict[str, float]:

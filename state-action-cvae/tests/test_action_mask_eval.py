@@ -16,11 +16,19 @@ from cvae_sa.action_mask_eval import (
     _mask_batch,
     _post_mask_metrics,
     _predicted_action,
+    _quaternion_error_degrees,
     _scan_window_starts,
 )
 
 
 class ActionMaskEvaluationTest(unittest.TestCase):
+    def test_identical_float32_quaternion_has_exactly_zero_error(self) -> None:
+        quaternion = np.asarray(
+            [[0.70710677, 0.0, 0.70710677, 0.0]], dtype=np.float32
+        )
+        error = _quaternion_error_degrees(quaternion, quaternion.copy())
+        self.assertEqual(float(error[0]), 0.0)
+
     def test_dataset_representation_auto_detects_legacy_and_physics_v4(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
