@@ -58,6 +58,11 @@ ACTION_MASK_GL="${ACTION_MASK_GL:-$OFFLINE_GL}"
 ACTION_MASK_WIDTH="${ACTION_MASK_WIDTH:-$OFFLINE_WIDTH}"
 ACTION_MASK_HEIGHT="${ACTION_MASK_HEIGHT:-$OFFLINE_HEIGHT}"
 ACTION_MASK_CAMERA_DISTANCE="${ACTION_MASK_CAMERA_DISTANCE:-$OFFLINE_CAMERA_DISTANCE}"
+STATE_MASK_RUN_DIR="${STATE_MASK_RUN_DIR:-}"
+STATE_MASK_GL="${STATE_MASK_GL:-$OFFLINE_GL}"
+STATE_MASK_WIDTH="${STATE_MASK_WIDTH:-$OFFLINE_WIDTH}"
+STATE_MASK_HEIGHT="${STATE_MASK_HEIGHT:-$OFFLINE_HEIGHT}"
+STATE_MASK_CAMERA_DISTANCE="${STATE_MASK_CAMERA_DISTANCE:-$OFFLINE_CAMERA_DISTANCE}"
 
 printf -v SCRIPT_INVOCATION '%q ' "$0" "$@"
 
@@ -1240,6 +1245,42 @@ phase_render_action_mask() {
   mark_stage "$run_dir" action_mask_render.ok
 }
 
+phase_render_state_mask() {
+  activate_env
+  [[ -n "$STATE_MASK_RUN_DIR" ]] \
+    || die "Set STATE_MASK_RUN_DIR to the CVAE State-mask evaluation run"
+  local run_dir request model_path render_mode
+  run_dir="$(validated_run_dir "$STATE_MASK_RUN_DIR")"
+  request="$run_dir/manifests/state_mask_request.json"
+  [[ -s "$request" ]] || die "State-mask request is missing: $request"
+  model_path="$SONIC_DIR/decoupled_wbc/control/robot_model/model_data/g1/g1_29dof_old.xml"
+  [[ -f "$model_path" ]] || die "MuJoCo G1 model missing: $model_path"
+  render_mode="$(json_manifest_value "$request" render_mode)"
+  [[ "$render_mode" == "representatives" || "$render_mode" == "all" ]] \
+    || die "State-mask render phase requires representatives or all"
+  if python "$SCRIPT_DIR/render_state_mask_comparison.py" \
+    --run-dir "$run_dir" \
+    --model "$model_path" \
+    --render-mode "$render_mode" \
+    --width "$STATE_MASK_WIDTH" \
+    --height "$STATE_MASK_HEIGHT" \
+    --gl "$STATE_MASK_GL" \
+    --camera-distance "$STATE_MASK_CAMERA_DISTANCE" \
+    2>&1 | tee "$run_dir/logs/state_mask_render.log"; then
+    :
+  else
+    local rc=$?
+    record_exit_code "$run_dir" state_mask_render "$rc"
+    return "$rc"
+  fi
+  [[ -s "$run_dir/videos/state_source_recorded.mp4" \
+      && -s "$run_dir/videos/state_truth_reconstruction.mp4" \
+      && -s "$run_dir/videos/all_state_predictions_grid.mp4" ]] \
+    || die "State-mask renderer did not produce its mandatory MP4 files"
+  record_exit_code "$run_dir" state_mask_render 0
+  mark_stage "$run_dir" state_mask_render.ok
+}
+
 phase_smoke_train() {
   activate_env
   require_run_gpu_capacity
@@ -1327,6 +1368,8 @@ Phases:
                   Execute original and CVAE-completed raw Actions in Isaac physics.
   render-action-mask
                   Render synchronized common-camera Action-mask comparison MP4s.
+  render-state-mask
+                  Render recorded/truth/predicted State-mask comparison MP4s.
   collect-state-action
                   Record and verify minimal (s_t, g_t, a_t, s_t+1) HDF5 data.
   collect-physics-state-action
@@ -1352,6 +1395,8 @@ Environment overrides:
   OFFLINE_GL, OFFLINE_CAMERA_DISTANCE, OFFLINE_RUN_DIR,
   ACTION_MASK_RUN_DIR, ACTION_MASK_GL, ACTION_MASK_WIDTH, ACTION_MASK_HEIGHT,
   ACTION_MASK_CAMERA_DISTANCE,
+  STATE_MASK_RUN_DIR, STATE_MASK_GL, STATE_MASK_WIDTH, STATE_MASK_HEIGHT,
+  STATE_MASK_CAMERA_DISTANCE,
   MAX_RUN_GPU_USED_MIB, SONIC_COMMIT
 EOF
 }
@@ -1373,6 +1418,7 @@ main() {
     capture-action-mask-source) phase_capture_action_mask_source ;;
     replay-action-mask) phase_replay_action_mask ;;
     render-action-mask) phase_render_action_mask ;;
+    render-state-mask) phase_render_state_mask ;;
     collect-state-action) phase_collect_state_action ;;
     collect-physics-state-action) phase_collect_physics_state_action ;;
     verify-state-action) phase_verify_state_action ;;

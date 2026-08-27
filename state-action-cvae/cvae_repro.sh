@@ -299,6 +299,65 @@ validate_action_mask_replay() {
   printf '%s\n' "$run_dir"
 }
 
+validate_state_mask_video() {
+  local dataset_run="${CVAE_DATASET_RUN:-}" checkpoint="${CVAE_CHECKPOINT:-}"
+  local split="${CVAE_STATE_SPLIT:-validation}" package="${CVAE_STATE_PACKAGE:-Locomotion}"
+  local motion_key="${CVAE_STATE_MOTION_KEY:-auto}" variant="${CVAE_STATE_VARIANT:-auto}"
+  local preset="${CVAE_STATE_MASK_PRESET:-state_prediction_v1}"
+  local latent_mode="${CVAE_STATE_LATENT_MODE:-prior_mean}"
+  local latent_samples="${CVAE_STATE_LATENT_SAMPLES:-8}"
+  local render_mode="${CVAE_STATE_RENDER:-representatives}"
+  local root_mode="${CVAE_STATE_ROOT_MODE:-integrate_predicted}"
+  local state_seed="${CVAE_STATE_SEED:-$SEED}" run_dir
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -n "$checkpoint" ]] || die "CVAE_CHECKPOINT is required"
+  [[ -d "$SONIC_KIT_DIR" && -f "$SONIC_KIT_DIR/sonic_repro.sh" ]] \
+    || die "SONIC reproduction kit is unavailable: $SONIC_KIT_DIR"
+  [[ "$split" == "validation" ]] \
+    || die "State-mask video validation is restricted to CVAE_STATE_SPLIT=validation"
+  [[ "$latent_mode" == "prior_mean" ]] \
+    || die "CVAE_STATE_LATENT_MODE must be prior_mean"
+  [[ "$latent_samples" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_STATE_LATENT_SAMPLES must be a positive integer"
+  [[ "$render_mode" == "representatives" || "$render_mode" == "all" \
+      || "$render_mode" == "none" ]] \
+    || die "CVAE_STATE_RENDER must be representatives, all, or none"
+  [[ "$root_mode" == "integrate_predicted" ]] \
+    || die "CVAE_STATE_ROOT_MODE must be integrate_predicted"
+  [[ "$state_seed" =~ ^[0-9]+$ ]] \
+    || die "CVAE_STATE_SEED must be a non-negative integer"
+  run_dir="$(new_run_dir cvae_state_mask_eval)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" state_mask_evaluate.log \
+    "$PYTHON" -m cvae_sa.state_mask_eval evaluate \
+      --dataset-run "$dataset_run" \
+      --checkpoint "$checkpoint" \
+      --output-run "$run_dir" \
+      --split "$split" \
+      --package "$package" \
+      --motion-key "$motion_key" \
+      --variant "$variant" \
+      --preset "$preset" \
+      --latent-mode "$latent_mode" \
+      --latent-samples "$latent_samples" \
+      --render-mode "$render_mode" \
+      --root-mode "$root_mode" \
+      --seed "$state_seed"
+  if [[ "$render_mode" != "none" ]]; then
+    run_logged "$run_dir" state_mask_render_orchestration.log \
+      env STATE_MASK_RUN_DIR="$run_dir" \
+        bash "$SONIC_KIT_DIR/sonic_repro.sh" render-state-mask
+  fi
+  run_logged "$run_dir" state_mask_finalize.log \
+    "$PYTHON" -m cvae_sa.state_mask_eval finalize \
+      --output-run "$run_dir" \
+      --render-mode "$render_mode"
+  [[ -f "$run_dir/markers/cvae_state_mask_video.ok" ]] \
+    || die "State-mask video marker is missing"
+  update_latest cvae_state_mask_eval "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 ORIGINAL_ARGS=("$@")
 [[ -x "$PYTHON" ]] || die "Python environment is unavailable: $PYTHON"
 export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
@@ -311,5 +370,6 @@ case "${1:-}" in
   evaluate) evaluate_model ;;
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|smoke-train|train|evaluate|sample|validate-action-mask-replay}" ;;
+  validate-state-mask-video) validate_state_mask_video ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|smoke-train|train|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

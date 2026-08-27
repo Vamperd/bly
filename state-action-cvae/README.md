@@ -263,6 +263,34 @@ Action 计算误差，只选整条误差最小的候选进行 Isaac 重放。该
 代表部署时可获得的性能；manifest 会保存每条候选误差、选中编号及
 `oracle_uses_ground_truth_action=true`。
 
+## State Mask 补全与三联视频
+
+Physics v4 可直接从 validation HDF5 读取70维 State、canonical Action、RobotInfo 和保存的
+root轨迹，不需要重新启动SONIC或Isaac。该入口独立于Action replay；主视频依次显示记录
+轨迹、真值State积分重建和预测State积分重建：
+
+```bash
+CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244 \
+CVAE_CHECKPOINT=/home/helloworld/bly/runs/cvae_train_20260826_002252/checkpoints/best.pt \
+CVAE_STATE_SPLIT=validation \
+CVAE_STATE_PACKAGE=Locomotion \
+CVAE_STATE_MOTION_KEY=auto \
+CVAE_STATE_VARIANT=auto \
+CVAE_STATE_MASK_PRESET=state_prediction_v1 \
+CVAE_STATE_LATENT_MODE=prior_mean \
+CVAE_STATE_LATENT_SAMPLES=8 \
+CVAE_STATE_RENDER=representatives \
+CVAE_STATE_ROOT_MODE=integrate_predicted \
+CVAE_STATE_SEED=20260830 \
+bash ./cvae_repro.sh validate-state-mask-video
+```
+
+1/2/4/8步forward rollout属于训练分布内指标；32步由四段8步预测连续推进并明确标记为
+OOD。State-only场景不会Mask或改写Action，Mask外State也保持位级不变。8个latent只用于
+completion不确定性，不能利用真值挑选结果。`CVAE_STATE_RENDER=none`仅生成NPZ和指标，
+`all`为全部State场景生成三联视频。输出使用独立的`cvae_state_mask_eval_*`目录和latest
+指针，不覆盖任何Action评测产物。
+
 ## 测试
 
 项目不创建新环境，也不主动安装 pytest。使用现有 Ubuntu 环境运行内置 unittest：
@@ -275,4 +303,4 @@ python -m unittest discover -s tests -v
 
 测试覆盖 runtime Action 映射、per-environment 参数、跨 motion 划分、padding、三类 Mask、
 Action/previous-action 防泄漏、通用 ActionMaskScenario、Transformer/TCN shape 和微型
-数据过拟合。
+数据过拟合，以及State-only Mask、32步分段rollout和root积分重建。

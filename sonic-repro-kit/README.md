@@ -470,3 +470,17 @@ seed、平面、单环境原点和控制配置，物理对比才有效。每次�
 context；关闭随机化时 nominal 明确定义为未扰动 runtime default。渲染阶段再用 MuJoCo
 对这些完整物理状态做 50 FPS 公共世界相机可视化，不会把 CVAE 预测 State 当成物理结果。
 `ACTION_MASK_GL`、宽高和相机距离仅影响离线视频，不影响 Isaac 轨迹。
+
+## 十、CVAE State Mask 运动学视频
+
+`state-action-cvae`的`validate-state-mask-video`会直接读取已索引的Physics v4 HDF5并生成
+`data/state_predictions.npz`。渲染子阶段只进行MuJoCo forward kinematics，不启动Isaac：
+
+```bash
+STATE_MASK_RUN_DIR=~/bly/runs/cvae_state_mask_eval_YYYYMMDD_HHMMSS \
+  bash ./sonic_repro.sh render-state-mask
+```
+
+左、中、右三栏分别为记录轨迹、真值70维State积分重建和预测State积分重建。相机始终
+跟随记录轨迹，避免独立相机隐藏预测漂移。该阶段使用独立的`STATE_MASK_*`环境变量、日志、
+marker和视频名，不读取或改写Action补全的`completed_actions.npz`与物理重放产物。
