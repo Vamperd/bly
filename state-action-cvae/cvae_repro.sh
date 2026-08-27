@@ -179,6 +179,42 @@ train_model() {
   printf '%s\n' "$run_dir"
 }
 
+action_finetune_model() {
+  local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
+  local checkpoint="${CVAE_INIT_CHECKPOINT:-}" prefix config marker run_dir
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -n "$checkpoint" ]] || die "CVAE_INIT_CHECKPOINT is required"
+  [[ -f "$checkpoint" ]] || die "initial checkpoint is missing: $checkpoint"
+  if [[ "$smoke" == "true" ]]; then
+    prefix="cvae_action_finetune_smoke"
+    config="${CVAE_CONFIG:-$SCRIPT_DIR/configs/physics_v3_action_finetune_smoke.json}"
+    marker="cvae_action_finetune_smoke.ok"
+  else
+    prefix="cvae_action_finetune"
+    config="${CVAE_CONFIG:-$SCRIPT_DIR/configs/physics_v3_action_finetune.json}"
+    marker="cvae_action_finetune.ok"
+  fi
+  run_dir="$(new_run_dir "$prefix")"
+  capture_environment "$run_dir"
+  local smoke_args=()
+  [[ "$smoke" == "true" ]] && smoke_args+=(--smoke)
+  run_logged "$run_dir" action_finetune.log \
+    "$PYTHON" -m cvae_sa.trainer \
+      --dataset-run "$dataset_run" \
+      --output-run "$run_dir" \
+      --config "$config" \
+      --model-kind "${CVAE_MODEL_KIND:-physics_transformer}" \
+      --context-mode "${CVAE_CONTEXT_MODE:-hidden}" \
+      --seed "$SEED" \
+      --init-checkpoint "$checkpoint" \
+      --fine-tune-mode action \
+      "${smoke_args[@]}"
+  [[ -f "$run_dir/markers/$marker" ]] \
+    || die "Action fine-tune marker is missing: $marker"
+  update_latest "$prefix" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 evaluate_model() {
   local dataset_run="${CVAE_DATASET_RUN:-}" checkpoint="${CVAE_CHECKPOINT:-}" run_dir
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
@@ -367,9 +403,11 @@ case "${1:-}" in
   build-physics-index) build_physics_index ;;
   smoke-train) train_model true ;;
   train) train_model false ;;
+  smoke-action-finetune) action_finetune_model true ;;
+  action-finetune) action_finetune_model false ;;
   evaluate) evaluate_model ;;
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|smoke-train|train|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|smoke-train|train|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

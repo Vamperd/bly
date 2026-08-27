@@ -53,6 +53,8 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         validation_stride: int = 64,
         max_episodes: int | None = None,
         random_crop: bool | None = None,
+        action_energy_crop_probability: float = 0.0,
+        action_energy_top_fraction: float = 0.25,
     ) -> None:
         super().__init__()
         self.dataset_run = dataset_run.expanduser().resolve()
@@ -89,6 +91,14 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         self.window = int(window_transitions)
         self.stride = int(validation_stride)
         self.random_crop = split == "train" if random_crop is None else bool(random_crop)
+        self.action_energy_crop_probability = float(action_energy_crop_probability)
+        self.action_energy_top_fraction = float(action_energy_top_fraction)
+        if not 0.0 <= self.action_energy_crop_probability <= 1.0:
+            raise ValueError("action energy crop probability must be in [0, 1]")
+        if not 0.0 < self.action_energy_top_fraction <= 1.0:
+            raise ValueError("action energy top fraction must be in (0, 1]")
+        if self.action_energy_crop_probability and not self.physics_v4:
+            raise ValueError("Action-energy crop sampling requires a Physics v4 dataset")
         with np.load(self.dataset_run / "data" / "normalization.npz") as normalization:
             self.state_mean = normalization["physical_state_mean"].astype(np.float32)
             self.state_std = normalization["physical_state_std"].astype(np.float32)
@@ -153,6 +163,7 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
                 self.refs.extend(WindowRef(episode_index, start) for start in starts)
         self._hdf_handles: dict[str, h5py.File] = {}
         self._schema_cache: dict[str, dict[str, Any]] = {}
+        self._energy_start_cache: dict[str, np.ndarray] = {}
 
     def __len__(self) -> int:
         return len(self.refs)
@@ -160,12 +171,14 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state["_hdf_handles"] = {}
+        state["_energy_start_cache"] = {}
         return state
 
     def close(self) -> None:
         for handle in self._hdf_handles.values():
             handle.close()
         self._hdf_handles.clear()
+        self._energy_start_cache.clear()
 
     def __del__(self) -> None:
         try:
@@ -186,6 +199,65 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
             schema = load_physics_schema(Path(path)) if self.physics_v3 else load_schema(Path(path))
             self._schema_cache[path] = schema
         return schema
+
+    @staticmethod
+    def high_energy_window_starts(
+        actions: np.ndarray,
+        window_transitions: int,
+        top_fraction: float,
+    ) -> np.ndarray:
+        """Return valid starts in the highest-energy fraction of one episode."""
+        values = np.asarray(actions, dtype=np.float32)
+        if values.ndim != 2 or values.shape[1] != ACTION_DIM:
+            raise ValueError("Action energy sampling requires [T, 29] Actions")
+        window = int(window_transitions)
+        if not 0.0 < float(top_fraction) <= 1.0:
+            raise ValueError("top_fraction must be in (0, 1]")
+        if window <= 0 or values.shape[0] <= window:
+            return np.zeros(1, dtype=np.int64)
+        width = window - 1
+        if width == 0:
+            scores = np.zeros(values.shape[0], dtype=np.float32)
+        else:
+            derivative = np.square(np.diff(values, axis=0)).sum(axis=-1)
+            scores = np.convolve(
+                derivative,
+                np.ones(width, dtype=np.float32),
+                mode="valid",
+            ) / width
+        expected = values.shape[0] - window + 1
+        if scores.shape != (expected,):
+            raise RuntimeError("Action energy window score length is inconsistent")
+        count = max(1, int(math.ceil(scores.size * float(top_fraction))))
+        return np.sort(np.argpartition(scores, -count)[-count:]).astype(np.int64)
+
+    def _physics_window_start(
+        self,
+        episode: h5py.Group,
+        steps: int,
+        fixed_start: int | None,
+    ) -> int:
+        if fixed_start is not None:
+            return int(fixed_start)
+        max_start = max(0, steps - self.window)
+        if max_start == 0:
+            return 0
+        if (
+            self.action_energy_crop_probability > 0.0
+            and np.random.random() < self.action_energy_crop_probability
+        ):
+            cache_key = f"{episode.file.filename}:{episode.name}"
+            starts = self._energy_start_cache.get(cache_key)
+            if starts is None:
+                actions = np.asarray(
+                    episode["actions/action_target_canonical"], dtype=np.float32
+                )
+                starts = self.high_energy_window_starts(
+                    actions, self.window, self.action_energy_top_fraction
+                )
+                self._energy_start_cache[cache_key] = starts
+            return int(starts[int(np.random.randint(0, len(starts)))])
+        return int(np.random.randint(0, max_start + 1))
 
     @staticmethod
     def _physical_slice(group: h5py.Group, start: int, stop: int) -> np.ndarray:
@@ -272,15 +344,11 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         ref = self.refs[index]
         metadata = self.episodes[ref.episode_index]
         steps = int(metadata["steps"])
-        if ref.fixed_start is None:
-            max_start = max(0, steps - self.window)
-            start = int(np.random.randint(0, max_start + 1)) if max_start else 0
-        else:
-            start = ref.fixed_start
-        end = min(start + self.window, steps)
-        count = end - start
         stream = self._handle(metadata["hdf5_path"])
         episode = stream[f"data/{metadata['episode']}"]
+        start = self._physics_window_start(episode, steps, ref.fixed_start)
+        end = min(start + self.window, steps)
+        count = end - start
         schema = self._schema(metadata["schema_path"])
         env_id = int(metadata["env_id"])
         physical = read_physics_states(episode["states"], start, end + 1)

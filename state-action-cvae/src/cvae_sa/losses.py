@@ -83,7 +83,10 @@ def _balanced_physics_state_loss(
 
 
 def _balanced_masked_loss(
-    output: ModelOutput, batch: dict[str, torch.Tensor], masks: MaskBatch
+    output: ModelOutput,
+    batch: dict[str, torch.Tensor],
+    masks: MaskBatch,
+    action_weight: float = 1.0,
 ) -> torch.Tensor:
     if output.state_contact_logits is not None and batch["physical_state"].shape[-1] == 70:
         state_terms = []
@@ -106,11 +109,14 @@ def _balanced_masked_loss(
             ).masked_select(contact_mask).mean()
             state_terms.append(contact)
         terms = [torch.stack(state_terms).mean()] if state_terms else []
+        weights = [1.0] if state_terms else []
         if bool(masks.action_loss.any()):
             terms.append(_masked_huber(output.action, batch["action"], masks.action_loss))
+            weights.append(float(action_weight) if state_terms else 1.0)
         if not terms:
             return output.physical_state.sum() * 0.0
-        return torch.stack(terms).mean()
+        weighted = [term * weight for term, weight in zip(terms, weights)]
+        return torch.stack(weighted).sum() / sum(weights)
     terms = []
     for prediction, target, mask in (
         (output.physical_state, batch["physical_state"], masks.state_loss),
@@ -146,7 +152,12 @@ def compute_loss(
     config: dict[str, Any],
     kl_beta: float,
 ) -> LossOutput:
-    masked = _balanced_masked_loss(output, batch, masks)
+    masked = _balanced_masked_loss(
+        output,
+        batch,
+        masks,
+        float(config.get("masked_action_weight", 1.0)),
+    )
     if output.forward_contact_logits is not None and bool(masks.forward_transition.any()):
         predicted_next = batch["physical_state"][:, :-1] + output.forward_delta
         forward = _balanced_physics_state_loss(

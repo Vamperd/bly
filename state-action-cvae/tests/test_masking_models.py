@@ -87,6 +87,53 @@ MODEL_CONFIG = {
 
 
 class MaskingModelTest(unittest.TestCase):
+    def test_action_finetune_curriculum_and_forced_masks(self) -> None:
+        value = physics_batch(batch_size=2, transitions=128)
+        config = dict(
+            PHYSICS_MASK_CONFIG,
+            relation_probabilities=[0.30, 0.45, 0.25],
+            action_inference_probabilities=[2.0 / 3.0, 1.0 / 3.0],
+            arbitrary_target_probabilities=[0.20, 0.40, 0.40],
+            state_step_count=[1, 32],
+            history_action_step_count=[1, 32],
+            action_step_curriculum=[
+                {"until_step": 10, "max_length": 32},
+                {"until_step": 20, "max_length": 64},
+                {"until_step": 40, "max_length": 128},
+            ],
+            action_length_bucket_probabilities=[0.20, 0.30, 0.25, 0.25],
+            inverse_full_128_start_step=25,
+            inverse_full_128_probability_after_25000=0.15,
+        )
+        masker = MaskGenerator(config)
+        self.assertTrue(torch.allclose(
+            masker.relation_probabilities, torch.tensor([0.30, 0.45, 0.25])
+        ))
+        self.assertTrue(torch.allclose(
+            masker.arbitrary_target_probabilities, torch.tensor([0.20, 0.40, 0.40])
+        ))
+        masker.set_step(1)
+        self.assertEqual(masker.action_max_length(), 32)
+        masker.set_step(15)
+        self.assertEqual(masker.action_max_length(), 64)
+        masker.set_step(40)
+        self.assertEqual(masker.action_max_length(), 128)
+
+        inverse = masker.generate(value, force_task="inverse", force_length=128)
+        self.assertTrue(bool(inverse.inverse_transition.all()))
+        self.assertTrue(bool(inverse.action_input.all()))
+        history = masker.generate(value, force_task="history_action", force_length=32)
+        self.assertTrue(bool((history.history_action_transition.sum(dim=1) == 32).all()))
+        completion = masker.generate(
+            value,
+            force_task="arbitrary",
+            force_target="action",
+            force_granularity="step",
+            force_length=64,
+        )
+        self.assertFalse(bool(completion.state_loss.any()))
+        self.assertTrue(bool((completion.action_loss.any(dim=-1).sum(dim=1) == 64).all()))
+
     def test_physics_rollout_curriculum_uses_fixed_horizons(self) -> None:
         value = physics_batch(transitions=16)
         config = dict(PHYSICS_MASK_CONFIG, rollout_start_step=20)

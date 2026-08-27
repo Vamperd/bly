@@ -14,6 +14,18 @@ from tests.fixtures import write_collection_run, write_physics_collection_run
 
 
 class IndexerDatasetTest(unittest.TestCase):
+    def test_action_energy_candidates_select_top_quarter(self) -> None:
+        actions = np.zeros((40, 29), dtype=np.float32)
+        actions[20:, 0] = np.arange(20, dtype=np.float32) * 10.0
+        starts = StateActionWindowDataset.high_energy_window_starts(
+            actions, window_transitions=8, top_fraction=0.25
+        )
+        self.assertEqual(len(starts), int(np.ceil((40 - 8 + 1) * 0.25)))
+        derivative = np.square(np.diff(actions, axis=0)).sum(axis=-1)
+        scores = np.convolve(derivative, np.ones(7), mode="valid") / 7
+        cutoff = np.partition(scores, -len(starts))[-len(starts)]
+        self.assertTrue(bool((scores[starts] >= cutoff).all()))
+
     def test_builds_leak_free_index_and_padded_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -116,6 +116,7 @@ def build_default_scenarios(
     peak_block_start: int,
     joint_names: Iterable[str],
     seed: int,
+    inverse_full_in_distribution: bool = False,
 ) -> list[ActionMaskScenario]:
     if not 0 <= peak_block_start <= DEFAULT_WINDOW_TRANSITIONS - 8:
         raise ValueError("peak_block_start must fit an eight-step block in the model window")
@@ -200,7 +201,10 @@ def build_default_scenarios(
             feature_selector={"mode": "all", "joint_names": []},
             fraction=1.0,
             seed=_stable_seed(seed, "inverse_full_128"),
-            distribution_status="in_distribution",
+            distribution_status=(
+                "in_distribution" if inverse_full_in_distribution
+                else "out_of_distribution"
+            ),
         )
     )
     for scenario in scenarios:

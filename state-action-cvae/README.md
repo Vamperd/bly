@@ -172,6 +172,29 @@ CVAE_SEED=20260830 \
 bash ./cvae_repro.sh train
 ```
 
+### Action-focused fine-tune
+
+在已训练的 PhysicsTransformer `best.pt` 上只热启动模型权重；optimizer、scheduler、
+AMP scaler 与随机状态全部重新初始化。smoke 和正式训练分别写入独立 run，不覆盖 parent：
+
+```bash
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244
+export CVAE_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_train_20260826_002252/checkpoints/best.pt
+
+CVAE_CONFIG=configs/physics_v3_action_finetune_smoke.json \
+CVAE_MODEL_KIND=physics_transformer CVAE_CONTEXT_MODE=hidden CVAE_SEED=20260831 \
+bash ./cvae_repro.sh smoke-action-finetune
+
+CVAE_CONFIG=configs/physics_v3_action_finetune.json \
+CVAE_MODEL_KIND=physics_transformer CVAE_CONTEXT_MODE=hidden CVAE_SEED=20260831 \
+bash ./cvae_repro.sh action-finetune
+```
+
+正式训练为40k local optimizer step。Mask curriculum依次把 Action 区间扩到
+32/64/128步；每次validation同时比较parent固定基线，只有四项State指标均不超过
+parent的105%才可写入`best.pt`。未通过State guard的最低Action分数仍保存在
+`best_unguarded.pt`供诊断，但不会产生成功marker。
+
 复合 Mask 以40% forward、35% Action inference、25% arbitrary S/A completion 采样。
 模型分别报告一步/8步 forward、inverse Action、history-conditioned Action 和任意联合
 补全；torque/impulse 只从 `(S_t,A_t)` 转移表示进行辅助监督，不能读取 `S_{t+1}`。

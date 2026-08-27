@@ -193,13 +193,209 @@ def _validate_physics(
         + 0.15 * means["history_action"]
         + 0.25 * means["arbitrary"]
     )
-    return {
+    result = {
         "selection_score": score,
         "forward_one_normalized_rmse": means["forward_one"],
         "forward_rollout_normalized_rmse": means["forward_rollout"],
         "inverse_action_normalized_rmse": means["inverse"],
         "history_action_normalized_rmse": means["history_action"],
         "arbitrary_mask_normalized_rmse": means["arbitrary"],
+    }
+    return result
+
+
+@torch.no_grad()
+def validate_action_finetune(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    masker: MaskGenerator,
+    device: torch.device,
+    amp: str,
+    max_batches: int,
+) -> dict[str, float]:
+    """Fixed validation suite used for parent baselines and fine-tune selection."""
+    cases = (
+        ("forward_one", {}),
+        ("forward_rollout", {}),
+        ("inverse_local", {"force_task": "inverse", "force_length": 32}),
+        ("inverse_full", {"force_task": "inverse", "force_length": 128}),
+        ("history_action", {"force_task": "history_action", "force_length": 32}),
+        ("completion_element", {"force_task": "arbitrary", "force_target": "action", "force_granularity": "element"}),
+        ("completion_step", {"force_task": "arbitrary", "force_target": "action", "force_granularity": "step", "force_length": 32}),
+        ("completion_feature", {"force_task": "arbitrary", "force_target": "action", "force_granularity": "feature"}),
+        ("completion_semantic", {"force_task": "arbitrary", "force_target": "action", "force_granularity": "semantic"}),
+        ("arbitrary_action", {"force_task": "arbitrary", "force_target": "action"}),
+        ("arbitrary_state", {"force_task": "arbitrary", "force_target": "state"}),
+        ("state_step32", {"force_task": "arbitrary", "force_target": "state", "force_granularity": "step", "force_length": 32}),
+    )
+    values: dict[str, list[float]] = {name: [] for name, _ in cases}
+    model.eval()
+    masker.set_step(max(masker.optimizer_step, 40_000))
+    for batch_index, cpu_batch in enumerate(loader):
+        if batch_index >= max_batches:
+            break
+        name, arguments = cases[batch_index % len(cases)]
+        batch = _device_batch(cpu_batch, device)
+        force_task = name if name.startswith("forward_") else arguments.get("force_task")
+        force_length = arguments.get("force_length")
+        if name in {"inverse_local", "history_action"}:
+            force_length = (1, 4, 8, 16, 32)[
+                (batch_index // len(cases)) % 5
+            ]
+        masks = masker.generate(
+            batch,
+            force_task=force_task,
+            force_length=force_length,
+            force_target=arguments.get("force_target"),
+            force_granularity=arguments.get("force_granularity"),
+        )
+        with _autocast(device, amp):
+            output = model(batch, masks, sample_from_prior=True, deterministic=True)
+        error: torch.Tensor | None = None
+        if name == "forward_one":
+            target = batch["physical_state"][:, 1:] - batch["physical_state"][:, :-1]
+            mask = masks.forward_transition[:, :, None].expand_as(target)
+            error = _masked_squared_error(output.forward_delta.float(), target.float(), mask)
+        elif name == "forward_rollout":
+            rollout_errors = []
+            if output.rollout_state is not None:
+                for index in range(output.rollout_state.shape[0]):
+                    start = int(masks.rollout_start[index].item())
+                    horizon = min(8, int(masks.rollout_horizon[index].item()))
+                    if horizon > 0:
+                        rollout_errors.append(torch.square(
+                            output.rollout_state[index, :horizon].float()
+                            - batch["physical_state"][index, start + 1 : start + horizon + 1].float()
+                        ).mean())
+            if rollout_errors:
+                error = torch.stack(rollout_errors).mean()
+        elif name.startswith("inverse_"):
+            mask = masks.inverse_transition[:, :, None].expand_as(output.inverse_action)
+            error = _masked_squared_error(output.inverse_action.float(), batch["action"].float(), mask)
+        elif name == "history_action":
+            mask = masks.history_action_transition[:, :, None].expand_as(output.history_action)
+            error = _masked_squared_error(output.history_action.float(), batch["action"].float(), mask)
+        elif name.startswith("completion_") or name == "arbitrary_action":
+            error = _masked_squared_error(output.action.float(), batch["action"].float(), masks.action_loss)
+        else:
+            error = _masked_squared_error(
+                output.physical_state.float(), batch["physical_state"].float(), masks.state_loss
+            )
+        if error is not None:
+            values[name].append(float(torch.sqrt(error).cpu()))
+    means = {name: float(np.mean(items)) if items else math.inf for name, items in values.items()}
+    completion_macro = float(np.mean([
+        means["completion_element"], means["completion_step"],
+        means["completion_feature"], means["completion_semantic"],
+    ]))
+    score = (
+        0.30 * means["inverse_local"]
+        + 0.25 * means["inverse_full"]
+        + 0.25 * completion_macro
+        + 0.10 * means["history_action"]
+        + 0.10 * means["arbitrary_action"]
+    )
+    result = {
+        "selection_score": score,
+        "action_inverse_local_normalized_rmse": means["inverse_local"],
+        "action_inverse_full_128_normalized_rmse": means["inverse_full"],
+        "action_completion_macro_normalized_rmse": completion_macro,
+        "history_action_normalized_rmse": means["history_action"],
+        "arbitrary_action_normalized_rmse": means["arbitrary_action"],
+        "forward_one_normalized_rmse": means["forward_one"],
+        "forward_rollout_8_normalized_rmse": means["forward_rollout"],
+        "arbitrary_state_normalized_rmse": means["arbitrary_state"],
+        "state_step_32_normalized_rmse": means["state_step32"],
+        **{f"rmse/{name}": value for name, value in means.items()},
+    }
+    model.train()
+    return result
+
+
+ACTION_PARAMETER_PREFIXES = (
+    "action_joint", "action_joint_pool", "action_fusion", "action_joint_decoder",
+    "action_joint_output", "inverse_relation", "history_relation",
+)
+STATE_PARAMETER_PREFIXES = (
+    "state_joint", "state_joint_pool", "state_base", "state_fusion",
+    "state_joint_decoder", "state_joint_output", "state_base_output",
+    "state_contact_output", "forward_relation", "forward_continuous",
+    "forward_contact", "auxiliary_head",
+)
+
+
+def action_finetune_parameter_groups(
+    model: torch.nn.Module, learning_rates: dict[str, float]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    grouped: dict[str, list[torch.nn.Parameter]] = {"action": [], "shared": [], "state": []}
+    names: dict[str, list[str]] = {"action": [], "shared": [], "state": []}
+    for name, parameter in model.named_parameters():
+        root = name.split(".", 1)[0]
+        group = (
+            "action" if root.startswith(ACTION_PARAMETER_PREFIXES)
+            else "state" if root.startswith(STATE_PARAMETER_PREFIXES)
+            else "shared"
+        )
+        grouped[group].append(parameter)
+        names[group].append(name)
+    if not all(grouped.values()):
+        raise ValueError("fine-tune optimizer produced an empty parameter group")
+    parameters = [parameter for values in grouped.values() for parameter in values]
+    if len({id(parameter) for parameter in parameters}) != len(list(model.parameters())):
+        raise RuntimeError("fine-tune parameter groups are not a disjoint model partition")
+    result = [
+        {"params": grouped[name], "lr": float(learning_rates[name]), "group_name": name}
+        for name in ("action", "shared", "state")
+    ]
+    summary = {
+        name: {
+            "learning_rate": float(learning_rates[name]),
+            "parameter_count": sum(parameter.numel() for parameter in grouped[name]),
+            "parameter_names": names[name],
+        }
+        for name in grouped
+    }
+    return result, summary
+
+
+def load_weight_only_initialization(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    dataset_manifest_hash: str,
+    model_config: dict[str, Any],
+) -> dict[str, Any]:
+    checkpoint_path = checkpoint_path.expanduser().resolve()
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if checkpoint.get("format_version") != "sonic_state_action_cvae_checkpoint_v2":
+        raise ValueError("Action fine-tune requires a PhysicsTransformer v2 checkpoint")
+    if checkpoint.get("dataset_manifest_sha256") != dataset_manifest_hash:
+        raise ValueError("parent checkpoint dataset manifest hash does not match")
+    parent_model = checkpoint.get("config", {}).get("model", {})
+    architecture_keys = (
+        "kind", "d_model", "encoder_layers", "decoder_layers", "heads", "ffn_dim",
+        "latent_dim", "joint_width", "state_dim", "joint_robot_info_dim",
+        "global_robot_info_dim", "actuator_type_count", "context_mode",
+        "include_previous_action", "robot_info_dim", "dynamics_context_dim",
+        "auxiliary_dim", "token_layout",
+    )
+    mismatches = {
+        key: (parent_model.get(key), model_config.get(key))
+        for key in architecture_keys
+        if parent_model.get(key) != model_config.get(key)
+    }
+    if mismatches:
+        raise ValueError(f"parent/model architecture mismatch: {mismatches}")
+    model.load_state_dict(checkpoint["model"], strict=True)
+    return {
+        "initialization": "weights_only",
+        "parent_checkpoint": str(checkpoint_path),
+        "parent_checkpoint_sha256": file_sha256(checkpoint_path),
+        "parent_step": checkpoint.get("step"),
+        "parent_best_score": checkpoint.get("best_score"),
+        "optimizer_reinitialized": True,
+        "scheduler_reinitialized": True,
+        "amp_scaler_reinitialized": True,
+        "rng_reinitialized": True,
     }
 
 
@@ -212,8 +408,10 @@ def _checkpoint_state(
     step: int,
     best_score: float,
     dataset_manifest_hash: str,
+    provenance: dict[str, Any] | None = None,
+    curriculum_stage: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    return {
+    state = {
         "format_version": (
             "sonic_state_action_cvae_checkpoint_v2"
             if config["model"]["kind"] == "physics_transformer"
@@ -235,6 +433,13 @@ def _checkpoint_state(
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         },
     }
+    if provenance is not None:
+        state["fine_tune"] = {
+            **provenance,
+            "fine_tune_local_step": step,
+            "mask_curriculum_stage": curriculum_stage,
+        }
+    return state
 
 
 def train(
@@ -242,6 +447,8 @@ def train(
     output_run: Path,
     config: dict[str, Any],
     smoke: bool = False,
+    init_checkpoint: Path | None = None,
+    fine_tune_mode: str | None = None,
 ) -> dict[str, Any]:
     dataset_run = dataset_run.expanduser().resolve()
     output_run = output_run.expanduser().resolve()
@@ -258,6 +465,12 @@ def train(
         int(data_config["validation_stride"]),
         data_config.get("max_train_episodes"),
         random_crop=True,
+        action_energy_crop_probability=float(
+            data_config.get("action_energy_crop_probability", 0.0)
+        ),
+        action_energy_top_fraction=float(
+            data_config.get("action_energy_top_fraction", 0.25)
+        ),
     )
     validation_dataset = StateActionWindowDataset(
         dataset_run,
@@ -326,6 +539,21 @@ def train(
     if len(train_loader) == 0:
         raise ValueError("training split is smaller than one micro batch")
     model = build_model(config["model"]).to(device)
+    dataset_manifest = dataset_run / "manifests" / "dataset_manifest.json"
+    dataset_hash = file_sha256(dataset_manifest)
+    provenance: dict[str, Any] | None = None
+    if fine_tune_mode is not None:
+        if fine_tune_mode != "action":
+            raise ValueError(f"unsupported fine-tune mode {fine_tune_mode!r}")
+        if init_checkpoint is None:
+            raise ValueError("Action fine-tune requires --init-checkpoint")
+        if config["model"]["kind"] != "physics_transformer":
+            raise ValueError("Action fine-tune requires physics_transformer")
+        provenance = load_weight_only_initialization(
+            model, init_checkpoint, dataset_hash, config["model"]
+        )
+    elif init_checkpoint is not None:
+        raise ValueError("--init-checkpoint is accepted only with --fine-tune-mode")
     reference_config = dict(config["model"])
     if config["model"]["kind"] == "physics_transformer":
         reference_config["kind"] = None
@@ -337,11 +565,21 @@ def train(
         reference_model = build_model(reference_config)
         reference_parameter_count = parameter_count(reference_model)
         del reference_model
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(training["learning_rate"]),
-        weight_decay=float(training["weight_decay"]),
-    )
+    optimizer_groups: dict[str, Any] | None = None
+    if fine_tune_mode == "action":
+        parameter_groups, optimizer_groups = action_finetune_parameter_groups(
+            model, training["learning_rates"]
+        )
+        optimizer = torch.optim.AdamW(
+            parameter_groups,
+            weight_decay=float(training["weight_decay"]),
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=float(training["learning_rate"]),
+            weight_decay=float(training["weight_decay"]),
+        )
     max_steps = int(training["max_optimizer_steps"])
     warmup = int(training["warmup_steps"])
 
@@ -356,8 +594,23 @@ def train(
         "cuda", enabled=device.type == "cuda" and training["amp"] == "fp16"
     )
     masker = MaskGenerator(config["masking"])
-    dataset_manifest = dataset_run / "manifests" / "dataset_manifest.json"
-    dataset_hash = file_sha256(dataset_manifest)
+    parent_validation: dict[str, float] | None = None
+    if fine_tune_mode == "action":
+        validation_devices = (
+            [device.index if device.index is not None else torch.cuda.current_device()]
+            if device.type == "cuda" else []
+        )
+        with torch.random.fork_rng(devices=validation_devices):
+            torch.manual_seed(seed + 90_001)
+            parent_validation = validate_action_finetune(
+                model, validation_loader, masker, device, str(training["amp"]),
+                int(training["validation_max_batches"]),
+            )
+        atomic_write_json(
+            output_run / "manifests" / "parent_validation_baseline.json",
+            parent_validation,
+        )
+        model.train()
     atomic_write_json(output_run / "manifests" / "config.json", config)
     atomic_write_json(
         output_run / "manifests" / "model.json",
@@ -374,12 +627,20 @@ def train(
             "cuda_device": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
             "dataset_run": str(dataset_run),
             "dataset_manifest_sha256": dataset_hash,
+            "fine_tune_mode": fine_tune_mode,
+            "optimizer_parameter_groups": optimizer_groups,
+            "initialization": provenance,
         },
     )
+    if provenance is not None:
+        atomic_write_json(output_run / "manifests" / "fine_tune_provenance.json", provenance)
     metrics_path = output_run / "logs" / "metrics.jsonl"
     stream = _infinite(train_loader)
     accumulation = int(training["gradient_accumulation"])
     best_score = math.inf
+    best_unguarded_score = math.inf
+    guarded_checkpoint_found = fine_tune_mode is None
+    best_validation: dict[str, Any] | None = None
     validations_without_improvement = 0
     losses: list[float] = []
     validation_scores: list[float] = []
@@ -417,6 +678,10 @@ def train(
             "phase": "train",
             "optimizer_step": optimizer_step,
             "learning_rate": optimizer.param_groups[0]["lr"],
+            "learning_rates": {
+                str(group.get("group_name", index)): group["lr"]
+                for index, group in enumerate(optimizer.param_groups)
+            },
             "gradient_norm": float(gradient_norm),
             **accumulated,
         }
@@ -435,14 +700,37 @@ def train(
             # invalid smoke-progress comparison.
             with torch.random.fork_rng(devices=validation_devices):
                 torch.manual_seed(seed + 90_001)
-                validation = validate(
-                    model,
-                    validation_loader,
-                    masker,
-                    device,
-                    str(training["amp"]),
-                    int(training["validation_max_batches"]),
+                validation = (
+                    validate_action_finetune(
+                        model, validation_loader, masker, device,
+                        str(training["amp"]), int(training["validation_max_batches"]),
+                    )
+                    if fine_tune_mode == "action"
+                    else validate(
+                        model, validation_loader, masker, device,
+                        str(training["amp"]), int(training["validation_max_batches"]),
+                    )
                 )
+            state_guard_pass = True
+            state_guard_ratios: dict[str, float] = {}
+            if fine_tune_mode == "action":
+                assert parent_validation is not None
+                guard_keys = (
+                    "forward_one_normalized_rmse",
+                    "forward_rollout_8_normalized_rmse",
+                    "arbitrary_state_normalized_rmse",
+                    "state_step_32_normalized_rmse",
+                )
+                state_guard_ratios = {
+                    key: validation[key] / max(parent_validation[key], 1e-12)
+                    for key in guard_keys
+                }
+                state_guard_pass = all(
+                    ratio <= float(training.get("state_guard_ratio", 1.05))
+                    for ratio in state_guard_ratios.values()
+                )
+                validation["state_guard_pass"] = state_guard_pass
+                validation["state_guard_ratios"] = state_guard_ratios
             validation_record = {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "phase": "validation",
@@ -453,13 +741,26 @@ def train(
                 metrics_stream.write(json.dumps(validation_record, ensure_ascii=False) + "\n")
             score = validation["selection_score"]
             validation_scores.append(float(score))
-            if score < best_score:
+            checkpoint = _checkpoint_state(
+                model, optimizer, scheduler, scaler, config, optimizer_step,
+                score,
+                dataset_hash, provenance, masker.curriculum_stage(),
+            )
+            if fine_tune_mode == "action" and score < best_unguarded_score:
+                best_unguarded_score = score
+                atomic_torch_save(
+                    output_run / "checkpoints" / "best_unguarded.pt", checkpoint
+                )
+            if state_guard_pass and score < best_score:
                 best_score = score
+                guarded_checkpoint_found = True
+                best_validation = dict(validation)
                 validations_without_improvement = 0
                 atomic_torch_save(
                     output_run / "checkpoints" / "best.pt",
                     _checkpoint_state(
-                        model, optimizer, scheduler, scaler, config, optimizer_step, best_score, dataset_hash
+                        model, optimizer, scheduler, scaler, config, optimizer_step,
+                        best_score, dataset_hash, provenance, masker.curriculum_stage(),
                     ),
                 )
             else:
@@ -467,13 +768,36 @@ def train(
             atomic_torch_save(
                 output_run / "checkpoints" / "last.pt",
                 _checkpoint_state(
-                    model, optimizer, scheduler, scaler, config, optimizer_step, best_score, dataset_hash
+                    model, optimizer, scheduler, scaler, config, optimizer_step,
+                    best_score, dataset_hash, provenance, masker.curriculum_stage(),
                 ),
             )
             if validations_without_improvement >= int(training["early_stopping_patience"]):
                 break
 
     best_path = output_run / "checkpoints" / "best.pt"
+    if fine_tune_mode == "action" and not guarded_checkpoint_found:
+        if smoke and (output_run / "checkpoints" / "best_unguarded.pt").is_file():
+            unguarded = torch.load(
+                output_run / "checkpoints" / "best_unguarded.pt",
+                map_location="cpu", weights_only=False,
+            )
+            atomic_torch_save(best_path, unguarded)
+            best_score = float(unguarded["best_score"])
+        else:
+            diagnostics = {
+                "passed": False,
+                "reason": "no validation checkpoint satisfied all State guards",
+                "parent_validation": parent_validation,
+                "best_unguarded_score": best_unguarded_score,
+                "diagnostic_checkpoint": str(
+                    output_run / "checkpoints" / "best_unguarded.pt"
+                ),
+            }
+            atomic_write_json(
+                output_run / "manifests" / "training_summary.json", diagnostics
+            )
+            raise RuntimeError(diagnostics["reason"])
     reopened = torch.load(best_path, map_location="cpu", weights_only=False)
     expected_format = (
         "sonic_state_action_cvae_checkpoint_v2"
@@ -526,11 +850,45 @@ def train(
         "smoke_train_window_decreased": train_window_decreased,
         "smoke_validation_score_improved": validation_score_improved,
         "validation_scores": validation_scores,
+        "parent_validation": parent_validation,
+        "best_validation": best_validation,
+        "state_guard_pass": (
+            bool(best_validation and best_validation.get("state_guard_pass"))
+            if fine_tune_mode == "action" else None
+        ),
+        "initialization": provenance,
         "best_checkpoint": str(best_path),
         "last_checkpoint": str(output_run / "checkpoints" / "last.pt"),
     }
+    if fine_tune_mode == "action" and not smoke:
+        assert parent_validation is not None and best_validation is not None
+        improvement = {
+            "inverse_local": 1.0 - best_validation["action_inverse_local_normalized_rmse"]
+            / parent_validation["action_inverse_local_normalized_rmse"],
+            "inverse_full_128": 1.0 - best_validation["action_inverse_full_128_normalized_rmse"]
+            / parent_validation["action_inverse_full_128_normalized_rmse"],
+            "action_completion_macro": 1.0 - best_validation["action_completion_macro_normalized_rmse"]
+            / parent_validation["action_completion_macro_normalized_rmse"],
+        }
+        thresholds = {
+            "inverse_local": 0.10,
+            "inverse_full_128": 0.15,
+            "action_completion_macro": 0.10,
+        }
+        summary["action_improvement"] = improvement
+        summary["action_improvement_thresholds"] = thresholds
+        summary["action_quality_pass"] = all(
+            improvement[name] >= threshold for name, threshold in thresholds.items()
+        )
+        summary["passed"] = bool(summary["action_quality_pass"])
     atomic_write_json(output_run / "manifests" / "training_summary.json", summary)
-    marker_name = "cvae_smoke_train.ok" if smoke else "cvae_train.ok"
+    if fine_tune_mode == "action" and not smoke and not summary["action_quality_pass"]:
+        raise RuntimeError("Action fine-tune did not satisfy all offline improvement gates")
+    marker_name = (
+        "cvae_action_finetune_smoke.ok" if smoke else "cvae_action_finetune.ok"
+    ) if fine_tune_mode == "action" else (
+        "cvae_smoke_train.ok" if smoke else "cvae_train.ok"
+    )
     atomic_write_text(output_run / "markers" / marker_name, "PASS\n")
     train_dataset.close()
     validation_dataset.close()
@@ -546,6 +904,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-kind", choices=("transformer", "tcn", "physics_transformer"))
     parser.add_argument("--seed", type=int)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--init-checkpoint", type=Path)
+    parser.add_argument("--fine-tune-mode", choices=("action",))
     parser.add_argument("--context-mode", choices=("hidden", "oracle", "explicit"))
     parser.set_defaults(project_root=project_root)
     return parser.parse_args()
@@ -562,7 +922,14 @@ def main() -> int:
         config["seed"] = args.seed
     if args.context_mode is not None:
         config["model"]["context_mode"] = args.context_mode
-    summary = train(args.dataset_run, args.output_run, config, smoke=args.smoke)
+    summary = train(
+        args.dataset_run,
+        args.output_run,
+        config,
+        smoke=args.smoke,
+        init_checkpoint=args.init_checkpoint,
+        fine_tune_mode=args.fine_tune_mode,
+    )
     print("CVAE training: PASS")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

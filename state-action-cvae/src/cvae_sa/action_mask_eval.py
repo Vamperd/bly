@@ -675,13 +675,26 @@ def complete(
     if not source_path.is_file():
         raise FileNotFoundError(f"SONIC source capture is missing: {source_path}")
     source = _load_source(source_path, physics_v4=physics_v4)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint_masking = checkpoint.get("config", {}).get("masking", {})
+    inverse_full_in_distribution = bool(
+        checkpoint_masking.get("inverse_full_128_probability_after_25000", 0.0) > 0.0
+        and any(
+            int(stage.get("max_length", 0)) >= 128
+            for stage in checkpoint_masking.get("action_step_curriculum", [])
+        )
+    )
     window_start, peak_block_start = _select_window(source["action_rel"])
     scenario_path = custom_scenarios or (
         Path(request["custom_scenarios"]) if request.get("custom_scenarios") else None
     )
     if scenario_path is None:
         scenarios = build_default_scenarios(
-            window_start, peak_block_start, source["joint_names"], seed
+            window_start,
+            peak_block_start,
+            source["joint_names"],
+            seed,
+            inverse_full_in_distribution=inverse_full_in_distribution,
         )
     else:
         scenarios = load_scenarios(scenario_path)
@@ -697,7 +710,6 @@ def complete(
             raise ValueError("custom scenario window must preserve 32-step prefix/suffix margins")
     write_scenarios(output_run / "manifests/action_mask_scenarios.jsonl", scenarios)
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     dataset_hash = file_sha256(dataset_run / "manifests/dataset_manifest.json")
     if checkpoint["dataset_manifest_sha256"] != dataset_hash:
         raise ValueError("checkpoint and CVAE dataset manifest hashes differ")

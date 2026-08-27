@@ -67,6 +67,15 @@ class ActionMaskTest(unittest.TestCase):
         self.assertEqual(masks["semantic_left_arm"].sum(), 128 * 7)
         self.assertEqual(masks["semantic_right_arm"].sum(), 128 * 7)
         self.assertTrue(masks["inverse_full_128"].all())
+        inverse = next(item for item in scenarios if item.name == "inverse_full_128")
+        self.assertEqual(inverse.distribution_status, "out_of_distribution")
+        trained = build_default_scenarios(
+            32, 60, JOINT_NAMES, 20260824, inverse_full_in_distribution=True
+        )
+        trained_inverse = next(
+            item for item in trained if item.name == "inverse_full_128"
+        )
+        self.assertEqual(trained_inverse.distribution_status, "in_distribution")
 
     def test_semantic_groups_partition_all_joints_and_optional_groups_are_labeled(
         self,
