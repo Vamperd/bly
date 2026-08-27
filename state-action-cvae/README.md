@@ -219,11 +219,13 @@ Physics v4 NPZ 改为 `physical_state [129,70]`、空的 `previous_action [129,0
 
 ## 通用 Action Mask 物理重放与视频
 
-该入口只使用 validation（默认 Locomotion）动作，自动选择完成且不少于 192 步的
-motion。源 SONIC 轨迹只采集一次；Element、Step、随机 Feature、五个语义关节组及
-Inverse Full 共用同一个 128 步窗口、同一组完整 physical state 和 prior mean。Mask
-Action 时会同步隐藏下一 State 中的 previous-action 副本，未 Mask Action 保持逐元素
-等于原序列。8 个随机 latent 只报告不确定性，不用于挑选主结果。
+该入口自动识别旧 v1 数据或 `sonic_physics_state_action_cvae_dataset_v4`，只使用
+validation（默认 Locomotion）动作，并自动选择完成且不少于 192 步的 motion。源 SONIC
+轨迹只采集一次；Element、Step、随机 Feature、五个语义关节组及 Inverse Full 共用同一个
+128 步窗口。Physics v4 批次为 `A_before,S0,A0,...,S128`，使用 70 维 State、空的
+previous-action、canonical Action 与结构化 RobotInfo。普通补全使用 reconstruction Action
+head；`inverse_full_128` 使用专用 inverse head，且是确定性单候选。未 Mask Action 保持
+位级等于原序列；8 个随机 latent 只用于普通补全的不确定性，不用于挑选主结果。
 
 先确保 README 中的 SONIC `0005` 外部 Action 补丁已经在 Ubuntu 嵌套仓库应用，再运行：
 
@@ -231,8 +233,8 @@ Action 时会同步隐藏下一 State 中的 previous-action 副本，未 Mask A
 cd /home/helloworld/bly/state-action-cvae
 source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
 
-CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_dataset_20260824_145739 \
-CVAE_CHECKPOINT=/home/helloworld/bly/runs/cvae_train_20260824_150534/checkpoints/best.pt \
+CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244 \
+CVAE_CHECKPOINT=/home/helloworld/bly/runs/cvae_train_20260826_002252/checkpoints/best.pt \
 CVAE_REPLAY_SPLIT=validation \
 CVAE_REPLAY_PACKAGE=Locomotion \
 CVAE_REPLAY_MOTION_KEY=auto \
@@ -240,7 +242,7 @@ CVAE_MASK_PRESET=all_action_masks_v1 \
 CVAE_REPLAY_LATENT_MODE=prior_mean \
 CVAE_REPLAY_LATENT_SAMPLES=8 \
 CVAE_REPLAY_RENDER=representatives \
-CVAE_REPLAY_SEED=20260824 \
+CVAE_REPLAY_SEED=20260830 \
 bash ./cvae_repro.sh validate-action-mask-replay
 ```
 
@@ -249,6 +251,7 @@ bash ./cvae_repro.sh validate-action-mask-replay
 `CVAE_REPLAY_RENDER=all` 为每个场景生成对比视频，`none` 只运行补全、物理重放和
 指标。输出位于新的 `cvae_action_mask_eval_时间戳` run，包含 source/original、五个代表
 场景、总览 grid、离线补全误差、16-step stride 全动作扫描、物理漂移和稳定性指标。
+Physics v4 指标还包含 base 线/角速度、height、contact、RobotInfo/dynamics context 一致性。
 工程门禁只要求坐标往返、源重放忠实度和 Mask 前一致；若 CVAE 弱于 hold-last 或线性
 插值，run 仍诚实保存并在 summary 中令 `model_quality_pass=false`。
 

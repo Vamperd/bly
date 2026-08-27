@@ -37,6 +37,21 @@ class ActionMaskReplayConfigTest(unittest.TestCase):
             replay_phase,
         )
 
+    def test_recorder_exports_physics_v4_superset(self) -> None:
+        recorder = (Path(__file__).resolve().parent / "action_replay_recorder.py").read_text(
+            encoding="utf-8"
+        )
+        for field in (
+            '"physics_state_v3"',
+            '"action_target_canonical"',
+            "nominal_default_joint_pos=",
+            "joint_robot_information=",
+            "joint_actuator_type_names=",
+            "global_robot_information=",
+            "dynamics_context=",
+        ):
+            self.assertIn(field, recorder)
+
 
 if __name__ == "__main__":
     unittest.main()

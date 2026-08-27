@@ -464,6 +464,9 @@ observation corruption、startup/interval 随机化和跟踪失败 reset，只�
 `data/replay_action_slices/*.actions.npz`，输出仍以原场景编号写入同一个 `data/replay/`，
 因此 CVAE 推理、指标和视频接口不变。该模式比 17-env 并行模式慢，但所有场景使用相同
 seed、平面、单环境原点和控制配置，物理对比才有效。每次重放记录绝对 root/joint/body
-状态和 runtime Action 映射。渲染阶段再用 MuJoCo 对这些完整物理状态做 50 FPS 公共世界
-相机可视化，不会把 CVAE 预测 State 当成物理结果。
+状态和 runtime Action 映射。recorder 同时输出旧版 64 维字段与 Physics v4 所需的
+`physics_state_v3 [T+1,70]`、canonical Action、nominal、
+`joint_robot_information [29,11]`、actuator type、global RobotInfo 和 648 维 dynamics
+context；关闭随机化时 nominal 明确定义为未扰动 runtime default。渲染阶段再用 MuJoCo
+对这些完整物理状态做 50 FPS 公共世界相机可视化，不会把 CVAE 预测 State 当成物理结果。
 `ACTION_MASK_GL`、宽高和相机距离仅影响离线视频，不影响 Isaac 轨迹。

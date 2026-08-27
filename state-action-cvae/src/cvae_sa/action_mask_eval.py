@@ -33,6 +33,14 @@ from .util import atomic_write_json, atomic_write_text, file_sha256, load_json, 
 
 
 MIN_EPISODE_STEPS = DEFAULT_WINDOW_TRANSITIONS + 64
+PHYSICS_V4_DATASET_SCHEMA = "sonic_physics_state_action_cvae_dataset_v4"
+LEGACY_DATASET_SCHEMA = "sonic_state_action_cvae_dataset_v1"
+PHYSICS_V4_CHECKPOINT_FORMAT = "sonic_state_action_cvae_checkpoint_v2"
+PHYSICS_STATE_DIM = 70
+JOINT_ROBOT_INFO_DIM = 11
+GLOBAL_ROBOT_INFO_DIM = 9
+DYNAMICS_CONTEXT_DIM = 648
+AUXILIARY_TRANSITION_DIM = 35
 SOURCE_RELATIVE_PATH = Path("data/source/000000.replay.npz")
 REPLAY_ACTIONS_RELATIVE_PATH = Path("data/replay_actions.npz")
 COMPLETIONS_RELATIVE_PATH = Path("data/completed_actions.npz")
@@ -48,6 +56,15 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _stable_order(seed: int, value: str) -> str:
     return hashlib.sha256(f"{seed}:{value}".encode()).hexdigest()
+
+
+def _dataset_representation(dataset_run: Path) -> tuple[dict[str, Any], bool]:
+    manifest = load_json(dataset_run / "manifests/dataset_manifest.json")
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {LEGACY_DATASET_SCHEMA, PHYSICS_V4_DATASET_SCHEMA}:
+        raise ValueError(f"unsupported Action-mask dataset schema {schema_version!r}")
+    physics_v4 = schema_version == PHYSICS_V4_DATASET_SCHEMA
+    return manifest, physics_v4
 
 
 def _resolve_motion_file(record: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
@@ -109,6 +126,17 @@ def prepare(
     if not checkpoint.is_file():
         raise FileNotFoundError(f"CVAE checkpoint is missing: {checkpoint}")
 
+    dataset_manifest, physics_v4 = _dataset_representation(dataset_run)
+    checkpoint_metadata = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    dataset_hash = file_sha256(dataset_run / "manifests/dataset_manifest.json")
+    if checkpoint_metadata.get("dataset_manifest_sha256") != dataset_hash:
+        raise ValueError("checkpoint and CVAE dataset manifest hashes differ")
+    if physics_v4 and (
+        checkpoint_metadata.get("format_version") != PHYSICS_V4_CHECKPOINT_FORMAT
+        or checkpoint_metadata.get("config", {}).get("model", {}).get("kind")
+        != "physics_transformer"
+    ):
+        raise ValueError("Physics v4 dataset requires a v2 physics_transformer checkpoint")
     records = [
         row
         for row in read_episode_index(dataset_run)
@@ -137,12 +165,16 @@ def prepare(
         load_scenarios(custom_path)
 
     request = {
-        "schema_version": "sonic_action_mask_eval_request_v1",
+        "schema_version": "sonic_action_mask_eval_request_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dataset_run": str(dataset_run),
-        "dataset_manifest_sha256": file_sha256(dataset_run / "manifests/dataset_manifest.json"),
+        "dataset_manifest_sha256": dataset_hash,
+        "dataset_schema_version": dataset_manifest.get("schema_version"),
+        "representation": "physics_v4" if physics_v4 else "legacy_v1",
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": file_sha256(checkpoint),
+        "checkpoint_format_version": checkpoint_metadata.get("format_version"),
+        "checkpoint_model_kind": checkpoint_metadata.get("config", {}).get("model", {}).get("kind"),
         "split": split,
         "package": package,
         "motion_key": selected["motion_key"],
@@ -177,21 +209,55 @@ def _required_array(values: Any, name: str, shape_tail: tuple[int, ...]) -> np.n
     return result.astype(np.float32)
 
 
-def _load_source(path: Path) -> dict[str, Any]:
+def _load_source(path: Path, physics_v4: bool = False) -> dict[str, Any]:
     with np.load(path, allow_pickle=False) as values:
+        physical_name = "physics_state_v3" if physics_v4 else "physical_state"
+        action_name = "action_target_canonical" if physics_v4 else "action_rel"
+        default_name = "nominal_default_joint_pos" if physics_v4 else "action_default"
         source = {
-            "physical_state": _required_array(values, "physical_state", (PHYSICAL_STATE_DIM,)),
-            "previous_action_rel": _required_array(values, "previous_action_rel", (ACTION_DIM,)),
+            "physical_state": _required_array(
+                values,
+                physical_name,
+                (PHYSICS_STATE_DIM if physics_v4 else PHYSICAL_STATE_DIM,),
+            ),
             "raw_action": _required_array(values, "raw_action", (ACTION_DIM,)),
-            "action_rel": _required_array(values, "action_rel", (ACTION_DIM,)),
+            "action_rel": _required_array(values, action_name, (ACTION_DIM,)),
             "joint_names": tuple(str(value) for value in values["joint_names"].tolist()),
-            "action_default": np.asarray(values["action_default"], dtype=np.float32),
+            "action_default": np.asarray(values[default_name], dtype=np.float32),
             "action_scale": np.asarray(values["action_scale"], dtype=np.float32),
             "action_offset": np.asarray(values["action_offset"], dtype=np.float32),
             "action_clip": np.asarray(values["action_clip"], dtype=np.float32),
             "wrapper_action_clip": float(np.asarray(values["wrapper_action_clip"]).item()),
             "control_dt": float(np.asarray(values["control_dt"]).item()),
+            "representation": "physics_v4" if physics_v4 else "legacy_v1",
         }
+        if physics_v4:
+            source.update(
+                {
+                    "previous_action_rel": np.empty(
+                        (source["physical_state"].shape[0], 0), dtype=np.float32
+                    ),
+                    "initial_processed_target_canonical": np.asarray(
+                        values["initial_processed_target_canonical"], dtype=np.float32
+                    ),
+                    "joint_robot_information": np.asarray(
+                        values["joint_robot_information"], dtype=np.float32
+                    ),
+                    "joint_actuator_type_names": tuple(
+                        str(value) for value in values["joint_actuator_type_names"].tolist()
+                    ),
+                    "global_robot_information": np.asarray(
+                        values["global_robot_information"], dtype=np.float32
+                    ),
+                    "dynamics_context": np.asarray(
+                        values["dynamics_context"], dtype=np.float32
+                    ),
+                }
+            )
+        else:
+            source["previous_action_rel"] = _required_array(
+                values, "previous_action_rel", (ACTION_DIM,)
+            )
     steps = source["raw_action"].shape[0]
     if source["action_rel"].shape[0] != steps:
         raise ValueError("raw and relative source Action lengths differ")
@@ -204,6 +270,25 @@ def _load_source(path: Path) -> dict[str, Any]:
     for name in ("action_default", "action_scale", "action_offset"):
         if source[name].shape != (ACTION_DIM,):
             raise ValueError(f"{name} must be a 29-vector")
+    if physics_v4:
+        expected = {
+            "initial_processed_target_canonical": (ACTION_DIM,),
+            "joint_robot_information": (ACTION_DIM, JOINT_ROBOT_INFO_DIM),
+            "global_robot_information": (GLOBAL_ROBOT_INFO_DIM,),
+            "dynamics_context": (DYNAMICS_CONTEXT_DIM,),
+        }
+        for name, shape in expected.items():
+            if source[name].shape != shape or not np.isfinite(source[name]).all():
+                raise ValueError(f"{name} must be finite with shape {shape}, found {source[name].shape}")
+        if len(source["joint_actuator_type_names"]) != ACTION_DIM:
+            raise ValueError("joint_actuator_type_names must contain 29 entries")
+        if not np.allclose(
+            source["joint_robot_information"][:, 0],
+            source["action_default"],
+            rtol=0.0,
+            atol=1.0e-6,
+        ):
+            raise ValueError("joint RobotInfo nominal does not match replay canonical nominal")
     if source["action_clip"].size == 0:
         source["action_clip"] = None
     elif source["action_clip"].shape != (ACTION_DIM, 2):
@@ -212,6 +297,26 @@ def _load_source(path: Path) -> dict[str, Any]:
         source["wrapper_action_clip"] = None
     if not np.isclose(source["control_dt"], 0.02):
         raise ValueError(f"source control_dt must be 0.02, found {source['control_dt']}")
+    if physics_v4:
+        processed = source["raw_action"] * source["action_scale"] + source["action_offset"]
+        if source["action_clip"] is not None:
+            processed = np.clip(
+                processed,
+                source["action_clip"][:, 0],
+                source["action_clip"][:, 1],
+            )
+        mapping_error = float(
+            np.max(
+                np.abs(
+                    processed
+                    - source["action_default"]
+                    - source["action_rel"]
+                )
+            )
+        )
+        if mapping_error > 1.0e-6:
+            raise ValueError(f"source canonical Action mapping error is {mapping_error:.3e}")
+        source["source_action_mapping_max_abs"] = mapping_error
     return source
 
 
@@ -232,28 +337,93 @@ def _select_window(actions: np.ndarray) -> tuple[int, int]:
     return window_start, peak_block_start
 
 
-def _make_batch(source: dict[str, Any], dataset_run: Path, start: int, device: torch.device):
+def _make_batch(
+    source: dict[str, Any],
+    dataset_run: Path,
+    start: int,
+    device: torch.device,
+    physics_v4: bool = False,
+):
     with np.load(dataset_run / "data/normalization.npz") as values:
         state_mean = values["physical_state_mean"].astype(np.float32)
         state_std = values["physical_state_std"].astype(np.float32)
-        previous_mean = values["previous_action_mean"].astype(np.float32)
-        previous_std = values["previous_action_std"].astype(np.float32)
         action_mean = values["action_mean"].astype(np.float32)
         action_std = values["action_std"].astype(np.float32)
+        if physics_v4:
+            joint_mean = values["joint_robot_info_mean"].astype(np.float32)
+            joint_std = values["joint_robot_info_std"].astype(np.float32)
+            global_mean = values["global_robot_info_mean"].astype(np.float32)
+            global_std = values["global_robot_info_std"].astype(np.float32)
+            dynamics_mean = values["dynamics_context_mean"].astype(np.float32)
+            dynamics_std = values["dynamics_context_std"].astype(np.float32)
+        else:
+            previous_mean = values["previous_action_mean"].astype(np.float32)
+            previous_std = values["previous_action_std"].astype(np.float32)
     stop = start + DEFAULT_WINDOW_TRANSITIONS
     physical = source["physical_state"][start : stop + 1]
-    previous = source["previous_action_rel"][start : stop + 1]
     action = source["action_rel"][start:stop]
     progress = np.arange(start, stop + 1, dtype=np.float32) / max(source["raw_action"].shape[0], 1)
+    previous = source["previous_action_rel"][start : stop + 1]
     batch = {
         "physical_state": torch.from_numpy((physical - state_mean) / state_std)[None].to(device),
-        "previous_action": torch.from_numpy((previous - previous_mean) / previous_std)[None].to(device),
         "action": torch.from_numpy((action - action_mean) / action_std)[None].to(device),
         "action_scale": torch.from_numpy(source["action_scale"])[None].to(device),
         "valid_state": torch.ones((1, DEFAULT_WINDOW_TRANSITIONS + 1), dtype=torch.bool, device=device),
         "valid_action": torch.ones((1, DEFAULT_WINDOW_TRANSITIONS), dtype=torch.bool, device=device),
         "progress": torch.from_numpy(progress)[None].to(device),
     }
+    if physics_v4:
+        manifest, manifest_is_v4 = _dataset_representation(dataset_run)
+        if not manifest_is_v4:
+            raise ValueError("Physics v4 source cannot be used with a legacy dataset manifest")
+        vocabulary = manifest["representations"]["joint_actuator_type"]["vocabulary"]
+        actuator_to_id = {str(name): index for index, name in enumerate(vocabulary)}
+        unknown_id = actuator_to_id.get("unknown")
+        if unknown_id is None:
+            raise ValueError("Physics v4 actuator vocabulary has no 'unknown' entry")
+        actuator_ids = np.asarray(
+            [actuator_to_id.get(name, unknown_id) for name in source["joint_actuator_type_names"]],
+            dtype=np.int64,
+        )
+        action_before = (
+            source["action_rel"][start - 1]
+            if start > 0
+            else source["initial_processed_target_canonical"]
+        )
+        batch.update(
+            {
+                "previous_action": torch.empty(
+                    (1, DEFAULT_WINDOW_TRANSITIONS + 1, 0), dtype=torch.float32, device=device
+                ),
+                "action_before_window": torch.from_numpy(
+                    (action_before - action_mean) / action_std
+                )[None].to(device),
+                "robot_information": torch.empty((1, 0), dtype=torch.float32, device=device),
+                "joint_robot_information": torch.from_numpy(
+                    (source["joint_robot_information"] - joint_mean) / joint_std
+                )[None].to(device),
+                "joint_actuator_type": torch.from_numpy(actuator_ids)[None].to(device),
+                "global_robot_information": torch.from_numpy(
+                    (source["global_robot_information"] - global_mean) / global_std
+                )[None].to(device),
+                "dynamics_context": torch.from_numpy(
+                    (source["dynamics_context"] - dynamics_mean) / dynamics_std
+                )[None].to(device),
+                "auxiliary_transition": torch.zeros(
+                    (1, DEFAULT_WINDOW_TRANSITIONS, AUXILIARY_TRANSITION_DIM),
+                    dtype=torch.float32,
+                    device=device,
+                ),
+            }
+        )
+    else:
+        batch.update(
+            {
+                "previous_action": torch.from_numpy(
+                    (previous - previous_mean) / previous_std
+                )[None].to(device),
+            }
+        )
     normalization = {
         "action_mean": action_mean,
         "action_std": action_std,
@@ -261,14 +431,29 @@ def _make_batch(source: dict[str, Any], dataset_run: Path, start: int, device: t
     return batch, normalization
 
 
-def _mask_batch(mask: np.ndarray, task: str, device: torch.device) -> MaskBatch:
+def _mask_batch(
+    mask: np.ndarray,
+    task: str,
+    device: torch.device,
+    physics_v4: bool = False,
+) -> MaskBatch:
     action = torch.from_numpy(mask)[None].to(device)
-    state = torch.zeros((1, DEFAULT_WINDOW_TRANSITIONS + 1, PHYSICAL_STATE_DIM), dtype=torch.bool, device=device)
-    previous_input = torch.zeros(
-        (1, DEFAULT_WINDOW_TRANSITIONS + 1, ACTION_DIM), dtype=torch.bool, device=device
+    state_dim = PHYSICS_STATE_DIM if physics_v4 else PHYSICAL_STATE_DIM
+    state = torch.zeros(
+        (1, DEFAULT_WINDOW_TRANSITIONS + 1, state_dim), dtype=torch.bool, device=device
     )
-    previous_input[:, 1:] = action
+    previous_dim = 0 if physics_v4 else ACTION_DIM
+    previous_input = torch.zeros(
+        (1, DEFAULT_WINDOW_TRANSITIONS + 1, previous_dim), dtype=torch.bool, device=device
+    )
+    if not physics_v4:
+        previous_input[:, 1:] = action
     previous_loss = torch.zeros_like(previous_input)
+    transitions = torch.zeros(
+        (1, DEFAULT_WINDOW_TRANSITIONS), dtype=torch.bool, device=device
+    )
+    if physics_v4 and task == "inverse":
+        transitions[0] = action.all(dim=-1)[0]
     return MaskBatch(
         state_input=state,
         previous_input=previous_input,
@@ -280,7 +465,20 @@ def _mask_batch(mask: np.ndarray, task: str, device: torch.device) -> MaskBatch:
         task_name=task,
         completion_name="external",
         causal=False,
+        forward_transition=torch.zeros_like(transitions),
+        inverse_transition=transitions,
+        history_action_transition=torch.zeros_like(transitions),
+        rollout_start=torch.zeros((1,), dtype=torch.long, device=device),
+        rollout_horizon=torch.zeros((1,), dtype=torch.long, device=device),
     )
+
+
+def _predicted_action(output: Any, task: str, physics_v4: bool) -> torch.Tensor:
+    if physics_v4 and task == "inverse":
+        if output.inverse_action is None:
+            raise RuntimeError("Physics v4 inverse scenario requires the dedicated inverse Action head")
+        return output.inverse_action
+    return output.action
 
 
 def _masked_metrics(
@@ -374,6 +572,7 @@ def _scan_action_masks(
     scenarios: list[ActionMaskScenario],
     custom_scenarios: bool,
     seed: int,
+    physics_v4: bool = False,
 ) -> dict[str, Any]:
     starts = _scan_window_starts(source["raw_action"].shape[0])
     values: dict[str, dict[str, list[float]]] = {
@@ -399,17 +598,23 @@ def _scan_action_masks(
             )
         if [item.name for item in window_scenarios] != [item.name for item in scenarios]:
             raise RuntimeError("multi-position scan changed the Action-mask scenario identities")
-        batch, normalization = _make_batch(source, dataset_run, start, device)
+        batch, normalization = _make_batch(
+            source, dataset_run, start, device, physics_v4=physics_v4
+        )
         for scenario in window_scenarios:
             mask = scenario_mask(scenario, source["joint_names"])
             output = model(
                 batch,
-                _mask_batch(mask, scenario.task, device),
+                _mask_batch(mask, scenario.task, device, physics_v4=physics_v4),
                 sample_from_prior=True,
                 deterministic=True,
             )
             prediction = (
-                output.action[0].float().cpu().numpy() * normalization["action_std"]
+                _predicted_action(output, scenario.task, physics_v4)[0]
+                .float()
+                .cpu()
+                .numpy()
+                * normalization["action_std"]
                 + normalization["action_mean"]
             )
             completed = np.where(mask, prediction, source_window)
@@ -458,6 +663,9 @@ def complete(
     dataset_run = dataset_run.expanduser().resolve()
     checkpoint_path = checkpoint_path.expanduser().resolve()
     request = load_json(output_run / "manifests/action_mask_request.json")
+    _, physics_v4 = _dataset_representation(dataset_run)
+    if request.get("representation") != ("physics_v4" if physics_v4 else "legacy_v1"):
+        raise ValueError("prepare and complete dataset representations differ")
     latent_mode = request["latent_mode"]
     if latent_mode not in LATENT_MODES:
         raise ValueError(f"unsupported latent_mode {latent_mode!r} in request")
@@ -466,7 +674,7 @@ def complete(
     source_path = output_run / SOURCE_RELATIVE_PATH
     if not source_path.is_file():
         raise FileNotFoundError(f"SONIC source capture is missing: {source_path}")
-    source = _load_source(source_path)
+    source = _load_source(source_path, physics_v4=physics_v4)
     window_start, peak_block_start = _select_window(source["action_rel"])
     scenario_path = custom_scenarios or (
         Path(request["custom_scenarios"]) if request.get("custom_scenarios") else None
@@ -493,11 +701,18 @@ def complete(
     dataset_hash = file_sha256(dataset_run / "manifests/dataset_manifest.json")
     if checkpoint["dataset_manifest_sha256"] != dataset_hash:
         raise ValueError("checkpoint and CVAE dataset manifest hashes differ")
+    if physics_v4:
+        if checkpoint.get("format_version") != PHYSICS_V4_CHECKPOINT_FORMAT:
+            raise ValueError("Physics v4 replay requires a v2 Physics CVAE checkpoint")
+        if checkpoint.get("config", {}).get("model", {}).get("kind") != "physics_transformer":
+            raise ValueError("Physics v4 replay requires CVAE_MODEL_KIND=physics_transformer")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(checkpoint["config"]["model"]).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
-    batch, normalization = _make_batch(source, dataset_run, window_start, device)
+    batch, normalization = _make_batch(
+        source, dataset_run, window_start, device, physics_v4=physics_v4
+    )
     window_stop = window_start + DEFAULT_WINDOW_TRANSITIONS
     source_window = source["action_rel"][window_start:window_stop]
 
@@ -514,37 +729,52 @@ def complete(
 
     for scenario in scenarios:
         mask = scenario_mask(scenario, source["joint_names"])
-        masks = _mask_batch(mask, scenario.task, device)
+        masks = _mask_batch(mask, scenario.task, device, physics_v4=physics_v4)
         seed_everything(scenario.seed)
         deterministic_output = model(batch, masks, sample_from_prior=True, deterministic=True)
         predicted_window = (
-            deterministic_output.action[0].float().cpu().numpy()
+            _predicted_action(deterministic_output, scenario.task, physics_v4)[0]
+            .float()
+            .cpu()
+            .numpy()
             * normalization["action_std"]
             + normalization["action_mean"]
         )
         prior_mean_window = np.where(mask, predicted_window, source_window)
 
-        stochastic_windows = []
-        for sample_index in range(latent_samples):
-            seed_everything(scenario.seed + sample_index + 1)
-            sampled = model(batch, masks, sample_from_prior=True, deterministic=False)
-            sampled_action = (
-                sampled.action[0].float().cpu().numpy()
-                * normalization["action_std"]
-                + normalization["action_mean"]
+        dedicated_inverse = physics_v4 and scenario.task == "inverse"
+        if dedicated_inverse:
+            # The local inverse head is deterministic.  It is not an N-sample
+            # latent search and never observes the held-out Action for selection.
+            completed_window = prior_mean_window
+            selected_candidate_index = -1
+            candidate_errors = np.empty((0,), dtype=np.float32)
+            uncertainty = np.zeros_like(source_window)
+        else:
+            stochastic_windows = []
+            for sample_index in range(latent_samples):
+                seed_everything(scenario.seed + sample_index + 1)
+                sampled = model(batch, masks, sample_from_prior=True, deterministic=False)
+                sampled_action = (
+                    _predicted_action(sampled, scenario.task, physics_v4)[0]
+                    .float()
+                    .cpu()
+                    .numpy()
+                    * normalization["action_std"]
+                    + normalization["action_mean"]
+                )
+                stochastic_windows.append(np.where(mask, sampled_action, source_window))
+            candidate_windows = np.stack(stochastic_windows)
+            uncertainty = candidate_windows.std(axis=0)
+            completed_window, selected_candidate_index, candidate_errors = (
+                select_latent_action_window(
+                    prior_mean_window,
+                    candidate_windows,
+                    source_window,
+                    mask,
+                    latent_mode,
+                )
             )
-            stochastic_windows.append(np.where(mask, sampled_action, source_window))
-        candidate_windows = np.stack(stochastic_windows)
-        uncertainty = candidate_windows.std(axis=0)
-        completed_window, selected_candidate_index, candidate_errors = (
-            select_latent_action_window(
-                prior_mean_window,
-                candidate_windows,
-                source_window,
-                mask,
-                latent_mode,
-            )
-        )
         prior_mean_rmse = float(
             np.sqrt(np.mean(np.square(prior_mean_window[mask] - source_window[mask])))
         )
@@ -584,10 +814,14 @@ def complete(
         hold, linear = masked_baselines(source_window, mask)
         offline_metrics[scenario.name] = {
             "scenario": scenario.to_dict(),
-            "latent_selection_mode": latent_mode,
-            "latent_candidate_seeds": [
-                scenario.seed + sample_index + 1 for sample_index in range(latent_samples)
-            ],
+            "prediction_head": "inverse_action" if dedicated_inverse else "reconstruction_action",
+            "latent_selection_mode": "deterministic_inverse" if dedicated_inverse else latent_mode,
+            "effective_latent_candidate_count": 1 if dedicated_inverse else latent_samples,
+            "latent_candidate_seeds": (
+                []
+                if dedicated_inverse
+                else [scenario.seed + sample_index + 1 for sample_index in range(latent_samples)]
+            ),
             "selected_candidate_index": selected_candidate_index,
             "candidate_masked_rmse_rad": candidate_errors.tolist(),
             "selected_candidate_pre_mapping_rmse_rad": (
@@ -616,7 +850,9 @@ def complete(
         uncertainty_values.append(uncertainty_full)
         saturation_values.append(saturated)
         selected_candidate_indices.append(selected_candidate_index)
-        candidate_error_values.append(candidate_errors)
+        padded_errors = np.full((latent_samples,), -1.0, dtype=np.float32)
+        padded_errors[: candidate_errors.size] = candidate_errors
+        candidate_error_values.append(padded_errors)
 
     relative_array = np.stack(completed_relative)
     raw_array = np.stack(completed_raw)
@@ -659,10 +895,12 @@ def complete(
         scenarios,
         custom_scenarios=scenario_path is not None,
         seed=seed,
+        physics_v4=physics_v4,
     )
 
     aggregate = {
-        "schema_version": "sonic_action_completion_metrics_v1",
+        "schema_version": "sonic_action_completion_metrics_v2",
+        "representation": "physics_v4" if physics_v4 else "legacy_v1",
         "motion_key": request["motion_key"],
         "window_start": window_start,
         "window_length": DEFAULT_WINDOW_TRANSITIONS,
@@ -670,10 +908,13 @@ def complete(
         "latent_mode": latent_mode,
         "latent_samples_for_uncertainty": latent_samples,
         "latent_candidate_count": latent_samples,
-        "oracle_uses_ground_truth_action": latent_mode == "oracle_best_of_n",
+        "oracle_uses_ground_truth_action": latent_mode == "oracle_best_of_n" and any(
+            not (physics_v4 and scenario.task == "inverse") for scenario in scenarios
+        ),
         "multi_position_scan_latent_mode": "prior_mean",
         "relative_raw_processed_round_trip_max_abs": mapping_round_trip_max,
         "relative_raw_processed_round_trip_threshold": 1.0e-6,
+        "source_action_mapping_max_abs": source.get("source_action_mapping_max_abs"),
         "visible_action_max_abs_change": 0.0,
         "scenario_count": len(scenarios),
         "by_distribution_status": dict(Counter(scenario.distribution_status for scenario in scenarios)),
@@ -682,7 +923,8 @@ def complete(
     }
     atomic_write_json(output_run / "manifests/action_completion_metrics.json", aggregate)
     replay_request = {
-        "schema_version": "sonic_action_replay_request_v1",
+        "schema_version": "sonic_action_replay_request_v2",
+        "representation": "physics_v4" if physics_v4 else "legacy_v1",
         "motion_key": request["motion_key"],
         "motion_file": request["motion_file"],
         "motion_file_sha256": request["motion_file_sha256"],
@@ -721,13 +963,18 @@ def _trajectory_metrics(reference: dict[str, np.ndarray], value: dict[str, np.nd
     velocity_difference = value["joint_vel"][:length] - reference["joint_vel"][:length]
     root_difference = value["root_pos"][:length] - reference["root_pos"][:length]
     root_angle = _quaternion_error_degrees(reference["root_quat"][:length], value["root_quat"][:length])
-    gravity_ref = reference["physical_state"][:length, 61:64]
-    gravity_value = value["physical_state"][:length, 61:64]
+    state_dim = reference["physical_state"].shape[-1]
+    if value["physical_state"].shape[-1] != state_dim or state_dim not in (64, 70):
+        raise ValueError("replay physical State representations do not match")
+    gravity_slice = slice(64, 67) if state_dim == 70 else slice(61, 64)
+    gravity_ref = reference["physical_state"][:length, gravity_slice]
+    gravity_value = value["physical_state"][:length, gravity_slice]
     gravity_dot = np.sum(gravity_ref * gravity_value, axis=-1).clip(-1.0, 1.0)
     gravity_angle = np.degrees(np.arccos(gravity_dot))
     body_difference = value["body_pos"][:length] - reference["body_pos"][:length]
-    return {
+    result = {
         "aligned_state_count": length,
+        "physical_state_dimension": state_dim,
         "joint_position_rmse_rad": float(np.sqrt(np.mean(np.square(joint_difference)))),
         "joint_velocity_rmse_rad_s": float(np.sqrt(np.mean(np.square(velocity_difference)))),
         "root_position_rmse_m": float(np.sqrt(np.mean(np.square(root_difference)))),
@@ -738,18 +985,50 @@ def _trajectory_metrics(reference: dict[str, np.ndarray], value: dict[str, np.nd
         "body_mpjpe_m": float(np.mean(np.linalg.norm(body_difference, axis=-1))),
         "minimum_root_height_m": float(np.min(value["root_pos"][:length, 2])),
     }
+    if state_dim == 70:
+        base_linear_difference = (
+            value["physical_state"][:length, 58:61]
+            - reference["physical_state"][:length, 58:61]
+        )
+        base_angular_difference = (
+            value["physical_state"][:length, 61:64]
+            - reference["physical_state"][:length, 61:64]
+        )
+        height_difference = (
+            value["physical_state"][:length, 67]
+            - reference["physical_state"][:length, 67]
+        )
+        reference_contact = reference["physical_state"][:length, 68:70] >= 0.5
+        value_contact = value["physical_state"][:length, 68:70] >= 0.5
+        result.update(
+            {
+                "base_linear_velocity_rmse_m_s": float(
+                    np.sqrt(np.mean(np.square(base_linear_difference)))
+                ),
+                "base_angular_velocity_rmse_rad_s": float(
+                    np.sqrt(np.mean(np.square(base_angular_difference)))
+                ),
+                "base_height_rmse_m": float(np.sqrt(np.mean(np.square(height_difference)))),
+                "foot_contact_accuracy": float(np.mean(reference_contact == value_contact)),
+            }
+        )
+    return result
 
 
 def _load_replay_trajectory(path: Path) -> dict[str, np.ndarray]:
     with np.load(path, allow_pickle=False) as values:
-        names = ("joint_pos", "joint_vel", "root_pos", "root_quat", "body_pos", "physical_state")
+        names = ("joint_pos", "joint_vel", "root_pos", "root_quat", "body_pos")
         result = {name: np.asarray(values[name], dtype=np.float32) for name in names}
+        state_name = "physics_state_v3" if "physics_state_v3" in values else "physical_state"
+        result["physical_state"] = np.asarray(values[state_name], dtype=np.float32)
     if not all(np.isfinite(value).all() for value in result.values()):
         raise ValueError(f"trajectory contains NaN or Inf: {path}")
     return result
 
 
-def _load_runtime_mapping(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray]:
+def _load_runtime_mapping(
+    path: Path,
+) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
     with np.load(path, allow_pickle=False) as values:
         mapping = {
             name: np.asarray(values[name], dtype=np.float32)
@@ -762,7 +1041,44 @@ def _load_runtime_mapping(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray
             )
         }
         raw_action = np.asarray(values["raw_action"], dtype=np.float32)
-    return mapping, raw_action
+        context: dict[str, Any] = {}
+        for name in (
+            "nominal_default_joint_pos",
+            "joint_robot_information",
+            "global_robot_information",
+            "dynamics_context",
+        ):
+            if name in values:
+                context[name] = np.asarray(values[name], dtype=np.float32)
+        for name in ("joint_actuator_type_names", "nominal_source", "replay_schema_version"):
+            if name in values:
+                raw_value = values[name].tolist()
+                context[name] = (
+                    tuple(str(value) for value in raw_value)
+                    if isinstance(raw_value, list)
+                    else str(raw_value)
+                )
+    return mapping, raw_action, context
+
+
+def _runtime_context_max_abs(
+    reference: dict[str, Any], value: dict[str, Any]
+) -> float:
+    if set(reference) != set(value):
+        return float("inf")
+    maximum = 0.0
+    for name, reference_value in reference.items():
+        value_value = value[name]
+        if name in {"joint_actuator_type_names", "nominal_source", "replay_schema_version"}:
+            if reference_value != value_value:
+                return float("inf")
+            continue
+        reference_array = np.asarray(reference_value)
+        value_array = np.asarray(value_value)
+        if reference_array.shape != value_array.shape:
+            return float("inf")
+        maximum = max(maximum, float(np.max(np.abs(reference_array - value_array))))
+    return maximum
 
 
 def _mapping_max_abs(reference: dict[str, np.ndarray], value: dict[str, np.ndarray]) -> float:
@@ -849,18 +1165,26 @@ def physics_metrics(output_run: Path) -> dict[str, Any]:
         _load_replay_trajectory(replay_dir / f"{index:06d}.replay.npz")
         for index in range(request["num_envs"])
     ]
-    source_mapping, source_raw = _load_runtime_mapping(output_run / SOURCE_RELATIVE_PATH)
+    source_mapping, source_raw, source_context = _load_runtime_mapping(
+        output_run / SOURCE_RELATIVE_PATH
+    )
     replay_mapping_raw = [
         _load_runtime_mapping(replay_dir / f"{index:06d}.replay.npz")
         for index in range(request["num_envs"])
     ]
     mapping_errors = [
-        _mapping_max_abs(source_mapping, mapping) for mapping, _ in replay_mapping_raw
+        _mapping_max_abs(source_mapping, mapping)
+        for mapping, _, _ in replay_mapping_raw
     ]
     mapping_pass = max(mapping_errors) <= 1.0e-6
+    context_errors = [
+        _runtime_context_max_abs(source_context, context)
+        for _, _, context in replay_mapping_raw
+    ]
+    context_pass = max(context_errors) <= 1.0e-6
     with np.load(output_run / REPLAY_ACTIONS_RELATIVE_PATH, allow_pickle=False) as expected_values:
         expected_raw = np.asarray(expected_values["raw_actions"], dtype=np.float32)
-    executed_raw = np.stack([raw for _, raw in replay_mapping_raw], axis=1)
+    executed_raw = np.stack([raw for _, raw, _ in replay_mapping_raw], axis=1)
     if expected_raw.shape != executed_raw.shape:
         raise ValueError(
             f"planned/executed raw Action shapes differ: {expected_raw.shape} vs {executed_raw.shape}"
@@ -947,12 +1271,19 @@ def physics_metrics(output_run: Path) -> dict[str, Any]:
         for name, values in offline["scenarios"].items()
     }
     report = {
-        "schema_version": "sonic_action_replay_physics_metrics_v1",
+        "schema_version": "sonic_action_replay_physics_metrics_v2",
+        "representation": request.get("representation", "legacy_v1"),
         "replay_execution_mode": replay_execution_mode,
         "latent_mode": offline["latent_mode"],
         "latent_candidate_count": offline["latent_candidate_count"],
         "oracle_uses_ground_truth_action": offline["oracle_uses_ground_truth_action"],
-        "passed": fidelity_pass and pre_mask_pass and mapping_pass and action_execution_pass,
+        "passed": (
+            fidelity_pass
+            and pre_mask_pass
+            and mapping_pass
+            and context_pass
+            and action_execution_pass
+        ),
         "source_replay_fidelity": source_fidelity,
         "source_replay_fidelity_thresholds": {
             "joint_position_rmse_rad": 1.0e-3,
@@ -971,6 +1302,9 @@ def physics_metrics(output_run: Path) -> dict[str, Any]:
         "runtime_mapping_max_abs_by_environment": mapping_errors,
         "runtime_mapping_identity_pass": mapping_pass,
         "runtime_mapping_max_abs_threshold": 1.0e-6,
+        "runtime_context_max_abs_by_environment": context_errors,
+        "runtime_context_identity_pass": context_pass,
+        "runtime_context_max_abs_threshold": 1.0e-6,
         "planned_executed_raw_action_max_abs": executed_action_error,
         "planned_executed_raw_action_pass": action_execution_pass,
         "model_quality": quality,
