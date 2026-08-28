@@ -9,7 +9,8 @@ def main() -> int:
     parser.add_argument(
         "command",
         choices=(
-            "build-index", "build-physics-index", "smoke-train", "train", "evaluate", "sample"
+            "build-index", "build-physics-index", "build-overfit-subset",
+            "smoke-train", "train", "evaluate", "sample", "summarize-overfit"
         ),
     )
     args, remainder = parser.parse_known_args()
@@ -18,6 +19,10 @@ def main() -> int:
         from .indexer import main as command_main
     elif args.command == "build-physics-index":
         from .physics_indexer import main as command_main
+    elif args.command == "build-overfit-subset":
+        from .overfit_subset import main as command_main
+    elif args.command == "summarize-overfit":
+        from .overfit_report import main as command_main
     elif args.command in {"smoke-train", "train"}:
         from .trainer import main as command_main
 

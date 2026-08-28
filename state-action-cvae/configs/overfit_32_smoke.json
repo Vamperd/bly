@@ -1,0 +1,35 @@
+{
+  "extends": "overfit_32_compact_capacity.json",
+  "data": {"num_workers": 0},
+  "model": {
+    "profile": "smoke",
+    "d_model": 96,
+    "encoder_layers": 2,
+    "decoder_layers": 2,
+    "heads": 4,
+    "ffn_dim": 256,
+    "latent_dim": 24,
+    "joint_width": 64,
+    "expected_parameter_count": 710536
+  },
+  "training": {
+    "micro_batch": 2,
+    "gradient_accumulation": 1,
+    "max_optimizer_steps": 20,
+    "minimum_optimizer_steps": 10,
+    "learning_rate": 0.0005,
+    "warmup_steps": 2,
+    "scheduler": {"kind": "warmup_cosine", "warmup_steps": 2, "min_lr_ratio": 0.01},
+    "validation_interval": 10,
+    "validation_max_batches": 12,
+    "overfit_consecutive_validations": 2,
+    "overfit_thresholds": {
+      "forward_one_normalized_rmse": 100.0,
+      "action_inverse_local_normalized_rmse": 100.0,
+      "arbitrary_state_normalized_rmse": 100.0,
+      "action_completion_macro_normalized_rmse": 100.0,
+      "history_action_normalized_rmse": 100.0,
+      "forward_rollout_8_normalized_rmse": 100.0
+    }
+  }
+}

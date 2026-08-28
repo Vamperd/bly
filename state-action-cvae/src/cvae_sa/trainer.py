@@ -17,6 +17,8 @@ from .dataset import StateActionWindowDataset, worker_seed
 from .losses import compute_loss
 from .masking import MaskGenerator
 from .models import build_model, parameter_count
+from .overfit_diagnostics import evaluate_input_sensitivity
+from .overfit_visualization import write_training_svg
 from .util import (
     atomic_torch_save,
     atomic_write_json,
@@ -25,6 +27,48 @@ from .util import (
     load_config,
     seed_everything,
 )
+
+
+DEFAULT_OVERFIT_THRESHOLDS = {
+    "forward_one_normalized_rmse": 0.05,
+    "action_inverse_local_normalized_rmse": 0.05,
+    "arbitrary_state_normalized_rmse": 0.05,
+    "action_completion_macro_normalized_rmse": 0.05,
+    "history_action_normalized_rmse": 0.08,
+    "forward_rollout_8_normalized_rmse": 0.10,
+}
+
+
+def warmup_cosine_factor(
+    step: int, warmup_steps: int, max_steps: int, min_lr_ratio: float = 0.0
+) -> float:
+    if not 0.0 <= min_lr_ratio <= 1.0:
+        raise ValueError("min_lr_ratio must be in [0, 1]")
+    if step < warmup_steps:
+        return max(step, 1) / max(warmup_steps, 1)
+    progress = min(max((step - warmup_steps) / max(max_steps - warmup_steps, 1), 0.0), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+
+def overfit_gate(
+    metrics: dict[str, Any], thresholds: dict[str, float] | None = None
+) -> dict[str, Any]:
+    limits = dict(DEFAULT_OVERFIT_THRESHOLDS if thresholds is None else thresholds)
+    missing = sorted(set(DEFAULT_OVERFIT_THRESHOLDS) - set(limits))
+    if missing:
+        raise ValueError(f"overfit thresholds are missing metrics: {missing}")
+    ratios = {
+        name: float(metrics.get(name, math.inf)) / max(float(limit), 1e-12)
+        for name, limit in limits.items()
+    }
+    score = max(ratios.values(), default=math.inf)
+    return {
+        "overfit_pass": bool(math.isfinite(score) and score <= 1.0),
+        "overfit_score": float(score),
+        "overfit_thresholds": limits,
+        "overfit_ratios": ratios,
+    }
 
 
 def _device_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -367,7 +411,7 @@ def load_weight_only_initialization(
     checkpoint_path = checkpoint_path.expanduser().resolve()
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if checkpoint.get("format_version") != "sonic_state_action_cvae_checkpoint_v2":
-        raise ValueError("Action fine-tune requires a PhysicsTransformer v2 checkpoint")
+        raise ValueError("weights-only initialization requires a PhysicsTransformer v2 checkpoint")
     if checkpoint.get("dataset_manifest_sha256") != dataset_manifest_hash:
         raise ValueError("parent checkpoint dataset manifest hash does not match")
     parent_model = checkpoint.get("config", {}).get("model", {})
@@ -376,7 +420,7 @@ def load_weight_only_initialization(
         "latent_dim", "joint_width", "state_dim", "joint_robot_info_dim",
         "global_robot_info_dim", "actuator_type_count", "context_mode",
         "include_previous_action", "robot_info_dim", "dynamics_context_dim",
-        "auxiliary_dim", "token_layout",
+        "auxiliary_dim", "token_layout", "robot_conditioning",
     )
     mismatches = {
         key: (parent_model.get(key), model_config.get(key))
@@ -449,6 +493,7 @@ def train(
     smoke: bool = False,
     init_checkpoint: Path | None = None,
     fine_tune_mode: str | None = None,
+    overfit_phase: str | None = None,
 ) -> dict[str, Any]:
     dataset_run = dataset_run.expanduser().resolve()
     output_run = output_run.expanduser().resolve()
@@ -458,13 +503,19 @@ def train(
     seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_config = config["data"]
+    if overfit_phase not in {None, "capacity", "full"}:
+        raise ValueError(f"unsupported overfit phase {overfit_phase!r}")
+    if fine_tune_mode is not None and overfit_phase is not None:
+        raise ValueError("Action fine-tune and overfit modes are mutually exclusive")
+    train_split = str(data_config.get("train_split", "train"))
+    validation_split = str(data_config.get("validation_split", "validation"))
     train_dataset = StateActionWindowDataset(
         dataset_run,
-        "train",
+        train_split,
         int(data_config["window_transitions"]),
         int(data_config["validation_stride"]),
         data_config.get("max_train_episodes"),
-        random_crop=True,
+        random_crop=bool(data_config.get("random_crop", True)),
         action_energy_crop_probability=float(
             data_config.get("action_energy_crop_probability", 0.0)
         ),
@@ -474,7 +525,7 @@ def train(
     )
     validation_dataset = StateActionWindowDataset(
         dataset_run,
-        "validation",
+        validation_split,
         int(data_config["window_transitions"]),
         int(data_config["validation_stride"]),
         data_config.get("max_validation_episodes"),
@@ -503,7 +554,9 @@ def train(
     training = config["training"]
     generator = torch.Generator().manual_seed(seed)
     sampler = None
-    if config["model"]["kind"] == "physics_transformer":
+    if config["model"]["kind"] == "physics_transformer" and bool(
+        data_config.get("status_balancing", True)
+    ):
         statuses = [train_dataset.episodes[ref.episode_index]["status"] for ref in train_dataset.refs]
         failed = sum(status != "completed" for status in statuses)
         completed = len(statuses) - failed
@@ -541,6 +594,25 @@ def train(
     model = build_model(config["model"]).to(device)
     dataset_manifest = dataset_run / "manifests" / "dataset_manifest.json"
     dataset_hash = file_sha256(dataset_manifest)
+    dataset_metadata = json.loads(dataset_manifest.read_text(encoding="utf-8"))
+    if overfit_phase is not None:
+        if dataset_metadata.get("purpose") != "physics_state_action_32_motion_memorization":
+            raise ValueError("overfit training requires a dedicated memorization subset")
+        if (
+            int(dataset_metadata.get("motion_count", -1)) != 32
+            or int(dataset_metadata.get("canonical_episode_count", -1)) != 256
+        ):
+            raise ValueError("overfit training requires exactly 32 motions and 256 episodes")
+        if validation_split != train_split or bool(data_config.get("random_crop", True)):
+            raise ValueError("overfit training requires same-split evaluation and fixed windows")
+        config["overfit_phase"] = overfit_phase
+    actual_parameter_count = parameter_count(model)
+    expected_parameter_count = config["model"].get("expected_parameter_count")
+    if expected_parameter_count is not None and actual_parameter_count != int(expected_parameter_count):
+        raise ValueError(
+            f"model parameter count mismatch: expected {expected_parameter_count}, "
+            f"found {actual_parameter_count}"
+        )
     provenance: dict[str, Any] | None = None
     if fine_tune_mode is not None:
         if fine_tune_mode != "action":
@@ -552,8 +624,17 @@ def train(
         provenance = load_weight_only_initialization(
             model, init_checkpoint, dataset_hash, config["model"]
         )
+    elif overfit_phase == "full":
+        if init_checkpoint is None:
+            raise ValueError("full overfit phase requires --init-checkpoint")
+        provenance = load_weight_only_initialization(
+            model, init_checkpoint, dataset_hash, config["model"]
+        )
+        provenance["overfit_phase"] = "full"
     elif init_checkpoint is not None:
-        raise ValueError("--init-checkpoint is accepted only with --fine-tune-mode")
+        raise ValueError(
+            "--init-checkpoint is accepted only with Action fine-tune or full overfit phase"
+        )
     reference_config = dict(config["model"])
     if config["model"]["kind"] == "physics_transformer":
         reference_config["kind"] = None
@@ -581,13 +662,15 @@ def train(
             weight_decay=float(training["weight_decay"]),
         )
     max_steps = int(training["max_optimizer_steps"])
-    warmup = int(training["warmup_steps"])
+    scheduler_config = training.get("scheduler", {})
+    scheduler_kind = str(scheduler_config.get("kind", "warmup_cosine"))
+    if scheduler_kind != "warmup_cosine":
+        raise ValueError(f"unsupported scheduler kind {scheduler_kind!r}")
+    warmup = int(scheduler_config.get("warmup_steps", training["warmup_steps"]))
+    min_lr_ratio = float(scheduler_config.get("min_lr_ratio", 0.0))
 
     def lr_factor(step: int) -> float:
-        if step < warmup:
-            return max(step, 1) / max(warmup, 1)
-        progress = (step - warmup) / max(max_steps - warmup, 1)
-        return 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+        return warmup_cosine_factor(step, warmup, max_steps, min_lr_ratio)
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
     scaler = torch.amp.GradScaler(
@@ -628,12 +711,16 @@ def train(
             "dataset_run": str(dataset_run),
             "dataset_manifest_sha256": dataset_hash,
             "fine_tune_mode": fine_tune_mode,
+            "overfit_phase": overfit_phase,
+            "model_profile": config["model"].get("profile"),
+            "fixed_window_count": len(train_dataset),
             "optimizer_parameter_groups": optimizer_groups,
             "initialization": provenance,
         },
     )
     if provenance is not None:
-        atomic_write_json(output_run / "manifests" / "fine_tune_provenance.json", provenance)
+        provenance_name = "overfit_provenance.json" if overfit_phase else "fine_tune_provenance.json"
+        atomic_write_json(output_run / "manifests" / provenance_name, provenance)
     metrics_path = output_run / "logs" / "metrics.jsonl"
     stream = _infinite(train_loader)
     accumulation = int(training["gradient_accumulation"])
@@ -644,6 +731,13 @@ def train(
     validations_without_improvement = 0
     losses: list[float] = []
     validation_scores: list[float] = []
+    overfit_pass_streak = 0
+    overfit_consecutive_pass = False
+    latent_mode = str(training.get("latent_mode", "sample"))
+    if latent_mode not in {"sample", "posterior_mean"}:
+        raise ValueError(f"unsupported latent mode {latent_mode!r}")
+    fixed_window_count = len(train_dataset)
+    samples_per_step = int(training["micro_batch"]) * accumulation
     model.train()
     optimizer.zero_grad(set_to_none=True)
     for optimizer_step in range(1, max_steps + 1):
@@ -656,7 +750,7 @@ def train(
                 optimizer_step / max(int(training["kl_warmup_steps"]), 1), 1.0
             )
             with _autocast(device, str(training["amp"])):
-                output = model(batch, masks)
+                output = model(batch, masks, deterministic=latent_mode == "posterior_mean")
                 loss = compute_loss(output, batch, masks, training, beta)
                 scaled_loss = loss.total / accumulation
             scaler.scale(scaled_loss).backward()
@@ -677,6 +771,9 @@ def train(
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "phase": "train",
             "optimizer_step": optimizer_step,
+            "samples_seen": optimizer_step * samples_per_step,
+            "fixed_window_count": fixed_window_count,
+            "effective_epoch": optimizer_step * samples_per_step / fixed_window_count,
             "learning_rate": optimizer.param_groups[0]["lr"],
             "learning_rates": {
                 str(group.get("group_name", index)): group["lr"]
@@ -705,7 +802,7 @@ def train(
                         model, validation_loader, masker, device,
                         str(training["amp"]), int(training["validation_max_batches"]),
                     )
-                    if fine_tune_mode == "action"
+                    if fine_tune_mode == "action" or overfit_phase is not None
                     else validate(
                         model, validation_loader, masker, device,
                         str(training["amp"]), int(training["validation_max_batches"]),
@@ -731,6 +828,14 @@ def train(
                 )
                 validation["state_guard_pass"] = state_guard_pass
                 validation["state_guard_ratios"] = state_guard_ratios
+            if overfit_phase is not None:
+                gate = overfit_gate(validation, training.get("overfit_thresholds"))
+                validation.update(gate)
+                overfit_pass_streak = overfit_pass_streak + 1 if gate["overfit_pass"] else 0
+                validation["overfit_pass_streak"] = overfit_pass_streak
+                score = float(gate["overfit_score"])
+            else:
+                score = float(validation["selection_score"])
             validation_record = {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "phase": "validation",
@@ -739,7 +844,6 @@ def train(
             }
             with metrics_path.open("a", encoding="utf-8") as metrics_stream:
                 metrics_stream.write(json.dumps(validation_record, ensure_ascii=False) + "\n")
-            score = validation["selection_score"]
             validation_scores.append(float(score))
             checkpoint = _checkpoint_state(
                 model, optimizer, scheduler, scaler, config, optimizer_step,
@@ -772,7 +876,18 @@ def train(
                     best_score, dataset_hash, provenance, masker.curriculum_stage(),
                 ),
             )
-            if validations_without_improvement >= int(training["early_stopping_patience"]):
+            if overfit_phase is not None:
+                write_training_svg(
+                    metrics_path,
+                    output_run / "videos/training_curves.svg",
+                    training.get("overfit_thresholds", DEFAULT_OVERFIT_THRESHOLDS),
+                )
+                minimum_steps = int(training.get("minimum_optimizer_steps", 0))
+                required_streak = int(training.get("overfit_consecutive_validations", 2))
+                if optimizer_step >= minimum_steps and overfit_pass_streak >= required_streak:
+                    overfit_consecutive_pass = True
+                    break
+            elif validations_without_improvement >= int(training["early_stopping_patience"]):
                 break
 
     best_path = output_run / "checkpoints" / "best.pt"
@@ -809,7 +924,7 @@ def train(
     smoke_decreased = True
     train_window_decreased = True
     validation_score_improved = True
-    if smoke:
+    if smoke and overfit_phase is None:
         span = min(20, len(losses) // 2)
         train_window_decreased = span > 0 and float(np.mean(losses[-span:])) < float(
             np.mean(losses[:span])
@@ -860,6 +975,51 @@ def train(
         "best_checkpoint": str(best_path),
         "last_checkpoint": str(output_run / "checkpoints" / "last.pt"),
     }
+    if overfit_phase is not None:
+        summary.update({
+            "passed": bool(overfit_consecutive_pass),
+            "overfit_phase": overfit_phase,
+            "model_profile": config["model"].get("profile", "unspecified"),
+            "seed": seed,
+            "parameter_count": actual_parameter_count,
+            "best_overfit_score": best_score,
+            "overfit_consecutive_pass": overfit_consecutive_pass,
+            "required_consecutive_validations": int(
+                training.get("overfit_consecutive_validations", 2)
+            ),
+            "fixed_window_count": fixed_window_count,
+            "samples_seen": len(losses) * samples_per_step,
+            "effective_epochs": len(losses) * samples_per_step / fixed_window_count,
+            "memorization_benchmark": True,
+            "generalization_claim_allowed": False,
+            "scheduler": {
+                "kind": scheduler_kind,
+                "warmup_steps": warmup,
+                "min_lr_ratio": min_lr_ratio,
+            },
+        })
+        write_training_svg(
+            metrics_path,
+            output_run / "videos/training_curves.svg",
+            training.get("overfit_thresholds", DEFAULT_OVERFIT_THRESHOLDS),
+        )
+        if overfit_phase == "full" and overfit_consecutive_pass:
+            model.load_state_dict(reopened["model"], strict=True)
+            validation_devices = (
+                [device.index if device.index is not None else torch.cuda.current_device()]
+                if device.type == "cuda" else []
+            )
+            with torch.random.fork_rng(devices=validation_devices):
+                torch.manual_seed(seed + 120_001)
+                summary["input_sensitivity"] = evaluate_input_sensitivity(
+                    model,
+                    validation_loader,
+                    masker,
+                    device,
+                    list(dataset_metadata["joint_names"]),
+                    output_run,
+                    int(training.get("sensitivity_max_batches", 16)),
+                )
     if fine_tune_mode == "action" and not smoke:
         assert parent_validation is not None and best_validation is not None
         improvement = {
@@ -884,10 +1044,19 @@ def train(
     atomic_write_json(output_run / "manifests" / "training_summary.json", summary)
     if fine_tune_mode == "action" and not smoke and not summary["action_quality_pass"]:
         raise RuntimeError("Action fine-tune did not satisfy all offline improvement gates")
+    if overfit_phase is not None and not summary["passed"]:
+        train_dataset.close()
+        validation_dataset.close()
+        raise RuntimeError(
+            "overfit training did not satisfy the strict gate in consecutive validations"
+        )
     marker_name = (
         "cvae_action_finetune_smoke.ok" if smoke else "cvae_action_finetune.ok"
     ) if fine_tune_mode == "action" else (
-        "cvae_smoke_train.ok" if smoke else "cvae_train.ok"
+        ("cvae_overfit_smoke.ok" if smoke else f"cvae_overfit_{overfit_phase}.ok")
+        if overfit_phase is not None else (
+            "cvae_smoke_train.ok" if smoke else "cvae_train.ok"
+        )
     )
     atomic_write_text(output_run / "markers" / marker_name, "PASS\n")
     train_dataset.close()
@@ -906,6 +1075,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--init-checkpoint", type=Path)
     parser.add_argument("--fine-tune-mode", choices=("action",))
+    parser.add_argument("--overfit-phase", choices=("capacity", "full"))
     parser.add_argument("--context-mode", choices=("hidden", "oracle", "explicit"))
     parser.set_defaults(project_root=project_root)
     return parser.parse_args()
@@ -929,6 +1099,7 @@ def main() -> int:
         smoke=args.smoke,
         init_checkpoint=args.init_checkpoint,
         fine_tune_mode=args.fine_tune_mode,
+        overfit_phase=args.overfit_phase,
     )
     print("CVAE training: PASS")
     print(json.dumps(summary, ensure_ascii=False, indent=2))

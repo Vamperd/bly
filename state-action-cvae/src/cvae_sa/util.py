@@ -77,6 +77,19 @@ def deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 def load_config(default_path: Path, override_path: Path | None = None) -> dict[str, Any]:
     config = load_json(default_path)
     if override_path is not None and override_path.resolve() != default_path.resolve():
-        config = deep_update(config, load_json(override_path))
+        config = deep_update(config, _load_config_override(override_path.resolve(), set()))
     return config
 
+
+def _load_config_override(path: Path, seen: set[Path]) -> dict[str, Any]:
+    if path in seen:
+        raise ValueError(f"cyclic config extends chain at {path}")
+    value = load_json(path)
+    parent = value.pop("extends", None)
+    if parent is None:
+        return value
+    parent_path = (path.parent / str(parent)).resolve()
+    if not parent_path.is_file():
+        raise FileNotFoundError(parent_path)
+    base = _load_config_override(parent_path, {*seen, path})
+    return deep_update(base, value)

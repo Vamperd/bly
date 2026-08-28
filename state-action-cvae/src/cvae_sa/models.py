@@ -440,14 +440,25 @@ class PhysicsTransformerCVAE(nn.Module):
         self.latent_dim = int(config["latent_dim"])
         self.auxiliary_dim = int(config.get("auxiliary_dim", 35))
         self.context_mode = str(config.get("context_mode", "hidden"))
+        self.robot_conditioning = str(config.get("robot_conditioning", "full"))
+        if self.robot_conditioning not in {"full", "joint_id_only"}:
+            raise ValueError(
+                f"unsupported robot_conditioning {self.robot_conditioning!r}"
+            )
         self.dynamics_context_dim = int(config.get("dynamics_context_dim", 0))
         joint_width = int(config.get("joint_width", 128))
         dropout = float(config["dropout"])
         actuator_types = int(config.get("actuator_type_count", 1))
 
         self.joint_id = nn.Embedding(ACTION_DIM, joint_width)
-        self.actuator_type = nn.Embedding(max(1, actuator_types), joint_width)
-        self.robot_joint = MLPTokenizer(int(config.get("joint_robot_info_dim", 11)), joint_width)
+        self.actuator_type = (
+            nn.Embedding(max(1, actuator_types), joint_width)
+            if self.robot_conditioning == "full" else None
+        )
+        self.robot_joint = (
+            MLPTokenizer(int(config.get("joint_robot_info_dim", 11)), joint_width)
+            if self.robot_conditioning == "full" else None
+        )
         robot_layer = nn.TransformerEncoderLayer(
             d_model=joint_width,
             nhead=4,
@@ -458,7 +469,10 @@ class PhysicsTransformerCVAE(nn.Module):
             norm_first=True,
         )
         self.robot_encoder = nn.TransformerEncoder(robot_layer, num_layers=2)
-        self.global_robot = MLPTokenizer(int(config.get("global_robot_info_dim", 9)), self.width)
+        self.global_robot = (
+            MLPTokenizer(int(config.get("global_robot_info_dim", 9)), self.width)
+            if self.robot_conditioning == "full" else None
+        )
         self.robot_pool = nn.Linear(joint_width, self.width)
         self.oracle_context = (
             MLPTokenizer(self.dynamics_context_dim, self.width)
@@ -527,13 +541,19 @@ class PhysicsTransformerCVAE(nn.Module):
 
     def _robot_memory(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         joint = batch["joint_robot_information"]
-        actuator = batch["joint_actuator_type"].long().clamp(0, self.actuator_type.num_embeddings - 1)
         ids = torch.arange(ACTION_DIM, device=joint.device)
-        memory = self.robot_joint(joint) + self.joint_id(ids)[None] + self.actuator_type(actuator)
+        memory = self.joint_id(ids)[None].expand(joint.shape[0], -1, -1)
+        if self.robot_conditioning == "full":
+            assert self.robot_joint is not None
+            assert self.actuator_type is not None
+            actuator = batch["joint_actuator_type"].long().clamp(
+                0, self.actuator_type.num_embeddings - 1
+            )
+            memory = memory + self.robot_joint(joint) + self.actuator_type(actuator)
         memory = self.robot_encoder(memory)
-        summary = self.robot_pool(memory.mean(dim=1)) + self.global_robot(
-            batch["global_robot_information"]
-        )
+        summary = self.robot_pool(memory.mean(dim=1))
+        if self.global_robot is not None:
+            summary = summary + self.global_robot(batch["global_robot_information"])
         if self.oracle_context is not None:
             summary = summary + self.oracle_context(batch["dynamics_context"])
         return memory, summary

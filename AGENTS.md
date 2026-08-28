@@ -1,177 +1,321 @@
-# SONIC 复现与 State–Action 数据研究：代理交接说明
+# SONIC Physics State–Action 研究：当前代理交接说明
 
-本文档是本工作区的唯一代理交接入口。后续 Codex 会话开始工作前必须完整阅读本文档；事实、已验证结果与待办不得混淆。
+本文档是 `bly` 工作区的首要交接入口。后续会话开始任何工作前必须完整阅读；其中“已验证事实”“代码已实现但待执行”“历史兼容路径”不可混为一谈。若实际 Git、文件或 Ubuntu 日志与本文冲突，以只读检查得到的当前事实为准，并更新本文。
 
-## 1. 总体目标
+## 1. 当前研究目标与边界
 
-当前目标不是从零复现 SONIC 的大规模训练，而是利用 SONIC 已有成熟权重，在 Isaac Sim/Isaac Lab 仿真中执行策略并采集时间对齐的 state–action 轨迹。随后以这些轨迹训练轻量生成模型（优先从 CVAE 基线开始），研究以下任务：
+本项目已经越过早期的 SONIC 环境复现与最简 S–G–A 采集阶段。当前主线是用 SONIC released policy 在 Isaac Lab 中产生可信的连续物理轨迹，训练联合建模 State 与 Action 的 PhysicsTransformer CVAE：
 
-- 根据当前或历史 state 预测 action。
-- 根据 action 或动作片段补全缺失 state。
-- 补全完整轨迹中被遮挡的 state/action 区间。
-- 给定过去半段轨迹与动作/语义条件，预测未来 state–action 序列。
-- 比较不同 condition、表示方式和缺失模式对生成质量的影响。
+\[
+p(S_{0:T},A_{0:T-1}\mid RobotInfo)
+\]
 
-第一阶段只要求建立可靠、可复查的数据采集闭环；在数据定义、时序语义和质量检查完成前，不直接扩展到复杂生成模型。
+目标能力包括：
 
-## 2. 强制协作方式
+- 前向动力学：由 `S_t,A_t` 预测 `S_{t+1}`，以及短期 autoregressive rollout。
+- 逆动力学：由 `S_t,S_{t+1}` 推断产生该转移的 `A_t`。
+- history Action：只使用 `S_≤t,A_<t` 预测当前 Action，不读取未来 State。
+- 任意联合补全：对 State/Action 的元素、时间块、特征或语义组进行 Mask 后补全。
+- Action 物理验证：把补全 Action 转回 raw Action，在 Isaac 中重放并生成 MP4。
+- State 视频验证：由真实/预测 70 维 State 积分 root 轨迹，在 MuJoCo 中生成三联 MP4。
 
-- **Windows 是唯一代码修改端。** 只允许当前工作区中的 Codex 修改源码、脚本和文档。
-- **Ubuntu 是执行端。** Ubuntu 只执行拉取、依赖调用、仿真、评测、训练和数据采集；不得用 OpenCode、VS Code 或终端直接修改源码。
-- 所有修复都必须先在 Windows 完成并保留 Git 差异，再同步到 Ubuntu 执行。Ubuntu 发生运行错误时，只回传命令、日志、环境状态和堆栈。
-- 禁止自动更新 NVIDIA 驱动、CUDA、Isaac Sim、Isaac Lab、PyTorch 或批量修复依赖。驱动必须保持不动，除非用户之后明确授权。
-- 不得删除两个源码仓库中的 `.git`。不得对当前工作目录之外的文件执行删除；确需删除时必须先说明绝对路径、原因和影响并获得用户许可。
-- 若仓库根目录存在 `.codegraph/`，理解或定位源码时先使用 CodeGraph；不存在时再使用 `rg` 和常规只读检查。
+当前模型不接收 goal、motion ID、package、outcome 或 reference motion。SONIC policy 本身仍使用其原始 observation/history/future reference 来追踪动作；数据模型学习的是执行结果中的 State–Action 规律，二者不要混淆。
 
-## 3. 两端目录约定
+## 2. 强制协作、安全与写入规则
+
+- **Windows 是唯一代码修改端**：`C:\Users\86136\Desktop\code\RL\bly`。Ubuntu 只允许同步、运行、采集、训练、评测和回传日志，不得在那里手工修源码。
+- 所有修复先在 Windows 使用 `apply_patch` 完成并检查 Git 差异；嵌套 SONIC 修改通过外层仓库中的 patch 同步，不在 Ubuntu 重复编辑。
+- 禁止自动更新或重装 NVIDIA driver、CUDA、Isaac Sim、Isaac Lab、PyTorch 及既有依赖；当前可运行环境优先于 `pip check` 的形式一致性。
+- 不得删除嵌套仓库的 `.git`，不得 `git reset --hard`、擅自 checkout/恢复用户改动，且不得删除工作目录外内容；确需删除数据必须先报告绝对路径、大小、原因和可恢复性并取得许可。
+- 所有 collection/train/eval/render 输出必须在 `/home/helloworld/bly/runs/<run_id>/`，不得写入 SONIC、IsaacLab 或 CVAE 源码树。
+- 源 collection HDF5、数据索引和既有 checkpoint 始终只读；新实验创建新 run，不复用或覆盖历史目录。
+- 若根目录出现 `.codegraph/`，理解源码时先使用 CodeGraph；当前检查时不存在，因此使用 `rg` 和只读文件检查。
+
+## 3. 工作区、Git 与固定环境
 
 | 用途 | Windows | Ubuntu |
 |---|---|---|
-| `bly` 主工作区 | `C:\Users\86136\Desktop\code\RL\bly` | `/home/helloworld/bly` |
-| SONIC 源码 | `bly/sonic-repro/GR00T-WholeBodyControl` | `~/bly/sonic-repro/GR00T-WholeBodyControl` |
-| Isaac Lab 源码 | `bly/sonic-repro/IsaacLab` | `~/bly/sonic-repro/IsaacLab` |
-| 复现工具 | `bly/sonic-repro-kit` | `~/bly/sonic-repro-kit` |
-| Python 环境 | Windows 不运行 | `~/bly/sonic-repro/.venv-sonic` |
-| uv 缓存 | 不纳入同步 | `~/bly/sonic-repro/.uv-cache` |
-| 历史状态记录 | `bly/sonic-repro/state` | `~/bly/sonic-repro/state` |
-| **全部新实验产物** | `bly/runs` | `~/bly/runs` |
+| 外层仓库 | `C:\Users\86136\Desktop\code\RL\bly` | `/home/helloworld/bly` |
+| SONIC 嵌套仓库 | `bly/sonic-repro/GR00T-WholeBodyControl` | `~/bly/sonic-repro/GR00T-WholeBodyControl` |
+| IsaacLab 嵌套仓库 | `bly/sonic-repro/IsaacLab` | `~/bly/sonic-repro/IsaacLab` |
+| 采集/重放工具 | `bly/sonic-repro-kit` | `~/bly/sonic-repro-kit` |
+| CVAE 项目 | `bly/state-action-cvae` | `~/bly/state-action-cvae` |
+| Python 环境 | Windows 仅做静态/轻量测试 | `~/bly/sonic-repro/.venv-sonic` |
+| 全部运行产物 | `bly/runs`（通常不放大数据） | `~/bly/runs` |
 
-`.venv-sonic` 与 `.uv-cache` 不复制、不提交，由 Ubuntu 本机保留。模型 checkpoint、样例动作和大规模数据是否同步应单独决定，不得误纳入普通源码提交。
+截至 2026-08-27 的已观测状态：
 
-## 4. 强制运行产物规范
+- 外层分支字面值为 `ubantu`；Action-focused fine-tune 实现提交为 `197a1730fd829a512e153755f56e6e97d4b1329d`。后续提交可能前移，禁止为了匹配本文自动 reset。
+- SONIC 当前分支为 `codex/minimal-state-action-recorder`，已观测 HEAD `fdd6dcf9c0c054ab0fbbde98a5bc8d4326ec00a6`，包含外层 `patches/0001`–`0007` 对应能力。
+- IsaacLab 固定基线为 detached HEAD `37ddf626871758333d6ed89cf64ad702aef127d0`；Windows 有 9 个历史修改/元数据差异，当前任务不得触碰。
+- Ubuntu 固定环境为 Ubuntu 24.04.3、RTX 4090 24 GB、driver 595.84、Isaac Sim 5.1、Python 3.11.14、PyTorch 2.7.0+cu128。
+- released SONIC 原始基线是 `c374bae5b9039cd0ee71377e654d11ce1bc69e1d`，checkpoint 为 `sonic_release/last.pt`。
+- 外层 Git 不会自动携带未提交的嵌套仓库差异；应用 SONIC patch 前必须先检查当前分支/HEAD，已应用的 patch 不得重复应用。
 
-所有未来 eval、render、smoke-train、正式训练和数据采集均必须写入：
+## 4. 当前主数据合同：Physics State–Action v3
+
+每个 episode 只保存一份连续序列：
 
 ```text
-/home/helloworld/bly/runs/<run_id>/
+S0, A0, S1, A1, ..., A(T-1), ST
+states  = [T+1, 70]
+actions = [T, 29]
 ```
 
-每次运行至少应形成以下结构：
+严格语义是 `states[t] + actions[t] -> states[t+1]`。不再保存重复的 `state_tp1`，State 中也不再重复 `previous_action`；窗口开始前控制历史由 `action_before_window` 提供。
+
+### 4.1 State：70维
+
+| 字段 | 维度 | 物理含义 |
+|---|---:|---|
+| `joint_pos_canonical` | 29 | `q - nominal_default_joint_pos`，rad |
+| `joint_vel` | 29 | 实际关节速度，rad/s |
+| `base_lin_vel_robot` | 3 | 骨盆系基座线速度，m/s |
+| `base_ang_vel_robot` | 3 | 骨盆系基座角速度，rad/s |
+| `gravity_robot` | 3 | 世界向下方向在骨盆系的单位向量 |
+| `base_height` | 1 | 骨盆相对平地高度，m |
+| `foot_contact` | 2 | 左右脚接触二值标签，阈值 10 N |
+
+该 State 利用平地世界 xy 平移与绝对 yaw 对称性，不把绝对 root xy/heading 输入模型；绝对 `root_pos_w/root_quat_w/body_pos_w` 单独保存用于重放和视频。
+
+### 4.2 Action：29维
+
+主模型 Action 是 ActionManager 处理后的关节目标在统一 nominal 坐标下的表示：
+
+\[
+A_t=q^{target}_t-q_{nominal}
+\]
+
+它与 State 的 canonical 关节角具有相同 29 关节顺序、零点和单位。`raw_policy_action`、`processed_joint_target_abs`、scale/offset/clip 仍保存在数据/schema 中用于精确重放，但不作为主模型输入。
+
+### 4.3 RobotInfo 与 context
+
+模型显式接收：
+
+| 输入 | Shape | 内容 |
+|---|---:|---|
+| `joint_robot_information` | `[29,11]` | nominal、canonical 位置上下限、速度/力矩限制、Kp/Kd、armature、joint friction、delay 上下限 |
+| `joint_actuator_type` | `[29]` | runtime actuator 类型词表 ID |
+| `global_robot_information` | `[9]` | sim/control dt、decimation、gravity、solver position/velocity iterations、contact threshold |
+| `action_before_window` | `[29]` | `A[start-1]`；episode 起点使用 initial processed target |
+
+默认 `context_mode=hidden`，648维 mass/inertia/COM/material dynamics context 不输入模型，作为 CVAE latent 所代表的未观测动力学。`oracle/explicit` 仅用于上限对照。35维平均关节力矩与足端接触冲量只作 auxiliary supervision，不作为 State。
+
+## 5. 已验证数据资产与来源
+
+当前正式数据来自同一个 2048-motion BONES-SEED 子集，不使用已删除且错误的 `512_bones_seed_insight`：
 
 ```text
-runs/<run_id>/
-├── logs/                 # 控制台、评测、训练、采集日志
-├── videos/               # MP4 或离线渲染结果
-├── data/                 # state-action 分片或索引；大文件可改为外部路径清单
-├── checkpoints/          # 仅本次新生成的 checkpoint（如有）
-├── manifests/            # Git、环境、GPU、配置和数据 schema
-└── markers/              # 成功/失败阶段标记
+Motion subset:
+/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447
+
+Startup variants 0–3:
+/home/helloworld/bly/runs/collect_physics_state_action_20260825_133150
+
+Initial-state-mild variants 4–7:
+/home/helloworld/bly/runs/collect_physics_state_action_20260825_172734
+
+Physics v4 index:
+/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244
 ```
 
-要求：
+已回传并通过的门禁：
 
-- 不得再在 `GR00T-WholeBodyControl/runs/`、`IsaacLab/runs/` 或源码树其他位置创建运行结果。
-- 日志和 output 生成的视频必须位于同一个 `~/bly/runs/<run_id>/` 下，禁止依赖当前工作目录决定输出位置。
-- `run_id` 建议采用 `<task>_YYYYMMDD_HHMMSS`；任何阶段复用同一运行目录时必须记录清楚。
-- 每次运行必须保存 SONIC commit、IsaacLab commit、完整命令/配置、`uv pip freeze`、`nvidia-smi`、随机种子和退出码。
-- `latest_run_dir.txt` 必须更新为新的绝对路径；移动历史目录后旧值可能仍指向 `GR00T-WholeBodyControl/runs`，不得直接信任。
-- 普通 Git 是否提交视频和数据是另一项决策。大视频、checkpoint 和轨迹数据不得未经体积检查直接推送；必要时使用 Git LFS、对象存储或独立数据盘。
+| 数据 | 结果 |
+|---|---|
+| 2048 子集 | 八个 package 各 256，共 2048；本轮不要求与旧 256/512 子集零重叠 |
+| startup | 8192 canonical；7986 completed；schema/action roundtrip/coverage 全 PASS |
+| initial_state_mild | 8192 canonical；8072 completed；schema/action roundtrip/coverage 全 PASS |
+| 合并索引 | 2048 motion、16384 canonical，按 motion key 划分 1638/205/205 |
+| 控制时序 | `sim_dt=0.005`、`control_dt=0.02`、decimation=4，即 50 Hz |
+| 数据隔离 | split 单位为 `motion_key`；同一动作全部 variant 与窗口只能位于一个 split |
 
-### 当前路径缺口（尚未修复）
+原始 recorder 中间文件 `sonic_physics_sa_raw.hdf5` 不是训练输入，可能已被用户删除以释放磁盘；正式 index 只读取通过 marker 的 `sonic_physics_sa_v3.hdf5`。不得假设 raw 文件仍存在，也不得重新生成或复制大文件，除非用户明确要求。
 
-`sonic-repro-kit/sonic_repro.sh` 当前的 `new_run_dir()` 仍使用：
+旧 `sonic_minimal_sa_v2`、旧 768-motion v1 索引、Transformer/TCN checkpoint 仍作为历史兼容基线保留，但不得与 Physics v3/v4 数据混训。任何删除历史 run 的动作仍需用户授权。
 
-```bash
-local dir="$SONIC_DIR/runs/phase1_$(timestamp)"
+## 6. 当前模型与训练实现
+
+`state-action-cvae` 的主模型种类是 `physics_transformer`：
+
+```text
+d_model=384
+encoder_layers=6
+decoder_layers=8
+heads=8
+ffn_dim=1536
+latent_dim=96
+joint_width=128
+dropout=0.1
 ```
 
-`verify_minimal.py` 也仍假设运行目录位于 `GR00T-WholeBodyControl/runs`。因此另一个会话在再次运行前，必须先在 Windows 修改并同步至少以下内容：
+token 布局为：
 
-- 增加独立的 `RUNS_ROOT`，默认值为 `${SONIC_RUNS_ROOT:-$HOME/bly/runs}`。
-- `new_run_dir()`、日志、视频、marker 和 manifest 全部基于 `RUNS_ROOT`。
-- `verify_minimal.py` 接受或推导同一个 runs 根目录，不再要求位于 SONIC 仓库内部。
-- README 中所有验收和日志命令改为 `~/bly/runs/...`。
-- 写入前检查最终解析路径确实处于 `~/bly/runs` 内。
+```text
+A_before, S0, A0, S1, A1, ..., A127, S128
+```
 
-## 5. 已确认环境与固定版本
+模型使用 joint-aware encoder/query decoder、RoPE 时间位置、State/Action 类型 embedding，并提供四条输出路径：任意 masked reconstruction、forward dynamics、inverse Action、history-conditioned Action。Forward head 只能读取 `S_t,A_t`；inverse head 只能读取 `S_t,S_{t+1}`；history head 使用 causal attention，不能读取未来 State。相关防泄漏测试已实现。
 
-Ubuntu 执行机已确认：
+### 6.1 已完成 parent 训练
 
-| 项目 | 当前值 |
-|---|---|
-| OS | Ubuntu 24.04.3 LTS |
-| Kernel | Linux 7.0.0-28-generic |
-| GPU | NVIDIA GeForce RTX 4090 24 GB |
-| NVIDIA Driver | 595.84；不得自动变更 |
-| `nvidia-smi` CUDA 上限 | 13.2 |
-| 系统内存 | 62 GiB，Swap 31 GiB |
-| Python / uv | Python 3.11.14，uv 0.9.13 |
+```text
+Dataset:
+/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244
 
-复现环境已确认：
+Parent train run:
+/home/helloworld/bly/runs/cvae_train_20260826_002252
 
-| 组件 | 已使用版本/记录 |
-|---|---|
-| Isaac Sim | 5.1.0.0 |
-| PyTorch | 2.7.0+cu128；CUDA 可用 |
-| TensorDict | 0.9.1；CUDA smoke test 通过 |
-| Isaac Lab 源码 | `37ddf626871758333d6ed89cf64ad702aef127d0` |
-| SONIC 已跑通源码 | `c374bae5b9039cd0ee71377e654d11ce1bc69e1d` |
-| SONIC checkpoint | `sonic_release/last.pt`，约 448 MB |
-| 样例动作 | `sample_data`，约 4.1 MB、6 个 PKL |
+Selected checkpoint:
+/home/helloworld/bly/runs/cvae_train_20260826_002252/checkpoints/best.pt
+```
 
-`uv pip check` 曾报告 12 项依赖版本不一致，但 Isaac Sim、SONIC 评测和 smoke training 已实际跑通。不要仅为让 `uv pip check` 变绿而升级/降级包；任何依赖调整都必须建立新环境或先完整记录并做回归验证。
+训练完成 120000 optimizer step，最佳 validation selection score 为 `0.3173407225683331`。测试评测 run 为 `/home/helloworld/bly/runs/cvae_eval_20260827_104021`；该 test split 已在历史实验中使用，因此后续结果必须标注 `reused test`，不得声称全新 blind test。
 
-## 6. 当前已完成与实验证据
+关键 test 指标：
 
-- 系统预检、uv 环境创建、Isaac Sim 5.1 与 Isaac Lab 安装/修复已完成；Git LFS 可用。
-- SONIC 固定版本、默认 checkpoint 和 quick-start 样例数据已下载，`check_environment.py --training` 显示 `All checks passed.`。
-- Isaac Lab 官方 headless smoke test 已启动成功，日志出现 `[INFO]: Setup complete...`。
-- SONIC checkpoint 评测已跑通。有效运行 `runs/phase1_20260818_081830` 的 `eval.ok` 存在，`Success Rate=1.0`、`Progress Rate=1.0`、`mpjpe_g=101.360`、`mpjpe_l=17.569`、`mpjpe_pa=11.389`。
-- 5 iteration smoke training 已完成；`smoke_train.ok` 存在，最终记录 `40` episodes、`960` timesteps、mean reward `0.83912`、约 `10.77s`。
-- 历史运行已经从 SONIC 子仓库移到工作区根目录 `bly/runs/`；现有四个 `phase1_*` 目录均未包含 MP4。
-- 环境安装和历史诊断证据保存在 `sonic-repro/state/`，最新有效运行的评测与训练日志保存在 `runs/phase1_20260818_081830/`。
+| 指标 | 结果 |
+|---|---:|
+| one-step forward normalized RMSE | 0.2634 |
+| rollout-8 normalized RMSE | 0.4603 |
+| forward joint position RMSE | 0.0179 rad |
+| forward joint velocity RMSE | 0.2775 rad/s |
+| inverse Action RMSE | 0.1321 rad |
+| history Action RMSE | 0.1695 rad |
 
-## 7. 当前未完成与已知问题
+负对照全部通过：打乱 Action 后 forward RMSE 恶化 28.3%；打乱 `S_{t+1}` 后 inverse RMSE 恶化 152.3%；修改不可见未来 State 对 history Action 的最大影响为 0。模型确实使用了 S–A 关系，但长 Action 补全的物理重放仍不够好，这是当前 fine-tune 的直接动机。
 
-- MP4 渲染尚未跑通。`render.log` 显示 Isaac Sim RTX 渲染阶段在 `librtx.scenedb.plugin.so`/Hydra 销毁路径崩溃并产生 dump；当前没有 MP4。
-- 用户明确不希望更新 Ubuntu NVIDIA 驱动。后续渲染应研究不改驱动的离线方案，且不能影响已跑通的 headless 评测。
-- 尚未实现 state–action 采集器、数据 schema、episode 边界记录、时间对齐验证或数据导出。
-- 尚未训练 CVAE；当前只验证了 SONIC 推理与最小训练链路。
-- `sonic-repro-kit` 的输出路径仍指向 SONIC 子仓库，必须按第 4 节先修复。
-- `sonic-repro/state/latest_run_dir.txt` 是移动前生成的，可能是过期绝对路径。
+## 7. Action-focused fine-tune：当前正在推进的任务
 
-## 8. Git 现状与同步规则
-
-截至 2026-08-23 Windows 只读检查：
-
-- `bly` 是外层同步仓库，远端为 `https://github.com/Vamperd/bly.git`，当前分支字面值为 `ubantu`（拼写如此，不得擅自更名）。
-- 外层仓库已跟踪 `sonic-repro-kit`、`sonic-repro/state` 和 `runs` 中的历史日志；根目录暂时没有 `.gitignore`。
-- `sonic-repro/GR00T-WholeBodyControl` 与 `sonic-repro/IsaacLab` 是各自独立的嵌套 Git 仓库，外层仓库把它们显示为未跟踪目录；外层 `git push` **不会同步其中的源码修改**。
-- GR00T 本地仓库跟随 NVIDIA 官方远端；检查时本地 `main` 比官方 `origin/main` 落后 2 个提交。用户已人工确认 Windows/Ubuntu 两端工作版本一致，因此不得自动拉取官方最新 main。
-- IsaacLab 当前处于 detached HEAD，并显示 9 个零行数/二进制差异，表现像 Windows 拷贝导致的换行或文件元数据差异；在逐文件核验前不得提交、恢复或重置。
-- 永远不要删除嵌套仓库的 `.git`。修改嵌套源码前先记录 `git status --short --branch` 与 `git rev-parse HEAD`。
-
-### 推荐同步流程
-
-修改外层脚本/文档时：
-
-1. Codex 只在 Windows 修改并检查 `git diff`。
-2. Windows 在外层 `bly` 仓库提交并推送 `ubantu` 分支。
-3. Ubuntu 确认工作树干净后，只执行 `git pull --ff-only origin ubantu`。
-4. Ubuntu 执行并把新的日志/产物写到 `~/bly/runs/<run_id>`。
-
-修改嵌套 SONIC/IsaacLab 源码时，不能假设外层 Git 会携带修改。由于当前不使用 Fork，优先把嵌套仓库的提交导出为 patch 或 Git bundle，存入外层仓库后由 Ubuntu `git am`/`git fetch` 应用；应用前必须用 `git apply --check` 或在临时分支验证。不得在 Ubuntu 手工重复修改。
-
-## 9. 下一阶段建议顺序
-
-1. 先修复 `sonic-repro-kit` 的统一 `~/bly/runs` 输出路径，并更新验证器与 README。
-2. 在 SONIC eval rollout 中定位策略 observation 构造、action 输出和 simulation step 的唯一对齐点。
-3. 定义数据 schema：原始/归一化 joint position、joint velocity、root pose/velocity、command/目标、policy action、实际执行 action、next state、termination、motion id 与时间戳。
-4. 实现只记录不改变策略行为的数据采集钩子，采用分片写入和原子完成 marker，避免长轨迹占满内存。
-5. 用少量 episode 验证 shape、单位、关节顺序、action scale、时序偏移、NaN、episode 边界和可重放性。
-6. 建立简单监督基线后，再分别实现 action prediction、masked completion 和 future prediction 的 CVAE；不同任务必须使用不同 condition 与 mask 定义。
-7. 最后再扩展样本规模、离线渲染和更复杂的 latent sequence model。
-
-## 10. 后续代理的启动检查
-
-开始任何改动前必须执行并报告：
+代码已经在外层提交 `197a173` 中实现，**但本文没有收到 Ubuntu smoke/正式训练完成日志，因此不得写成已训练完成**。新入口：
 
 ```bash
-# Windows 外层仓库
+bash ./cvae_repro.sh smoke-action-finetune
+bash ./cvae_repro.sh action-finetune
+```
+
+主要实现：
+
+- 只从 parent 加载 model weights；optimizer、scheduler、AMP scaler 与 RNG 全部重新初始化，并严格校验 checkpoint v2、dataset manifest hash、模型结构及参数 shape。
+- 任务比例改为 30% State forward、45% Action inference、25% arbitrary；Action inference 为 30% inverse + 15% history。
+- arbitrary 内部为 20% State-only、40% Action-only、40% Both；State+Action 同时 Mask 时 Action reconstruction 权重为 1.25。
+- Action curriculum 在 10k/25k/40k local step 把最大区间扩到 32/64/128；25k 后 inverse full-128 额外采样概率为 0.15。
+- 训练窗口 50% 均匀裁剪，50% 从每条 episode Action derivative energy 最高 25% 的窗口中均匀选择。
+- 学习率为 Action 头 `5e-5`、共享主干 `2e-5`、State/forward 头 `1e-5`；40k step，BF16，effective batch 64。
+- 每 2k step 与固定 parent validation baseline 比较；四项 State guard 均不得超过 parent 的 105%，否则只能写 `best_unguarded.pt`，不能更新正式 `best.pt`。
+
+正式 Action 改善门禁为 inverse local 至少 10%、inverse full-128 至少 15%、Action completion macro 至少 10%。任一失败时保留诊断产物但不生成 `cvae_action_finetune.ok`。
+
+Ubuntu 先 smoke：
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+
+CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244 \
+CVAE_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_train_20260826_002252/checkpoints/best.pt \
+CVAE_CONFIG=configs/physics_v3_action_finetune_smoke.json \
+CVAE_MODEL_KIND=physics_transformer CVAE_CONTEXT_MODE=hidden CVAE_SEED=20260831 \
+bash ./cvae_repro.sh smoke-action-finetune
+```
+
+通过后正式训练：
+
+```bash
+CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244 \
+CVAE_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_train_20260826_002252/checkpoints/best.pt \
+CVAE_CONFIG=configs/physics_v3_action_finetune.json \
+CVAE_MODEL_KIND=physics_transformer CVAE_CONTEXT_MODE=hidden CVAE_SEED=20260831 \
+bash ./cvae_repro.sh action-finetune
+```
+
+新会话必须先寻找本次 fine-tune 的实际 run 和 marker/log，再判断当前处于“尚未运行、运行中、失败或完成”哪一种状态，不能仅凭代码存在推断训练成功。
+
+## 8. 已实现评测与视频能力
+
+### 8.1 Action Mask：物理重放
+
+公共入口保持为：
+
+```bash
+bash ./cvae_repro.sh validate-action-mask-replay
+```
+
+它只使用 validation motion，默认 `prior_mean`，支持 element、step、random feature、腰/左右腿/左右臂语义组和 `inverse_full_128`。普通 completion 使用 reconstruction Action head；full inverse 使用专用 inverse head。补全 Action 会从 canonical 坐标严格转回 raw Action，并在隔离的单环境 Isaac 进程中逐场景重放；Mask 外 Action 必须位级不变。
+
+源轨迹、original replay 和补全场景共享相同平面、seed、初始状态与 runtime mapping。物理重放成功门禁与模型质量分开：即使 CVAE 不如 hold-last/线性插值，仍保存 run，并令 `model_quality_pass=false`。已有回传表明 source replay、runtime mapping/context、planned/executed Action 与 pre-mask identity 均可 PASS；当前 parent 模型的 Action `model_quality_pass` 仍为 false。
+
+代表视频固定包括 source、original replay、element-25、step-8、feature-25、left-leg、inverse-full-128 和总览 grid。`render=none` 仍会完整执行补全与 Isaac 重放，只跳过 MP4；改为 `representatives` 会重新执行整条评测，不会复用上一次 run。
+
+### 8.2 State Mask：运动学三联视频
+
+公共入口：
+
+```bash
+bash ./cvae_repro.sh validate-state-mask-video
+```
+
+该路径直接只读 Physics v4 HDF5，不启动 Isaac。左栏为记录的 root/joint 轨迹，中栏为由真实 70 维 State 积分重建，右栏为由预测 State 积分重建。Action 始终完整可见且不会被改写，因此与 Action replay 完全隔离。
+
+1/2/4/8 步 forward rollout 属于训练分布内；32步预测由四段8步 rollout 连续推进并标记 OOD。代表视频已改为包含 32 步连续 State completion。已回传 `render=none` run `/home/helloworld/bly/runs/cvae_state_mask_eval_20260827_120853`，pipeline PASS；生成 MP4 时必须创建新的 `representatives` run。
+
+## 9. 运行产物与 marker 协议
+
+所有 run 使用：
+
+```text
+~/bly/runs/<run_id>/
+├── data/
+├── logs/
+├── checkpoints/
+├── videos/
+├── manifests/
+└── markers/
+```
+
+只有完整验收通过后才允许生成 `.ok` marker；Shell 非零退出会保留失败目录和 `cvae.failed`/日志，不覆盖旧 run。常用 marker：
+
+| 阶段 | Marker |
+|---|---|
+| Physics 采集 | `collect_physics_state_action.ok` |
+| Physics v4 索引 | `cvae_physics_dataset.ok` |
+| 常规训练 | `cvae_train.ok` |
+| Action fine-tune smoke | `cvae_action_finetune_smoke.ok` |
+| Action fine-tune 正式 | `cvae_action_finetune.ok` |
+| Action replay | `cvae_action_mask_replay.ok` |
+| State 视频 | `cvae_state_mask_video.ok` |
+
+`latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
+
+## 10. 下一步优先级
+
+1. 在 Ubuntu 核对 `197a173` 已同步，运行 Action fine-tune smoke；回传 `training_summary.json`、parent baseline、最后 train/validation metric 和 marker。
+2. smoke 通过后运行 40k 正式 fine-tune，监控三组学习率、curriculum stage、State guard 与 Action score；预计约 9 小时，但以实际 step rate 为准。
+3. 只使用满足 State guard 且通过 Action 改善门禁的 `best.pt`；若无成功 marker，parent 仍是有效模型，不得用 `best_unguarded.pt` 冒充正式结果。
+4. 对选中 checkpoint 运行 validation 离线指标、简单直行与两个非 Locomotion Action replay 视频，并用 State 视频回归确认 State 能力未退化。
+5. 最终 test 可以复用既有 split，但报告必须明确写 `reused test`；优先比较 parent 与 fine-tune 的同一固定 validation fixture。
+6. 若 Action 仍差，先按 Mask 类型/区间长度/关节组诊断，不立即扩大模型或重新采集；区分多解性、缺 goal、latent prior 和物理开环漂移。
+7. oracle dynamics context 仅作为后续上限实验；不得将其结果与 hidden-context 主模型混为部署性能。
+
+## 11. 后续代理启动检查
+
+Windows 开始改动前：
+
+```powershell
+cd C:\Users\86136\Desktop\code\RL\bly
+Get-Content AGENTS.md -Raw
 git status --short --branch
+git rev-parse HEAD
+git -C sonic-repro/GR00T-WholeBodyControl status --short --branch
+git -C sonic-repro/GR00T-WholeBodyControl rev-parse HEAD
+git -C sonic-repro/IsaacLab status --short --branch
+git -C sonic-repro/IsaacLab rev-parse HEAD
+```
 
-# Ubuntu 执行前
-cd ~/bly
+Ubuntu 执行前：
+
+```bash
+cd /home/helloworld/bly
 git status --short --branch
 git rev-parse HEAD
 git -C sonic-repro/GR00T-WholeBodyControl status --short --branch
@@ -179,7 +323,30 @@ git -C sonic-repro/GR00T-WholeBodyControl rev-parse HEAD
 git -C sonic-repro/IsaacLab status --short --branch
 git -C sonic-repro/IsaacLab rev-parse HEAD
 nvidia-smi
+df -h /home/helloworld/bly/runs
 ```
 
-不得因为本文件记录了旧提交就自动 checkout、reset 或 pull；先以两端实际状态为准，并保护用户已有修改和运行结果。
+不得因为本文记录了某个旧 HEAD 就自动 checkout/reset/pull。先保护实际工作树，再进行 `git pull --ff-only origin ubantu`；若不满足 fast-forward 条件，停止并回传状态。
 
+## 12. 代码入口索引
+
+| 任务 | 主要文件 |
+|---|---|
+| Physics v3 采集/验证 | `sonic-repro-kit/sonic_repro.sh`、`consolidate_physics_state_action.py`、`verify_physics_state_action.py` |
+| SONIC 嵌套改动 | `sonic-repro-kit/patches/0001`–`0007` |
+| Physics v4 index/dataset | `state-action-cvae/src/cvae_sa/physics_indexer.py`、`dataset.py`、`physics_schema.py` |
+| 模型与损失 | `models.py`、`losses.py`、`masking.py` |
+| 常规/fine-tune 训练 | `trainer.py`、`configs/physics_v3*.json`、`cvae_repro.sh` |
+| Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
+| State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
+
+修改前优先阅读对应入口及测试。当前测试命令为：
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+export PYTHONPATH="$PWD/src"
+python -m unittest discover -s tests -v
+```
+
+Windows 可运行不依赖 Isaac/HDF5 的轻量测试；完整 HDF5、CUDA、Isaac replay 与视频门禁必须在 Ubuntu 固定环境执行。

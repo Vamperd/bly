@@ -1,0 +1,8 @@
+{
+  "extends": "overfit_32_compact_capacity.json",
+  "model": {
+    "profile": "compact_joint_id_only",
+    "robot_conditioning": "joint_id_only",
+    "expected_parameter_count": 14940824
+  }
+}

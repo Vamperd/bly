@@ -195,6 +195,48 @@ bash ./cvae_repro.sh action-finetune
 parent的105%才可写入`best.pt`。未通过State guard的最低Action分数仍保存在
 `best_unguarded.pt`供诊断，但不会产生成功marker。
 
+### 32-motion memorization benchmark
+
+该实验只验证训练集记忆能力，不是 validation/test 泛化评测。子集从正式 Physics v4
+索引的原 train split 中选择八个 package 各4个 motion，且每个 motion 的8个 variant
+必须全部 completed；源 HDF5 只读引用，子集重新计算 normalization：
+
+```bash
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244
+CVAE_SEED=20260828 bash ./cvae_repro.sh build-overfit-subset
+export CVAE_DATASET_RUN="$(cat /home/helloworld/bly/runs/latest_cvae_overfit_subset_run_dir.txt)"
+
+# 先验证数据、模型、门禁和SVG链路，不代表模型质量通过。
+CVAE_OVERFIT_SMOKE=true CVAE_SEED=20260828 bash ./cvae_repro.sh overfit-capacity
+```
+
+紧凑模型为15,065,048参数；容量阶段使用posterior mean并关闭KL、auxiliary、cycle，
+完整阶段从容量阶段best权重热启动，但重新初始化optimizer、scheduler和RNG：
+
+```bash
+CVAE_OVERFIT_MODEL=compact CVAE_SEED=20260828 bash ./cvae_repro.sh overfit-capacity
+export CAPACITY_RUN="$(cat /home/helloworld/bly/runs/latest_overfit_capacity_compact_run_dir.txt)"
+CVAE_OVERFIT_MODEL=compact CVAE_SEED=20260828 \
+CVAE_INIT_CHECKPOINT="$CAPACITY_RUN/checkpoints/best.pt" \
+bash ./cvae_repro.sh overfit-full
+
+# 2847万参数原模型对照；capacity/full都使用reference配置。
+CVAE_OVERFIT_MODEL=reference CVAE_SEED=20260828 bash ./cvae_repro.sh overfit-capacity
+```
+
+紧凑模型seed 20260828两阶段通过后，再运行20260829与20260830。`joint_id_only`
+需要分别运行capacity/full；`no_aux`只运行full，并从紧凑capacity checkpoint加载。
+每个run的`videos/training_curves.svg`在validation后原子刷新，full run还生成
+`videos/input_sensitivity.svg`。最终把全部run用冒号传给汇总入口：
+
+```bash
+CVAE_OVERFIT_RUNS="/run/a:/run/b:/run/c" bash ./cvae_repro.sh summarize-overfit
+```
+
+只有紧凑模型具备三个完整seed pair、其中至少两个capacity/full均通过，并存在
+seed 20260828的reference pair，才生成`cvae_overfit_suite.ok`。所有报告都明确禁止
+泛化声明。
+
 复合 Mask 以40% forward、35% Action inference、25% arbitrary S/A completion 采样。
 模型分别报告一步/8步 forward、inverse Action、history-conditioned Action 和任意联合
 补全；torque/impulse 只从 `(S_t,A_t)` 转移表示进行辅助监督，不能读取 `S_{t+1}`。

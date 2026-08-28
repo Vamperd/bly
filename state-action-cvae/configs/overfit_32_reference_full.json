@@ -1,0 +1,14 @@
+{
+  "extends": "overfit_32_compact_full.json",
+  "model": {
+    "profile": "reference",
+    "d_model": 384,
+    "encoder_layers": 6,
+    "decoder_layers": 8,
+    "heads": 8,
+    "ffn_dim": 1536,
+    "latent_dim": 96,
+    "joint_width": 128,
+    "expected_parameter_count": 28475448
+  }
+}

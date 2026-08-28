@@ -304,6 +304,36 @@ class MaskingModelTest(unittest.TestCase):
             )
             self.assertTrue(torch.isfinite(loss.total))
 
+    def test_joint_id_only_ignores_numeric_robot_conditioning(self) -> None:
+        torch.manual_seed(19)
+        value = physics_batch(batch_size=1)
+        masks = MaskGenerator(PHYSICS_MASK_CONFIG).generate(
+            value, force_task="arbitrary", force_target="action"
+        )
+        config = dict(
+            MODEL_CONFIG,
+            kind="physics_transformer",
+            state_dim=70,
+            include_previous_action=False,
+            joint_robot_info_dim=11,
+            global_robot_info_dim=9,
+            actuator_type_count=2,
+            dynamics_context_dim=648,
+            auxiliary_dim=35,
+            context_mode="hidden",
+            joint_width=16,
+            robot_conditioning="joint_id_only",
+        )
+        model = build_model(config)
+        first = model(value, masks, sample_from_prior=True, deterministic=True)
+        changed = dict(value)
+        changed["joint_robot_information"] = value["joint_robot_information"] + 100.0
+        changed["global_robot_information"] = value["global_robot_information"] - 100.0
+        changed["joint_actuator_type"] = torch.ones_like(value["joint_actuator_type"])
+        second = model(changed, masks, sample_from_prior=True, deterministic=True)
+        self.assertTrue(torch.equal(first.prior_mean, second.prior_mean))
+        self.assertTrue(torch.equal(first.action, second.action))
+
     def test_physics_relation_heads_do_not_read_masked_targets(self) -> None:
         torch.manual_seed(17)
         value = physics_batch(batch_size=1)

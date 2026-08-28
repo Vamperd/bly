@@ -10,10 +10,75 @@ import numpy as np
 from cvae_sa.dataset import StateActionWindowDataset
 from cvae_sa.indexer import build_index
 from cvae_sa.physics_indexer import build_physics_index
+from cvae_sa.overfit_subset import build_overfit_subset
+from cvae_sa.constants import PACKAGES
+from cvae_sa.util import file_sha256
 from tests.fixtures import write_collection_run, write_physics_collection_run
 
 
 class IndexerDatasetTest(unittest.TestCase):
+    def test_builds_balanced_read_only_overfit_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = []
+            for package_index, package in enumerate(PACKAGES):
+                motion_key = f"motion_{package_index}"
+                sources.extend(
+                    (
+                        write_physics_collection_run(
+                            root / "sources", f"p{package_index}_0", motion_key,
+                            package, (0, 1, 2, 3),
+                        ),
+                        write_physics_collection_run(
+                            root / "sources", f"p{package_index}_1", motion_key,
+                            package, (4, 5, 6, 7),
+                        ),
+                    )
+                )
+            parent = root / "physics_parent"
+            build_physics_index(
+                sources, parent, expected_motions=8, expected_episodes=64,
+                split_counts=(8, 0, 0), seed=5,
+            )
+            source_hashes = {
+                path: file_sha256(path)
+                for path in (root / "sources").glob("*/data/sonic_physics_sa_v3.hdf5")
+            }
+            output = root / "overfit_subset"
+            manifest = build_overfit_subset(
+                parent, output, motions_per_package=1, seed=20260828
+            )
+            self.assertEqual(manifest["purpose"], "physics_state_action_32_motion_memorization")
+            self.assertEqual(manifest["motion_count"], 8)
+            self.assertEqual(manifest["canonical_episode_count"], 64)
+            self.assertFalse(manifest["generalization_claim_allowed"])
+            selection = json.loads(
+                (output / "manifests/overfit_selection.json").read_text()
+            )
+            self.assertEqual(set(selection["selected_by_package"]), set(PACKAGES))
+            self.assertTrue(all(len(keys) == 1 for keys in selection["selected_by_package"].values()))
+            parent_rows = {
+                (row["motion_key"], row["variant_id"]): row
+                for row in (
+                    json.loads(line)
+                    for line in (parent / "manifests/episodes.jsonl").read_text().splitlines()
+                )
+            }
+            subset_rows = [
+                json.loads(line)
+                for line in (output / "manifests/episodes.jsonl").read_text().splitlines()
+            ]
+            self.assertTrue(all(row["split"] == "train" for row in subset_rows))
+            self.assertTrue(all(
+                row["hdf5_path"] == parent_rows[(row["motion_key"], row["variant_id"])]["hdf5_path"]
+                for row in subset_rows
+            ))
+            self.assertTrue((output / "markers/cvae_overfit_subset.ok").is_file())
+            self.assertEqual(
+                source_hashes,
+                {path: file_sha256(path) for path in source_hashes},
+            )
+
     def test_action_energy_candidates_select_top_quarter(self) -> None:
         actions = np.zeros((40, 29), dtype=np.float32)
         actions[20:, 0] = np.arange(20, dtype=np.float32) * 10.0

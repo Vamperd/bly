@@ -6,10 +6,12 @@ from pathlib import Path
 
 import torch
 
-from cvae_sa.models import build_model
+from cvae_sa.models import build_model, parameter_count
 from cvae_sa.trainer import (
     action_finetune_parameter_groups,
     load_weight_only_initialization,
+    overfit_gate,
+    warmup_cosine_factor,
 )
 
 
@@ -37,6 +39,38 @@ MODEL_CONFIG = {
 
 
 class ActionFinetuneTest(unittest.TestCase):
+    def test_compact_parameter_count_and_overfit_gate(self) -> None:
+        compact = dict(
+            MODEL_CONFIG,
+            d_model=320,
+            encoder_layers=4,
+            decoder_layers=6,
+            heads=8,
+            ffn_dim=1280,
+            latent_dim=80,
+            joint_width=128,
+            actuator_type_count=2,
+            robot_conditioning="full",
+        )
+        self.assertEqual(parameter_count(build_model(compact)), 15_065_048)
+        passing = {
+            "forward_one_normalized_rmse": 0.05,
+            "action_inverse_local_normalized_rmse": 0.05,
+            "arbitrary_state_normalized_rmse": 0.05,
+            "action_completion_macro_normalized_rmse": 0.05,
+            "history_action_normalized_rmse": 0.08,
+            "forward_rollout_8_normalized_rmse": 0.10,
+        }
+        self.assertTrue(overfit_gate(passing)["overfit_pass"])
+        passing["history_action_normalized_rmse"] = 0.081
+        self.assertFalse(overfit_gate(passing)["overfit_pass"])
+
+    def test_warmup_cosine_is_monotonic_after_warmup_and_has_floor(self) -> None:
+        values = [warmup_cosine_factor(step, 500, 20_000, 0.01) for step in range(500, 20_001)]
+        self.assertTrue(all(left >= right for left, right in zip(values, values[1:])))
+        self.assertAlmostEqual(values[0], 1.0)
+        self.assertAlmostEqual(values[-1], 0.01)
+
     def test_parameter_groups_are_disjoint_and_use_declared_rates(self) -> None:
         model = build_model(MODEL_CONFIG)
         rates = {"action": 5e-5, "shared": 2e-5, "state": 1e-5}

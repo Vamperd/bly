@@ -1,0 +1,5 @@
+{
+  "extends": "overfit_32_compact_full.json",
+  "model": {"profile": "compact_no_aux"},
+  "training": {"auxiliary_weight": 0.0}
+}
