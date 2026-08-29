@@ -210,8 +210,10 @@ export CVAE_DATASET_RUN="$(cat /home/helloworld/bly/runs/latest_cvae_overfit_sub
 CVAE_OVERFIT_SMOKE=true CVAE_SEED=20260828 bash ./cvae_repro.sh overfit-capacity
 ```
 
-紧凑模型为15,065,048参数；容量阶段使用posterior mean并关闭KL、auxiliary、cycle，
-完整阶段从容量阶段best权重热启动，但重新初始化optimizer、scheduler和RNG：
+紧凑模型为15,065,048参数。容量阶段训练与成功门禁都使用posterior mean并关闭
+KL、auxiliary、cycle；同一批次和Mask上的prior mean仅作为非门禁诊断，不能影响
+`overfit_score`、checkpoint选择或成功marker。完整阶段从容量阶段best权重热启动，
+重新初始化optimizer、scheduler和RNG，并恢复以deterministic prior mean作为成功门禁：
 
 ```bash
 CVAE_OVERFIT_MODEL=compact CVAE_SEED=20260828 bash ./cvae_repro.sh overfit-capacity
@@ -226,8 +228,9 @@ CVAE_OVERFIT_MODEL=reference CVAE_SEED=20260828 bash ./cvae_repro.sh overfit-cap
 
 紧凑模型seed 20260828两阶段通过后，再运行20260829与20260830。`joint_id_only`
 需要分别运行capacity/full；`no_aux`只运行full，并从紧凑capacity checkpoint加载。
-每个run的`videos/training_curves.svg`在validation后原子刷新，full run还生成
-`videos/input_sensitivity.svg`。最终把全部run用冒号传给汇总入口：
+每个run的`videos/training_curves.svg`在validation后原子刷新；capacity额外生成
+`videos/latent_mode_comparison.svg`，对比posterior gate与不参与门禁的prior diagnostic；
+full run还生成`videos/input_sensitivity.svg`。最终把全部run用冒号传给汇总入口：
 
 ```bash
 CVAE_OVERFIT_RUNS="/run/a:/run/b:/run/c" bash ./cvae_repro.sh summarize-overfit
@@ -235,7 +238,8 @@ CVAE_OVERFIT_RUNS="/run/a:/run/b:/run/c" bash ./cvae_repro.sh summarize-overfit
 
 只有紧凑模型具备三个完整seed pair、其中至少两个capacity/full均通过，并存在
 seed 20260828的reference pair，才生成`cvae_overfit_suite.ok`。所有报告都明确禁止
-泛化声明。
+泛化声明。汇总会拒绝缺少`gate_latent_mode`/`diagnostic_latent_modes`的新旧协议混合
+run，因此旧的prior-gated capacity失败run只能保留作诊断，不能进入suite。
 
 复合 Mask 以40% forward、35% Action inference、25% arbitrary S/A completion 采样。
 模型分别报告一步/8步 forward、inverse Action、history-conditioned Action 和任意联合

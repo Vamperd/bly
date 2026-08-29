@@ -31,6 +31,21 @@ def summarize_overfit_runs(run_paths: Iterable[Path], output_run: Path) -> dict[
     for record in records:
         key = (str(record.get("model_profile")), int(record.get("seed")))
         phase = str(record.get("overfit_phase"))
+        if phase not in {"capacity", "full"}:
+            raise ValueError(
+                f"unsupported overfit phase {phase!r} in {record['run_dir']}"
+            )
+        expected_gate = "posterior_mean" if phase == "capacity" else "prior_mean"
+        expected_diagnostics = ["prior_mean"] if phase == "capacity" else []
+        if (
+            record.get("gate_latent_mode") != expected_gate
+            or record.get("diagnostic_latent_modes") != expected_diagnostics
+        ):
+            raise ValueError(
+                f"invalid latent protocol for {record['run_dir']}: phase={phase!r}, "
+                f"gate={record.get('gate_latent_mode')!r}, "
+                f"diagnostics={record.get('diagnostic_latent_modes')!r}"
+            )
         if phase in pairs[key]:
             raise ValueError(f"duplicate overfit run for {key}/{phase}")
         pairs[key][phase] = record
@@ -98,6 +113,12 @@ def summarize_overfit_runs(run_paths: Iterable[Path], output_run: Path) -> dict[
         "required_compact_seed_count": 3,
         "required_compact_passed_seed_count": 2,
         "reference_seed_20260828_complete": reference_complete,
+        "latent_protocol": {
+            "capacity_gate": "posterior_mean",
+            "capacity_diagnostics": ["prior_mean"],
+            "full_gate": "prior_mean",
+            "full_diagnostics": [],
+        },
         "ablations": ablations,
         "runs": records,
     }
@@ -112,8 +133,8 @@ def summarize_overfit_runs(run_paths: Iterable[Path], output_run: Path) -> dict[
         f"- 紧凑模型两阶段通过：{sum(required_seed_results.values())}/3（要求至少 2）",
         f"- 原模型 seed 20260828 对照完整：{reference_complete}",
         "",
-        "| 模型 | 阶段 | Seed | 参数量 | 最差阈值比 | 结果 |",
-        "|---|---|---:|---:|---:|---|",
+        "| 模型 | 阶段 | Seed | 参数量 | 门禁 latent | 诊断 latent | 最差阈值比 | 结果 |",
+        "|---|---|---:|---:|---|---|---:|---|",
     ]
     for record in sorted(
         records,
@@ -123,9 +144,15 @@ def summarize_overfit_runs(run_paths: Iterable[Path], output_run: Path) -> dict[
         ),
     ):
         lines.append(
-            "| {model_profile} | {overfit_phase} | {seed} | {parameter_count} | "
-            "{best_overfit_score:.4f} | {status} |".format(
-                **record,
+            "| {profile} | {phase} | {seed} | {parameters} | {gate} | {diagnostics} | "
+            "{score:.4f} | {status} |".format(
+                profile=record.get("model_profile"),
+                phase=record.get("overfit_phase"),
+                seed=record.get("seed"),
+                parameters=record.get("parameter_count"),
+                gate=record.get("gate_latent_mode"),
+                diagnostics=", ".join(record.get("diagnostic_latent_modes") or []) or "—",
+                score=float(record.get("best_overfit_score", float("inf"))),
                 status="PASS" if record.get("passed") else "FAIL",
             )
         )

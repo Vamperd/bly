@@ -48,6 +48,24 @@ def _finite_series(records: Iterable[dict[str, Any]], key: str) -> list[tuple[fl
     return values
 
 
+def _nested_finite_series(
+    records: Iterable[dict[str, Any]], keys: tuple[str, ...]
+) -> list[tuple[float, float]]:
+    values = []
+    for record in records:
+        try:
+            x = float(record["optimizer_step"])
+            current: Any = record
+            for key in keys:
+                current = current[key]
+            y = float(current)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            values.append((x, y))
+    return values
+
+
 def _panel(
     parts: list[str], x: float, y: float, width: float, height: float,
     title: str, series: list[tuple[str, list[tuple[float, float]], str]],
@@ -108,6 +126,16 @@ def write_training_svg(
         '<style>text{font-family:Arial,"Microsoft YaHei",sans-serif;fill:#0f172a}</style>',
         '<text x="32" y="34" font-size="22" font-weight="700">32-motion overfit training</text>',
     ]
+    gate_modes = {
+        str(record.get("gate_latent_mode"))
+        for record in validation
+        if record.get("gate_latent_mode")
+    }
+    if gate_modes:
+        parts.append(
+            f'<text x="420" y="32" font-size="12" fill="#64748b">'
+            f'gate latent: {escape(", ".join(sorted(gate_modes)))}</text>'
+        )
     loss_series = []
     for index, key in enumerate(("total", "masked", "forward", "inverse", "history_action", "rollout")):
         raw = _finite_series(train, key)
@@ -142,6 +170,68 @@ def write_training_svg(
     _panel(parts, 710, 55, 660, 390, "Fixed-suite normalized RMSE", metric_series, horizontal=threshold_lines)
     _panel(parts, 30, 470, 660, 390, "Learning rate and gradient norm", lr_series, log_y=True)
     _panel(parts, 710, 470, 660, 390, "Dataset repetition and gate", progress_series, horizontal=[(1.0, "pass boundary")])
+    parts.append("</svg>")
+    atomic_write_text(output_path, "".join(parts))
+
+
+def write_latent_comparison_svg(
+    metrics_path: Path, output_path: Path, thresholds: dict[str, float] | None = None
+) -> None:
+    """Plot gate and diagnostic latent paths from the same fixed-suite records."""
+    validation = [
+        record for record in read_metrics(metrics_path)
+        if record.get("phase") == "validation"
+    ]
+    metric_keys = (
+        "forward_one_normalized_rmse",
+        "action_inverse_local_normalized_rmse",
+        "arbitrary_state_normalized_rmse",
+        "action_completion_macro_normalized_rmse",
+        "history_action_normalized_rmse",
+        "forward_rollout_8_normalized_rmse",
+    )
+    gate_modes = sorted({
+        str(record.get("gate_latent_mode"))
+        for record in validation
+        if record.get("gate_latent_mode")
+    })
+    diagnostic_modes = sorted({
+        str(mode)
+        for record in validation
+        for mode in (record.get("latent_diagnostics") or {})
+    })
+    gate_label = gate_modes[0] if len(gate_modes) == 1 else "gate"
+    parts = [
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">',
+        '<rect width="1400" height="900" fill="#f8fafc"/>',
+        '<style>text{font-family:Arial,"Microsoft YaHei",sans-serif;fill:#0f172a}</style>',
+        '<text x="28" y="32" font-size="22" font-weight="700">Capacity latent-mode comparison</text>',
+        '<text x="420" y="31" font-size="12" fill="#64748b">same batches, windows, and masks; diagnostics do not gate</text>',
+    ]
+    for index, key in enumerate(metric_keys):
+        row, column = divmod(index, 3)
+        x, y = 20 + column * 460, 50 + row * 420
+        series = [
+            (f"{gate_label} gate", _finite_series(validation, key), COLORS[0]),
+        ]
+        for diagnostic_index, mode in enumerate(diagnostic_modes):
+            series.append((
+                f"{mode} diagnostic",
+                _nested_finite_series(
+                    validation, ("latent_diagnostics", mode, key)
+                ),
+                COLORS[(diagnostic_index + 1) % len(COLORS)],
+            ))
+        horizontal = None
+        if thresholds and key in thresholds:
+            horizontal = [(float(thresholds[key]), "strict threshold")]
+        _panel(
+            parts, x, y, 440, 390,
+            key.replace("_normalized_rmse", ""),
+            series,
+            log_y=True,
+            horizontal=horizontal,
+        )
     parts.append("</svg>")
     atomic_write_text(output_path, "".join(parts))
 

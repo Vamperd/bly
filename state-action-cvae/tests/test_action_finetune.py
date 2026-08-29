@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -11,6 +12,9 @@ from cvae_sa.trainer import (
     action_finetune_parameter_groups,
     load_weight_only_initialization,
     overfit_gate,
+    overfit_latent_protocol,
+    validate_action_finetune,
+    validate_overfit_suite,
     warmup_cosine_factor,
 )
 
@@ -36,6 +40,50 @@ MODEL_CONFIG = {
     "actuator_type_count": 1,
     "token_layout": "interleaved",
 }
+
+
+class _FixedMasker:
+    def __init__(self) -> None:
+        self.optimizer_step = 0
+
+    def set_step(self, step: int) -> None:
+        self.optimizer_step = step
+
+    def generate(self, batch: dict[str, torch.Tensor], **_: object) -> SimpleNamespace:
+        batch_size = batch["action"].shape[0]
+        return SimpleNamespace(
+            forward_transition=torch.ones(batch_size, 128, dtype=torch.bool),
+            inverse_transition=torch.ones(batch_size, 128, dtype=torch.bool),
+            history_action_transition=torch.ones(batch_size, 128, dtype=torch.bool),
+            state_loss=torch.ones(batch_size, 129, 70, dtype=torch.bool),
+            action_loss=torch.ones(batch_size, 128, 29, dtype=torch.bool),
+            rollout_start=torch.zeros(batch_size, dtype=torch.long),
+            rollout_horizon=torch.full((batch_size,), 8, dtype=torch.long),
+        )
+
+
+class _LatentSpyModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[int, bool, bool]] = []
+
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+        masks: SimpleNamespace,
+        sample_from_prior: bool = False,
+        deterministic: bool = False,
+    ) -> SimpleNamespace:
+        self.calls.append((id(masks), sample_from_prior, deterministic))
+        value = 2.0 if sample_from_prior else 0.0
+        return SimpleNamespace(
+            forward_delta=torch.full((1, 128, 70), value),
+            rollout_state=torch.full((1, 8, 70), value),
+            inverse_action=torch.full((1, 128, 29), value),
+            history_action=torch.full((1, 128, 29), value),
+            action=torch.full((1, 128, 29), value),
+            physical_state=torch.full((1, 129, 70), value),
+        )
 
 
 class ActionFinetuneTest(unittest.TestCase):
@@ -111,6 +159,95 @@ class ActionFinetuneTest(unittest.TestCase):
                 load_weight_only_initialization(
                     child, checkpoint_path, "different-hash", MODEL_CONFIG
                 )
+
+    def test_overfit_latent_protocol_is_phase_strict(self) -> None:
+        capacity = {
+            "overfit_gate_latent_mode": "posterior_mean",
+            "overfit_diagnostic_latent_modes": ["prior_mean"],
+        }
+        full = {
+            "overfit_gate_latent_mode": "prior_mean",
+            "overfit_diagnostic_latent_modes": [],
+        }
+        self.assertEqual(
+            overfit_latent_protocol(capacity, "capacity"),
+            ("posterior_mean", ("prior_mean",)),
+        )
+        self.assertEqual(overfit_latent_protocol(full, "full"), ("prior_mean", ()))
+        with self.assertRaisesRegex(ValueError, "capacity overfit requires"):
+            overfit_latent_protocol(full, "capacity")
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            overfit_latent_protocol({
+                "overfit_gate_latent_mode": "unknown",
+                "overfit_diagnostic_latent_modes": [],
+            }, "capacity")
+
+    def test_capacity_gate_and_prior_diagnostic_share_masks_but_not_scores(self) -> None:
+        model = _LatentSpyModel()
+        masker = _FixedMasker()
+        batch = {
+            "physical_state": torch.zeros(1, 129, 70),
+            "action": torch.zeros(1, 128, 29),
+        }
+        result = validate_overfit_suite(
+            model,
+            [batch] * 12,
+            masker,
+            torch.device("cpu"),
+            "bf16",
+            12,
+            "posterior_mean",
+            ("prior_mean",),
+        )
+        self.assertEqual(result["gate_latent_mode"], "posterior_mean")
+        self.assertEqual(result["arbitrary_state_normalized_rmse"], 0.0)
+        self.assertEqual(
+            result["latent_diagnostics"]["prior_mean"][
+                "arbitrary_state_normalized_rmse"
+            ],
+            2.0,
+        )
+        self.assertTrue(overfit_gate(result)["overfit_pass"])
+        self.assertEqual(len(model.calls), 24)
+        for posterior, prior in zip(model.calls[0::2], model.calls[1::2]):
+            self.assertEqual(posterior[0], prior[0])
+            self.assertEqual(posterior[1:], (False, True))
+            self.assertEqual(prior[1:], (True, True))
+
+    def test_full_gate_uses_prior_mean(self) -> None:
+        model = _LatentSpyModel()
+        masker = _FixedMasker()
+        batch = {
+            "physical_state": torch.zeros(1, 129, 70),
+            "action": torch.zeros(1, 128, 29),
+        }
+        result = validate_overfit_suite(
+            model,
+            [batch] * 12,
+            masker,
+            torch.device("cpu"),
+            "bf16",
+            12,
+            "prior_mean",
+            (),
+        )
+        self.assertEqual(result["gate_latent_mode"], "prior_mean")
+        self.assertEqual(result["latent_diagnostics"], {})
+        self.assertFalse(overfit_gate(result)["overfit_pass"])
+        self.assertTrue(all(call[1:] == (True, True) for call in model.calls))
+
+    def test_action_finetune_keeps_prior_mean_validation(self) -> None:
+        model = _LatentSpyModel()
+        masker = _FixedMasker()
+        batch = {
+            "physical_state": torch.zeros(1, 129, 70),
+            "action": torch.zeros(1, 128, 29),
+        }
+        result = validate_action_finetune(
+            model, [batch] * 12, masker, torch.device("cpu"), "bf16", 12
+        )
+        self.assertEqual(result["arbitrary_state_normalized_rmse"], 2.0)
+        self.assertTrue(all(call[1:] == (True, True) for call in model.calls))
 
 
 if __name__ == "__main__":

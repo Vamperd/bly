@@ -55,6 +55,8 @@
     "kl_beta": 0.0,
     "free_bits": 0.05,
     "latent_mode": "posterior_mean",
+    "overfit_gate_latent_mode": "posterior_mean",
+    "overfit_diagnostic_latent_modes": ["prior_mean"],
     "forward_weight": 1.5,
     "inverse_weight": 1.0,
     "history_action_weight": 1.0,

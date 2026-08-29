@@ -18,7 +18,7 @@ from .losses import compute_loss
 from .masking import MaskGenerator
 from .models import build_model, parameter_count
 from .overfit_diagnostics import evaluate_input_sensitivity
-from .overfit_visualization import write_training_svg
+from .overfit_visualization import write_latent_comparison_svg, write_training_svg
 from .util import (
     atomic_torch_save,
     atomic_write_json,
@@ -69,6 +69,39 @@ def overfit_gate(
         "overfit_thresholds": limits,
         "overfit_ratios": ratios,
     }
+
+
+def overfit_latent_protocol(
+    training: dict[str, Any], overfit_phase: str
+) -> tuple[str, tuple[str, ...]]:
+    """Validate the phase-specific latent source used for gates and diagnostics."""
+    supported = {"posterior_mean", "prior_mean"}
+    gate_mode = str(training.get("overfit_gate_latent_mode", ""))
+    raw_diagnostics = training.get("overfit_diagnostic_latent_modes")
+    if not isinstance(raw_diagnostics, list) or not all(
+        isinstance(item, str) for item in raw_diagnostics
+    ):
+        raise ValueError("overfit_diagnostic_latent_modes must be a list of strings")
+    diagnostic_modes = tuple(raw_diagnostics)
+    unsupported = sorted(({gate_mode, *diagnostic_modes} - supported) - {""})
+    if unsupported or gate_mode not in supported:
+        raise ValueError(
+            f"unsupported overfit validation latent modes: "
+            f"{unsupported or [gate_mode]}"
+        )
+    if len(set(diagnostic_modes)) != len(diagnostic_modes):
+        raise ValueError("overfit diagnostic latent modes must be unique")
+    if gate_mode in diagnostic_modes:
+        raise ValueError("overfit gate latent mode cannot also be diagnostic")
+    expected_gate = "posterior_mean" if overfit_phase == "capacity" else "prior_mean"
+    expected_diagnostics = ("prior_mean",) if overfit_phase == "capacity" else ()
+    if gate_mode != expected_gate or diagnostic_modes != expected_diagnostics:
+        raise ValueError(
+            f"{overfit_phase} overfit requires gate={expected_gate!r} and "
+            f"diagnostics={list(expected_diagnostics)!r}; found gate={gate_mode!r} "
+            f"and diagnostics={list(diagnostic_modes)!r}"
+        )
+    return gate_mode, diagnostic_modes
 
 
 def _device_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -249,15 +282,24 @@ def _validate_physics(
 
 
 @torch.no_grad()
-def validate_action_finetune(
+def _validate_action_finetune_modes(
     model: torch.nn.Module,
     loader: DataLoader,
     masker: MaskGenerator,
     device: torch.device,
     amp: str,
     max_batches: int,
-) -> dict[str, float]:
-    """Fixed validation suite used for parent baselines and fine-tune selection."""
+    latent_modes: tuple[str, ...],
+) -> dict[str, dict[str, float]]:
+    """Evaluate multiple deterministic latent paths on identical batches and masks."""
+    supported_modes = {"posterior_mean", "prior_mean"}
+    if not latent_modes:
+        raise ValueError("at least one validation latent mode is required")
+    if len(set(latent_modes)) != len(latent_modes):
+        raise ValueError("validation latent modes must be unique")
+    unsupported = sorted(set(latent_modes) - supported_modes)
+    if unsupported:
+        raise ValueError(f"unsupported validation latent modes: {unsupported}")
     cases = (
         ("forward_one", {}),
         ("forward_rollout", {}),
@@ -272,7 +314,9 @@ def validate_action_finetune(
         ("arbitrary_state", {"force_task": "arbitrary", "force_target": "state"}),
         ("state_step32", {"force_task": "arbitrary", "force_target": "state", "force_granularity": "step", "force_length": 32}),
     )
-    values: dict[str, list[float]] = {name: [] for name, _ in cases}
+    values_by_mode: dict[str, dict[str, list[float]]] = {
+        mode: {name: [] for name, _ in cases} for mode in latent_modes
+    }
     model.eval()
     masker.set_step(max(masker.optimizer_step, 40_000))
     for batch_index, cpu_batch in enumerate(loader):
@@ -293,67 +337,121 @@ def validate_action_finetune(
             force_target=arguments.get("force_target"),
             force_granularity=arguments.get("force_granularity"),
         )
-        with _autocast(device, amp):
-            output = model(batch, masks, sample_from_prior=True, deterministic=True)
-        error: torch.Tensor | None = None
-        if name == "forward_one":
-            target = batch["physical_state"][:, 1:] - batch["physical_state"][:, :-1]
-            mask = masks.forward_transition[:, :, None].expand_as(target)
-            error = _masked_squared_error(output.forward_delta.float(), target.float(), mask)
-        elif name == "forward_rollout":
-            rollout_errors = []
-            if output.rollout_state is not None:
-                for index in range(output.rollout_state.shape[0]):
-                    start = int(masks.rollout_start[index].item())
-                    horizon = min(8, int(masks.rollout_horizon[index].item()))
-                    if horizon > 0:
-                        rollout_errors.append(torch.square(
-                            output.rollout_state[index, :horizon].float()
-                            - batch["physical_state"][index, start + 1 : start + horizon + 1].float()
-                        ).mean())
-            if rollout_errors:
-                error = torch.stack(rollout_errors).mean()
-        elif name.startswith("inverse_"):
-            mask = masks.inverse_transition[:, :, None].expand_as(output.inverse_action)
-            error = _masked_squared_error(output.inverse_action.float(), batch["action"].float(), mask)
-        elif name == "history_action":
-            mask = masks.history_action_transition[:, :, None].expand_as(output.history_action)
-            error = _masked_squared_error(output.history_action.float(), batch["action"].float(), mask)
-        elif name.startswith("completion_") or name == "arbitrary_action":
-            error = _masked_squared_error(output.action.float(), batch["action"].float(), masks.action_loss)
-        else:
-            error = _masked_squared_error(
-                output.physical_state.float(), batch["physical_state"].float(), masks.state_loss
-            )
-        if error is not None:
-            values[name].append(float(torch.sqrt(error).cpu()))
-    means = {name: float(np.mean(items)) if items else math.inf for name, items in values.items()}
-    completion_macro = float(np.mean([
-        means["completion_element"], means["completion_step"],
-        means["completion_feature"], means["completion_semantic"],
-    ]))
-    score = (
-        0.30 * means["inverse_local"]
-        + 0.25 * means["inverse_full"]
-        + 0.25 * completion_macro
-        + 0.10 * means["history_action"]
-        + 0.10 * means["arbitrary_action"]
-    )
-    result = {
-        "selection_score": score,
-        "action_inverse_local_normalized_rmse": means["inverse_local"],
-        "action_inverse_full_128_normalized_rmse": means["inverse_full"],
-        "action_completion_macro_normalized_rmse": completion_macro,
-        "history_action_normalized_rmse": means["history_action"],
-        "arbitrary_action_normalized_rmse": means["arbitrary_action"],
-        "forward_one_normalized_rmse": means["forward_one"],
-        "forward_rollout_8_normalized_rmse": means["forward_rollout"],
-        "arbitrary_state_normalized_rmse": means["arbitrary_state"],
-        "state_step_32_normalized_rmse": means["state_step32"],
-        **{f"rmse/{name}": value for name, value in means.items()},
-    }
+        # Both paths consume this exact MaskBatch, so differences isolate only
+        # the latent source rather than RNG, loader, or curriculum drift.
+        for latent_mode in latent_modes:
+            with _autocast(device, amp):
+                output = model(
+                    batch,
+                    masks,
+                    sample_from_prior=latent_mode == "prior_mean",
+                    deterministic=True,
+                )
+            error: torch.Tensor | None = None
+            if name == "forward_one":
+                target = batch["physical_state"][:, 1:] - batch["physical_state"][:, :-1]
+                mask = masks.forward_transition[:, :, None].expand_as(target)
+                error = _masked_squared_error(output.forward_delta.float(), target.float(), mask)
+            elif name == "forward_rollout":
+                rollout_errors = []
+                if output.rollout_state is not None:
+                    for index in range(output.rollout_state.shape[0]):
+                        start = int(masks.rollout_start[index].item())
+                        horizon = min(8, int(masks.rollout_horizon[index].item()))
+                        if horizon > 0:
+                            rollout_errors.append(torch.square(
+                                output.rollout_state[index, :horizon].float()
+                                - batch["physical_state"][index, start + 1 : start + horizon + 1].float()
+                            ).mean())
+                if rollout_errors:
+                    error = torch.stack(rollout_errors).mean()
+            elif name.startswith("inverse_"):
+                mask = masks.inverse_transition[:, :, None].expand_as(output.inverse_action)
+                error = _masked_squared_error(output.inverse_action.float(), batch["action"].float(), mask)
+            elif name == "history_action":
+                mask = masks.history_action_transition[:, :, None].expand_as(output.history_action)
+                error = _masked_squared_error(output.history_action.float(), batch["action"].float(), mask)
+            elif name.startswith("completion_") or name == "arbitrary_action":
+                error = _masked_squared_error(output.action.float(), batch["action"].float(), masks.action_loss)
+            else:
+                error = _masked_squared_error(
+                    output.physical_state.float(), batch["physical_state"].float(), masks.state_loss
+                )
+            if error is not None:
+                values_by_mode[latent_mode][name].append(float(torch.sqrt(error).cpu()))
+
+    results: dict[str, dict[str, float]] = {}
+    for latent_mode, values in values_by_mode.items():
+        means = {
+            name: float(np.mean(items)) if items else math.inf
+            for name, items in values.items()
+        }
+        completion_macro = float(np.mean([
+            means["completion_element"], means["completion_step"],
+            means["completion_feature"], means["completion_semantic"],
+        ]))
+        score = (
+            0.30 * means["inverse_local"]
+            + 0.25 * means["inverse_full"]
+            + 0.25 * completion_macro
+            + 0.10 * means["history_action"]
+            + 0.10 * means["arbitrary_action"]
+        )
+        results[latent_mode] = {
+            "selection_score": score,
+            "action_inverse_local_normalized_rmse": means["inverse_local"],
+            "action_inverse_full_128_normalized_rmse": means["inverse_full"],
+            "action_completion_macro_normalized_rmse": completion_macro,
+            "history_action_normalized_rmse": means["history_action"],
+            "arbitrary_action_normalized_rmse": means["arbitrary_action"],
+            "forward_one_normalized_rmse": means["forward_one"],
+            "forward_rollout_8_normalized_rmse": means["forward_rollout"],
+            "arbitrary_state_normalized_rmse": means["arbitrary_state"],
+            "state_step_32_normalized_rmse": means["state_step32"],
+            **{f"rmse/{case_name}": value for case_name, value in means.items()},
+        }
     model.train()
-    return result
+    return results
+
+
+def validate_action_finetune(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    masker: MaskGenerator,
+    device: torch.device,
+    amp: str,
+    max_batches: int,
+) -> dict[str, float]:
+    """Preserve the existing deterministic-prior fine-tune validation contract."""
+    return _validate_action_finetune_modes(
+        model, loader, masker, device, amp, max_batches, ("prior_mean",)
+    )["prior_mean"]
+
+
+def validate_overfit_suite(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    masker: MaskGenerator,
+    device: torch.device,
+    amp: str,
+    max_batches: int,
+    gate_latent_mode: str,
+    diagnostic_latent_modes: tuple[str, ...],
+) -> dict[str, Any]:
+    """Return gate metrics flat and keep non-gating latent paths namespaced."""
+    if gate_latent_mode in diagnostic_latent_modes:
+        raise ValueError("gate latent mode cannot also be a diagnostic latent mode")
+    modes = (gate_latent_mode, *diagnostic_latent_modes)
+    results = _validate_action_finetune_modes(
+        model, loader, masker, device, amp, max_batches, modes
+    )
+    return {
+        **results[gate_latent_mode],
+        "gate_latent_mode": gate_latent_mode,
+        "latent_diagnostics": {
+            mode: results[mode] for mode in diagnostic_latent_modes
+        },
+    }
 
 
 ACTION_PARAMETER_PREFIXES = (
@@ -552,6 +650,13 @@ def train(
     if config["model"]["kind"] == "physics_transformer" and not train_dataset.physics_v4:
         raise ValueError("physics_transformer requires a Physics State-Action CVAE v4 index")
     training = config["training"]
+    overfit_gate_latent_mode: str | None = None
+    overfit_diagnostic_latent_modes: tuple[str, ...] = ()
+    if overfit_phase is not None:
+        (
+            overfit_gate_latent_mode,
+            overfit_diagnostic_latent_modes,
+        ) = overfit_latent_protocol(training, overfit_phase)
     generator = torch.Generator().manual_seed(seed)
     sampler = None
     if config["model"]["kind"] == "physics_transformer" and bool(
@@ -713,6 +818,8 @@ def train(
             "fine_tune_mode": fine_tune_mode,
             "overfit_phase": overfit_phase,
             "model_profile": config["model"].get("profile"),
+            "overfit_gate_latent_mode": overfit_gate_latent_mode,
+            "overfit_diagnostic_latent_modes": list(overfit_diagnostic_latent_modes),
             "fixed_window_count": len(train_dataset),
             "optimizer_parameter_groups": optimizer_groups,
             "initialization": provenance,
@@ -798,11 +905,18 @@ def train(
             with torch.random.fork_rng(devices=validation_devices):
                 torch.manual_seed(seed + 90_001)
                 validation = (
-                    validate_action_finetune(
+                    validate_overfit_suite(
+                        model, validation_loader, masker, device,
+                        str(training["amp"]), int(training["validation_max_batches"]),
+                        str(overfit_gate_latent_mode),
+                        overfit_diagnostic_latent_modes,
+                    )
+                    if overfit_phase is not None
+                    else validate_action_finetune(
                         model, validation_loader, masker, device,
                         str(training["amp"]), int(training["validation_max_batches"]),
                     )
-                    if fine_tune_mode == "action" or overfit_phase is not None
+                    if fine_tune_mode == "action"
                     else validate(
                         model, validation_loader, masker, device,
                         str(training["amp"]), int(training["validation_max_batches"]),
@@ -882,6 +996,12 @@ def train(
                     output_run / "videos/training_curves.svg",
                     training.get("overfit_thresholds", DEFAULT_OVERFIT_THRESHOLDS),
                 )
+                if overfit_diagnostic_latent_modes:
+                    write_latent_comparison_svg(
+                        metrics_path,
+                        output_run / "videos/latent_mode_comparison.svg",
+                        training.get("overfit_thresholds", DEFAULT_OVERFIT_THRESHOLDS),
+                    )
                 minimum_steps = int(training.get("minimum_optimizer_steps", 0))
                 required_streak = int(training.get("overfit_consecutive_validations", 2))
                 if optimizer_step >= minimum_steps and overfit_pass_streak >= required_streak:
@@ -980,6 +1100,8 @@ def train(
             "passed": bool(overfit_consecutive_pass),
             "overfit_phase": overfit_phase,
             "model_profile": config["model"].get("profile", "unspecified"),
+            "gate_latent_mode": overfit_gate_latent_mode,
+            "diagnostic_latent_modes": list(overfit_diagnostic_latent_modes),
             "seed": seed,
             "parameter_count": actual_parameter_count,
             "best_overfit_score": best_score,
@@ -1003,6 +1125,12 @@ def train(
             output_run / "videos/training_curves.svg",
             training.get("overfit_thresholds", DEFAULT_OVERFIT_THRESHOLDS),
         )
+        if overfit_diagnostic_latent_modes:
+            write_latent_comparison_svg(
+                metrics_path,
+                output_run / "videos/latent_mode_comparison.svg",
+                training.get("overfit_thresholds", DEFAULT_OVERFIT_THRESHOLDS),
+            )
         if overfit_phase == "full" and overfit_consecutive_pass:
             model.load_state_dict(reopened["model"], strict=True)
             validation_devices = (
