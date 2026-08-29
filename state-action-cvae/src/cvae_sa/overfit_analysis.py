@@ -34,6 +34,23 @@ TASKS = (
 )
 
 
+def _checkpoint_loss_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the loss settings stored in a trainer checkpoint config."""
+    training = config.get("training")
+    if not isinstance(training, dict):
+        raise ValueError(
+            "analysis checkpoint config is missing the training loss settings"
+        )
+    required = ("free_bits", "forward_weight", "inverse_weight", "gravity_weight")
+    missing = [name for name in required if name not in training]
+    if missing:
+        raise ValueError(
+            "analysis checkpoint training config is missing loss fields: "
+            + ", ".join(missing)
+        )
+    return training
+
+
 def _rows(path: Path) -> list[dict[str, Any]]:
     return [
         json.loads(line)
@@ -311,6 +328,7 @@ def _model_diagnostics(
     if checkpoint.get("dataset_manifest_sha256") != manifest_hash:
         raise ValueError("checkpoint and analysis dataset manifest hashes differ")
     config = checkpoint["config"]
+    loss_config = _checkpoint_loss_config(config)
     dataset = StateActionWindowDataset(
         dataset_run, "train",
         window_transitions=int(config["data"]["window_transitions"]),
@@ -350,7 +368,7 @@ def _model_diagnostics(
             "fixed_mask_seed": seed,
         }).to(device)
         output = model(batch, masks, sample_from_prior=False, deterministic=True)
-        loss = compute_loss(output, batch, masks, config["loss"], kl_beta=0.0)
+        loss = compute_loss(output, batch, masks, loss_config, kl_beta=0.0)
         loss.total.backward()
         gradients[task] = torch.cat([
             torch.zeros(parameter.numel())

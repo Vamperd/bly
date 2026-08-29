@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from cvae_sa.overfit_analysis import nearest_target_dispersions
+from cvae_sa.overfit_analysis import _checkpoint_loss_config, nearest_target_dispersions
 from cvae_sa.overfit_report import summarize_overfit_runs
 from cvae_sa.overfit_single_report import summarize_single_task_runs
 from cvae_sa.overfit_visualization import (
@@ -19,6 +19,16 @@ from cvae_sa.util import load_config
 
 
 class OverfitToolsTest(unittest.TestCase):
+    def test_analysis_reads_loss_settings_from_checkpoint_training_config(self) -> None:
+        project = Path(__file__).resolve().parents[1]
+        config = load_config(
+            project / "configs/default.json",
+            project / "configs/overfit_32_compact_capacity.json",
+        )
+        self.assertIs(_checkpoint_loss_config(config), config["training"])
+        with self.assertRaisesRegex(ValueError, "missing the training loss settings"):
+            _checkpoint_loss_config({"model": config["model"]})
+
     def test_empirical_ambiguity_uses_unique_episode_frame_records(self) -> None:
         episodes = []
         for episode_index in range(4):
