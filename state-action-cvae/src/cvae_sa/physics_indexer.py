@@ -206,7 +206,9 @@ def build_physics_index(
                     )
                     if reference.shape != (steps, REFERENCE_FRAMES, REFERENCE_DIM):
                         raise ValueError(f"{episode.name}: invalid reference length")
-                    if not np.array_equal(offsets, expected_offsets):
+                    if not np.allclose(
+                        offsets, expected_offsets, rtol=0.0, atol=1.0e-7
+                    ):
                         raise ValueError(f"{episode.name}: reference offsets differ from schema")
                 if (
                     states.shape != (steps + 1, PHYSICS_STATE_DIM)

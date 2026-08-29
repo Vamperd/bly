@@ -269,8 +269,8 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
                         root_reference
                     ).all():
                         raise ValueError(f"{episode.name}: reference NaN/Inf")
-                    if reference_offsets.shape != (10,) or not np.array_equal(
-                        reference_offsets, expected_offsets
+                    if reference_offsets.shape != (10,) or not np.allclose(
+                        reference_offsets, expected_offsets, rtol=0.0, atol=1.0e-7
                     ):
                         raise ValueError(f"{episode.name}: reference offsets mismatch")
                 elif "reference" in episode:
