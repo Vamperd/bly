@@ -23,6 +23,10 @@ JOINT_ROBOT_INFO_DIM = 11
 GLOBAL_ROBOT_INFO_DIM = 9
 DYNAMICS_CONTEXT_DIM = 648
 AUXILIARY_TRANSITION_DIM = 35
+REFERENCE_FRAMES = 10
+REFERENCE_JOINT_DIM = 58
+REFERENCE_ROOT_DIM = 6
+REFERENCE_DIM = REFERENCE_JOINT_DIM + REFERENCE_ROOT_DIM
 
 
 def resolve_parameter(entry: dict[str, Any], env_id: int) -> np.ndarray:
@@ -39,7 +43,8 @@ def resolve_parameter(entry: dict[str, Any], env_id: int) -> np.ndarray:
 
 
 def validate_physics_schema(schema: dict[str, Any]) -> None:
-    if schema.get("schema_version") != "sonic_physics_sa_v3":
+    version = schema.get("schema_version")
+    if version not in {"sonic_physics_sa_v3", "sonic_physics_sa_v5"}:
         raise ValueError(f"unsupported physics schema {schema.get('schema_version')!r}")
     if schema.get("dimensions") != {"state": 70, "action": 29}:
         raise ValueError(f"unexpected physics dimensions {schema.get('dimensions')!r}")
@@ -59,6 +64,23 @@ def validate_physics_schema(schema: dict[str, Any]) -> None:
         raise ValueError("physics control_dt must be 0.02")
     if int(timing.get("decimation", -1)) != 4:
         raise ValueError("physics decimation must be 4")
+    reference = schema.get("reference_future")
+    if version == "sonic_physics_sa_v5":
+        expected = {
+            "frames": REFERENCE_FRAMES,
+            "joint_pos_vel_dimension": REFERENCE_JOINT_DIM,
+            "root_orientation_dimension": REFERENCE_ROOT_DIM,
+            "source": "command_manager_runtime_observation",
+        }
+        if not isinstance(reference, dict) or any(
+            reference.get(name) != value for name, value in expected.items()
+        ):
+            raise ValueError(f"invalid deployable reference contract: {reference!r}")
+        offsets = np.asarray(reference.get("time_offsets_seconds"), dtype=np.float32)
+        if offsets.shape != (REFERENCE_FRAMES,) or not np.isfinite(offsets).all():
+            raise ValueError("reference time offsets must contain ten finite values")
+    elif reference is not None:
+        raise ValueError("Physics v3 schema cannot declare reference_future")
 
 
 def load_physics_schema(path: Path) -> dict[str, Any]:
@@ -78,6 +100,30 @@ def read_physics_states(group: Any, start: int | None = None, stop: int | None =
     if not np.isfinite(result).all():
         raise ValueError(f"{group.name}: State contains NaN/Inf")
     return result
+
+
+def read_reference_future(
+    episode: Any, start: int | None = None, stop: int | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read the exact causal command/reference tensors observed by SONIC."""
+    group = episode["reference"]
+    joint = np.asarray(
+        group["joint_pos_vel_future"][slice(start, stop)], dtype=np.float32
+    )
+    root = np.asarray(
+        group["root_orientation_future"][slice(start, stop)], dtype=np.float32
+    )
+    offsets = np.asarray(group["time_offsets"], dtype=np.float32)
+    if joint.ndim != 3 or joint.shape[1:] != (REFERENCE_FRAMES, REFERENCE_JOINT_DIM):
+        raise ValueError(f"{group.name}/joint_pos_vel_future: invalid shape {joint.shape}")
+    if root.shape != (joint.shape[0], REFERENCE_FRAMES, REFERENCE_ROOT_DIM):
+        raise ValueError(f"{group.name}/root_orientation_future: invalid shape {root.shape}")
+    if offsets.shape != (REFERENCE_FRAMES,):
+        raise ValueError(f"{group.name}/time_offsets: invalid shape {offsets.shape}")
+    result = np.concatenate((joint, root), axis=-1)
+    if not np.isfinite(result).all() or not np.isfinite(offsets).all():
+        raise ValueError(f"{group.name}: reference contains NaN/Inf")
+    return result, offsets
 
 
 def robot_information_vector(

@@ -19,11 +19,13 @@ from .physics_schema import (
     GLOBAL_ROBOT_INFO_DIM,
     JOINT_ROBOT_INFO_DIM,
     PHYSICS_STATE_DIM,
+    REFERENCE_DIM,
     ROBOT_INFO_DIM,
     dynamics_context_vector,
     load_physics_schema,
     read_auxiliary_transitions,
     read_physics_states,
+    read_reference_future,
     robot_information_vector,
     structured_robot_information,
 )
@@ -71,7 +73,9 @@ def _select_motion_keys(
 
 
 def _normalization(
-    rows: list[dict[str, Any]], actuator_type_to_id: dict[str, int]
+    rows: list[dict[str, Any]],
+    actuator_type_to_id: dict[str, int],
+    reference_available: bool,
 ) -> dict[str, np.ndarray]:
     state_stats = RunningStats(PHYSICS_STATE_DIM)
     action_stats = RunningStats(ACTION_DIM)
@@ -80,6 +84,7 @@ def _normalization(
     global_robot_stats = RunningStats(GLOBAL_ROBOT_INFO_DIM)
     dynamics_stats = RunningStats(DYNAMICS_CONTEXT_DIM)
     auxiliary_stats = RunningStats(AUXILIARY_TRANSITION_DIM)
+    reference_stats = RunningStats(REFERENCE_DIM) if reference_available else None
     handles: dict[str, h5py.File] = {}
     schemas: dict[str, dict[str, Any]] = {}
     try:
@@ -112,6 +117,9 @@ def _normalization(
             global_robot_stats.update(global_robot[None])
             dynamics_stats.update(dynamics_context_vector(context)[None])
             auxiliary_stats.update(auxiliary)
+            if reference_stats is not None:
+                reference, _ = read_reference_future(episode)
+                reference_stats.update(reference.reshape(-1, REFERENCE_DIM))
     finally:
         for stream in handles.values():
             stream.close()
@@ -133,6 +141,13 @@ def _normalization(
         mean, std = stats.finalize()
         result[f"{prefix}_mean"] = mean
         result[f"{prefix}_std"] = std
+    if reference_stats is not None:
+        mean, std = reference_stats.finalize()
+    else:
+        mean = np.zeros(REFERENCE_DIM, dtype=np.float32)
+        std = np.ones(REFERENCE_DIM, dtype=np.float32)
+    result["reference_future_mean"] = mean
+    result["reference_future_std"] = std
     return result
 
 
@@ -157,8 +172,15 @@ def build_overfit_subset(
         if not path.is_file():
             raise FileNotFoundError(path)
     parent_manifest = load_json(parent_manifest_path)
-    if parent_manifest.get("schema_version") != "sonic_physics_state_action_cvae_dataset_v4":
-        raise ValueError("overfit subset requires a Physics v4 parent dataset")
+    if parent_manifest.get("schema_version") not in {
+        "sonic_physics_state_action_cvae_dataset_v4",
+        "sonic_physics_state_action_cvae_dataset_v5",
+    }:
+        raise ValueError("overfit subset requires a Physics v4/v5 parent dataset")
+    reference_available = (
+        parent_manifest.get("schema_version")
+        == "sonic_physics_state_action_cvae_dataset_v5"
+    )
     expected_hash = parent_manifest.get("episodes_index_sha256")
     if expected_hash and file_sha256(parent_episodes_path) != expected_hash:
         raise ValueError("parent episodes index hash mismatch")
@@ -178,7 +200,7 @@ def build_overfit_subset(
         (output / child).mkdir(parents=True, exist_ok=True)
     vocabulary = parent_manifest["representations"]["joint_actuator_type"]["vocabulary"]
     actuator_type_to_id = {str(name): index for index, name in enumerate(vocabulary)}
-    normalization = _normalization(rows, actuator_type_to_id)
+    normalization = _normalization(rows, actuator_type_to_id, reference_available)
     normalization_path = output / "data/normalization.npz"
     temporary = normalization_path.with_name(f".{normalization_path.name}.tmp.{os.getpid()}")
     with temporary.open("wb") as stream:

@@ -8,11 +8,15 @@ from types import SimpleNamespace
 import torch
 
 from cvae_sa.models import build_model, parameter_count
+from cvae_sa.masking import MaskGenerator
 from cvae_sa.trainer import (
+    CyclicSequentialSampler,
     action_finetune_parameter_groups,
+    generate_training_masks,
     load_weight_only_initialization,
     overfit_gate,
     overfit_latent_protocol,
+    overfit_task_thresholds,
     validate_action_finetune,
     validate_overfit_suite,
     warmup_cosine_factor,
@@ -87,6 +91,86 @@ class _LatentSpyModel(torch.nn.Module):
 
 
 class ActionFinetuneTest(unittest.TestCase):
+    def test_cyclic_sampler_keeps_full_batches_and_balances_all_windows(self) -> None:
+        sampler = CyclicSequentialSampler(size=10, batch_size=4)
+        values = [*sampler, *sampler, *sampler, *sampler, *sampler]
+        self.assertEqual(len(values), 60)
+        counts = [values.count(index) for index in range(10)]
+        self.assertEqual(min(counts), max(counts))
+        self.assertTrue(all(len(list(CyclicSequentialSampler(10, 4))) % 4 == 0 for _ in range(2)))
+
+    def test_single_task_gate_uses_only_its_trained_metrics(self) -> None:
+        task, thresholds = overfit_task_thresholds({
+            "task_mode": "forward_rollout",
+            "overfit_thresholds": {
+                "forward_one_normalized_rmse": 0.05,
+                "forward_rollout_8_normalized_rmse": 0.10,
+            },
+        })
+        self.assertEqual(task, "forward_rollout")
+        metrics = {
+            "forward_one_normalized_rmse": 0.04,
+            "forward_rollout_8_normalized_rmse": 0.09,
+            "action_inverse_local_normalized_rmse": 999.0,
+        }
+        result = overfit_gate(metrics, thresholds, require_complete=False)
+        self.assertTrue(result["overfit_pass"])
+        self.assertNotIn(
+            "action_inverse_local_normalized_rmse", result["overfit_ratios"]
+        )
+
+    def test_fixed_single_task_masks_repeat_for_exact_windows(self) -> None:
+        config = {
+            "strategy": "physics_bidirectional_v1",
+            "task_probabilities": [0.35, 0.25, 0.40],
+            "completion_probabilities": [0.40, 0.30, 0.30],
+            "element_fraction": [0.10, 0.50],
+            "step_count": [1, 32],
+            "feature_fraction": [0.10, 0.50],
+            "relation_probabilities": [0.40, 0.35, 0.25],
+            "forward_subprobabilities": [0.25, 0.50, 0.25],
+            "calibration_steps": [2, 8],
+            "physics_step_count": [1, 32],
+            "structured_overlay_max_fraction": 0.0,
+            "rollout_start_step": 0,
+        }
+        batch = {
+            "physical_state": torch.zeros(2, 129, 70),
+            "previous_action": torch.empty(2, 129, 0),
+            "action": torch.zeros(2, 128, 29),
+            "valid_state": torch.ones(2, 129, dtype=torch.bool),
+            "valid_action": torch.ones(2, 128, dtype=torch.bool),
+            "episode_ref": ["run::episode_a", "run::episode_b"],
+            "window_start": torch.tensor([0, 64]),
+        }
+        training = {
+            "task_mode": "arbitrary_action",
+            "fixed_training_masks": True,
+            "fixed_mask_seed": 20260828,
+        }
+        masker = MaskGenerator(config)
+        torch.manual_seed(1)
+        first = generate_training_masks(masker, batch, training)
+        torch.manual_seed(999)
+        second = generate_training_masks(masker, batch, training)
+        for name in (
+            "state_input", "previous_input", "action_input", "state_loss",
+            "previous_loss", "action_loss",
+        ):
+            self.assertTrue(torch.equal(getattr(first, name), getattr(second, name)))
+        self.assertEqual(first.task_name, second.task_name)
+        reversed_batch = {
+            key: (
+                value.flip(0) if isinstance(value, torch.Tensor) and value.ndim > 0
+                and value.shape[0] == 2 else list(reversed(value))
+                if isinstance(value, list) and len(value) == 2 else value
+            )
+            for key, value in batch.items()
+        }
+        reversed_masks = generate_training_masks(masker, reversed_batch, training)
+        self.assertTrue(torch.equal(first.action_input[0], reversed_masks.action_input[1]))
+        self.assertTrue(torch.equal(first.action_input[1], reversed_masks.action_input[0]))
+
     def test_compact_parameter_count_and_overfit_gate(self) -> None:
         compact = dict(
             MODEL_CONFIG,

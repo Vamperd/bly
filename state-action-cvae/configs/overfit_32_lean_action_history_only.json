@@ -1,0 +1,10 @@
+{
+  "extends": "overfit_32_lean_single_history_action.json",
+  "model": {
+    "profile": "lean_action_history_only",
+    "reference_conditioning": "off",
+    "action_queue_conditioning": false,
+    "causal_dynamics_embedding": false
+  },
+  "training": {"overfit_gate_policy": "diagnostic"}
+}

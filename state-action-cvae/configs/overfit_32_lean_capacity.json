@@ -1,0 +1,32 @@
+{
+  "extends": "overfit_32_compact_capacity.json",
+  "model": {
+    "kind": "physics_lean_split",
+    "profile": "lean_split_v1",
+    "d_model": 192,
+    "heads": 6,
+    "ffn_dim": 768,
+    "latent_dim": 64,
+    "joint_width": 96,
+    "joint_spatial_layers": 2,
+    "history_steps": 10,
+    "history_layers": 4,
+    "completion_encoder_layers": 2,
+    "completion_decoder_layers": 2,
+    "reference_layers": 2,
+    "reference_frames": 10,
+    "reference_dim": 64,
+    "reference_conditioning": "required",
+    "forward_reference_conditioning": false,
+    "action_queue_conditioning": true,
+    "causal_dynamics_embedding": true,
+    "input_provenance_policy": "deployment_only",
+    "expected_parameter_count": 6204665
+  },
+  "training": {
+    "weight_decay": 0.0,
+    "reference_action_effect_min": 0.01,
+    "forward_reference_max_abs_change": 1e-8,
+    "inverse_nll_weight": 0.1
+  }
+}

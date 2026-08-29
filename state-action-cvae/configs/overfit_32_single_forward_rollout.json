@@ -1,0 +1,13 @@
+{
+  "extends": "overfit_32_compact_capacity.json",
+  "data": {"shuffle_train": false},
+  "model": {"profile": "compact_single_forward_rollout"},
+  "training": {
+    "task_mode": "forward_rollout",
+    "fixed_training_masks": true,
+    "fixed_mask_seed": 20260828,
+    "minimum_optimizer_steps": 20000,
+    "weight_decay": 0.0,
+    "overfit_gate_policy": "strict"
+  }
+}

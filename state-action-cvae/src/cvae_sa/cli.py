@@ -10,7 +10,8 @@ def main() -> int:
         "command",
         choices=(
             "build-index", "build-physics-index", "build-overfit-subset",
-            "smoke-train", "train", "evaluate", "sample", "summarize-overfit"
+            "smoke-train", "train", "evaluate", "sample", "summarize-overfit",
+            "analyze-overfit", "summarize-single-tasks",
         ),
     )
     args, remainder = parser.parse_known_args()
@@ -23,6 +24,10 @@ def main() -> int:
         from .overfit_subset import main as command_main
     elif args.command == "summarize-overfit":
         from .overfit_report import main as command_main
+    elif args.command == "analyze-overfit":
+        from .overfit_analysis import main as command_main
+    elif args.command == "summarize-single-tasks":
+        from .overfit_single_report import main as command_main
     elif args.command in {"smoke-train", "train"}:
         from .trainer import main as command_main
 

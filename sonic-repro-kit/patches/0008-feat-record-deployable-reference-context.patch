@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 29 Aug 2026 18:00:00 +0800
+Subject: [PATCH] feat: record deployable SONIC reference context
+
+Record the exact command-manager tensors consumed by the released policy.
+The reference-aware recorder is opt-in and writes a raw v5 contract, leaving
+the existing Physics v3 recorder unchanged.
+---
+ gear_sonic/config/manager_env/recorders/physics_state_action_reference.yaml | 39 ++++++++++++++++++++
+ gear_sonic/envs/manager_env/mdp/recorders.py                                | 41 ++++++++++++++++++++
+ 2 files changed, 80 insertions(+)
+ create mode 100644 gear_sonic/config/manager_env/recorders/physics_state_action_reference.yaml
+
+diff --git a/gear_sonic/envs/manager_env/mdp/recorders.py b/gear_sonic/envs/manager_env/mdp/recorders.py
+--- a/gear_sonic/envs/manager_env/mdp/recorders.py
++++ b/gear_sonic/envs/manager_env/mdp/recorders.py
+@@ -40,5 +40,6 @@ class RecordersCfg(recorder_manager.RecorderManagerBaseCfg):
+     physics_state_t = None
+     physics_actions = None
+     physics_state_tp1 = None
+     physics_diagnostics = None
++    physics_reference = None
+     physics_metadata = None
+@@ -982,8 +983,31 @@ class PhysicsDiagnosticsRecorderTerm(recorder_manager.RecorderTerm):
+         impulse_w = history[:, :decimation, self._foot_ids].sum(dim=1) * self._env.physics_dt
+         return "physics_transition", {
+             "applied_joint_torque_mean": self._torque_sum / decimation,
+             "foot_contact_impulse": impulse_w,
+         }
+ 
+ 
++class PhysicsReferenceRecorderTerm(recorder_manager.RecorderTerm):
++    """Record only reference tensors that are available to the runtime policy."""
++
++    def record_pre_step(self):
++        command = self._env.command_manager.get_term("motion")
++        frames = int(command.num_future_frames)
++        if frames != 10:
++            raise RuntimeError(f"Physics reference contract requires 10 frames, found {frames}")
++        joint = command.command_multi_future.reshape(self._env.num_envs, frames, -1)
++        root = command.root_rot_dif_l_multi_future.reshape(self._env.num_envs, frames, -1)
++        if joint.shape[2] != 58 or root.shape[2] != 6:
++            raise RuntimeError(
++                f"Unexpected SONIC reference shapes: joint={tuple(joint.shape)}, "
++                f"root={tuple(root.shape)}"
++            )
++        if not torch.isfinite(joint).all() or not torch.isfinite(root).all():
++            raise RuntimeError("SONIC runtime reference contains NaN/Inf")
++        return "physics_reference", {
++            "joint_pos_vel_future": joint,
++            "root_orientation_future": root,
++        }
++
++
+ def _file_sha256(path: str | None) -> str | None:
+@@ -1186,6 +1210,18 @@ class PhysicsMetadataRecorderTerm(recorder_manager.RecorderTerm):
+             "termination_terms": list(self._env.termination_manager.active_terms),
+             "termination_term_mapping": _minimal_termination_term_mapping(
+                 self._env.termination_manager
+             ),
+         }
++        if self.cfg.schema_version == "sonic_physics_sa_raw_v5":
++            if int(command.num_future_frames) != 10:
++                raise RuntimeError("Reference-aware Physics schema requires 10 future frames")
++            metadata["reference_future"] = {
++                "frames": 10,
++                "joint_pos_vel_dimension": 58,
++                "root_orientation_dimension": 6,
++                "time_offsets_seconds": [
++                    float(index * command.cfg.dt_future_ref_frames) for index in range(10)
++                ],
++                "source": "command_manager_runtime_observation",
++            }
+         output_path = self.cfg.schema_output_path or f"{file_path}.schema.json"
+@@ -1254,6 +1289,11 @@ class PhysicsDiagnosticsRecorderCfg(manager_term_cfg.RecorderTermCfg):
+ class PhysicsDiagnosticsRecorderCfg(manager_term_cfg.RecorderTermCfg):
+     class_type = PhysicsDiagnosticsRecorderTerm
+ 
+ 
++@configclass
++class PhysicsReferenceRecorderCfg(manager_term_cfg.RecorderTermCfg):
++    class_type = PhysicsReferenceRecorderTerm
++
++
+ @configclass
+ class PhysicsMetadataRecorderCfg(manager_term_cfg.RecorderTermCfg):
+diff --git a/gear_sonic/config/manager_env/recorders/physics_state_action_reference.yaml b/gear_sonic/config/manager_env/recorders/physics_state_action_reference.yaml
+new file mode 100644
+--- /dev/null
++++ b/gear_sonic/config/manager_env/recorders/physics_state_action_reference.yaml
+@@ -0,0 +1,39 @@
++_target_: gear_sonic.envs.manager_env.mdp.recorders.RecordersCfg
++
++# Opt-in Physics v5 recorder. It adds only reference tensors that the released
++# SONIC policy can read at the same runtime step; no future measured State or
++# oracle dynamics randomization is recorded as a model input.
++dataset_export_dir_path: ???
++dataset_filename: sonic_physics_sa_raw
++dataset_export_mode: 1
++export_in_record_pre_reset: true
++export_in_close: false
++
++physics_state_t:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.PhysicsStateTRecorderCfg
++
++physics_actions:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.PhysicsActionsRecorderCfg
++
++physics_state_tp1:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.PhysicsStateTp1RecorderCfg
++
++physics_diagnostics:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.PhysicsDiagnosticsRecorderCfg
++
++physics_reference:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.PhysicsReferenceRecorderCfg
++
++minimal_outcome:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.MinimalOutcomeRecorderCfg
++
++minimal_motion:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.MinimalMotionRecorderCfg
++
++minimal_context_t:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.MinimalContextTRecorderCfg
++
++physics_metadata:
++  _target_: gear_sonic.envs.manager_env.mdp.recorders.PhysicsMetadataRecorderCfg
++  schema_version: sonic_physics_sa_raw_v5
++  schema_output_path: ???
+-- 
+2.43.0

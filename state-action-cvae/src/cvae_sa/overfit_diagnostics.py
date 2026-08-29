@@ -44,6 +44,16 @@ def _occluded(
         result["action"][..., selector] = 0.0
     elif kind == "action_before":
         result["action_before_window"] = torch.zeros_like(batch["action_before_window"])
+    elif kind == "joint_robot":
+        result["joint_robot_information"] = torch.zeros_like(
+            batch["joint_robot_information"]
+        )
+    elif kind == "global_robot":
+        result["global_robot_information"] = torch.zeros_like(
+            batch["global_robot_information"]
+        )
+    elif kind == "reference":
+        result["reference_future"] = torch.zeros_like(batch["reference_future"])
     else:
         raise ValueError(kind)
     return result
@@ -69,6 +79,10 @@ def evaluate_input_sensitivity(
         for name, names in semantic.items()
     })
     groups["action_before_window"] = ("action_before", None)
+    groups["robot/joint_numeric"] = ("joint_robot", None)
+    groups["robot/global"] = ("global_robot", None)
+    if bool(getattr(loader.dataset, "reference_available", False)):
+        groups["command/reference_future"] = ("reference", None)
     values: dict[str, list[float]] = {"baseline": []}
     values.update({name: [] for name in groups})
     model.eval()

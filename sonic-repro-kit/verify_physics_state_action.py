@@ -69,12 +69,16 @@ def _manifest_rows(path: Path | None) -> tuple[dict[str, dict], str | None]:
 
 def verify(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = args.run_dir.expanduser().resolve()
-    dataset_path = run_dir / "data" / "sonic_physics_sa_v3.hdf5"
     schema_path = run_dir / "manifests" / "physics_state_action_schema.json"
     summary_path = run_dir / "manifests" / "collection_summary.json"
     canonical_path = run_dir / "manifests" / "canonical_episode_index.json"
     attempts_path = run_dir / "manifests" / "additional_attempt_index.json"
     schema = _load_json(schema_path)
+    schema_version = schema.get("schema_version")
+    if schema_version not in {"sonic_physics_sa_v3", "sonic_physics_sa_v5"}:
+        raise ValueError(f"unsupported Physics schema {schema_version!r}")
+    reference_available = schema_version == "sonic_physics_sa_v5"
+    dataset_path = run_dir / "data" / f"{schema_version}.hdf5"
     manifest_path = args.motion_manifest.expanduser().resolve() if args.motion_manifest else None
     manifest, manifest_sha = _manifest_rows(manifest_path)
     checks: list[dict[str, Any]] = []
@@ -82,7 +86,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     def check(name: str, passed: bool, evidence: str) -> None:
         checks.append({"name": name, "passed": bool(passed), "evidence": evidence})
 
-    check("schema_version", schema.get("schema_version") == "sonic_physics_sa_v3", str(schema.get("schema_version")))
+    check("schema_version", schema_version in {"sonic_physics_sa_v3", "sonic_physics_sa_v5"}, str(schema_version))
     check("dimensions", schema.get("dimensions") == {"state": 70, "action": 29}, str(schema.get("dimensions")))
     check("storage_no_duplicates", schema.get("storage", {}).get("state_tp1_duplicate") is False, str(schema.get("storage")))
     check("action_term", schema.get("action_term_type") == "JointPositionAction", str(schema.get("action_term_type")))
@@ -116,7 +120,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     context_ids: set[str] = set()
     try:
         with h5py.File(dataset_path, "r") as stream:
-            if stream.attrs.get("schema_version") != "sonic_physics_sa_v3":
+            if stream.attrs.get("schema_version") != schema_version:
                 raise ValueError("HDF5 schema_version attribute differs")
             expected_contexts = len(schema["motion_collection"]["env_to_variant"])
             if len(stream["contexts"]) != expected_contexts:
@@ -245,6 +249,32 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
                     raise ValueError(f"{episode.name}: torque diagnostic shape")
                 if impulse.shape != (steps, 2, 3) or not np.isfinite(impulse).all():
                     raise ValueError(f"{episode.name}: impulse diagnostic shape")
+                if reference_available:
+                    joint_reference = np.asarray(
+                        episode["reference/joint_pos_vel_future"]
+                    )
+                    root_reference = np.asarray(
+                        episode["reference/root_orientation_future"]
+                    )
+                    reference_offsets = np.asarray(episode["reference/time_offsets"])
+                    expected_offsets = np.asarray(
+                        schema["reference_future"]["time_offsets_seconds"],
+                        dtype=np.float32,
+                    )
+                    if joint_reference.shape != (steps, 10, 58):
+                        raise ValueError(f"{episode.name}: joint reference shape")
+                    if root_reference.shape != (steps, 10, 6):
+                        raise ValueError(f"{episode.name}: root reference shape")
+                    if not np.isfinite(joint_reference).all() or not np.isfinite(
+                        root_reference
+                    ).all():
+                        raise ValueError(f"{episode.name}: reference NaN/Inf")
+                    if reference_offsets.shape != (10,) or not np.array_equal(
+                        reference_offsets, expected_offsets
+                    ):
+                        raise ValueError(f"{episode.name}: reference offsets mismatch")
+                elif "reference" in episode:
+                    raise ValueError(f"{episode.name}: legacy v3 unexpectedly contains reference")
                 if np.asarray(episode["transition_context/external_wrench_events"]).shape != (0, 8):
                     raise ValueError(f"{episode.name}: baseline external wrench events must be empty")
 
@@ -310,6 +340,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "run_dir": str(run_dir),
+        "schema_version": schema_version,
         "dataset": str(dataset_path),
         "schema": str(schema_path),
         "passed": passed,
@@ -326,7 +357,10 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         "checks": checks,
     }
     _write_json(summary_path, summary)
-    print(f"SONIC Physics State-Action v3: {'PASS' if passed else 'FAIL'}")
+    print(
+        f"SONIC Physics State-Action {schema_version.rsplit('_', 1)[-1]}: "
+        f"{'PASS' if passed else 'FAIL'}"
+    )
     for item in checks:
         print(f"[{'PASS' if item['passed'] else 'FAIL'}] {item['name']}: {item['evidence']}")
     print(f"Completion: {completed_total}/{len(canonical_rows)}")
@@ -334,7 +368,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify SONIC Physics State-Action v3")
+    parser = argparse.ArgumentParser(description="Verify SONIC Physics State-Action v3/v5")
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--expected-motion-count", type=int, required=True)
     parser.add_argument("--expected-variants-per-motion", type=int, required=True)

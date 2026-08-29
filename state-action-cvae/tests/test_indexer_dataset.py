@@ -160,6 +160,40 @@ class IndexerDatasetTest(unittest.TestCase):
             self.assertEqual(int(value["valid_action"].sum()), 6)
             dataset.close()
 
+    def test_builds_physics_v5_reference_index_and_normalized_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = (
+                write_physics_collection_run(
+                    root / "sources", "r0", "motion_r", "Locomotion",
+                    (0, 1, 2, 3), reference=True,
+                ),
+                write_physics_collection_run(
+                    root / "sources", "r1", "motion_r", "Locomotion",
+                    (4, 5, 6, 7), reference=True,
+                ),
+            )
+            output = root / "physics_reference_dataset"
+            manifest = build_physics_index(
+                sources, output, expected_motions=1, expected_episodes=8,
+                split_counts=(1, 0, 0), seed=13,
+            )
+            self.assertEqual(
+                manifest["schema_version"],
+                "sonic_physics_state_action_cvae_dataset_v5",
+            )
+            self.assertEqual(
+                manifest["input_provenance"]["reference_future"],
+                "known_runtime_command",
+            )
+            dataset = StateActionWindowDataset(output, "train", window_transitions=8)
+            value = dataset[0]
+            self.assertTrue(bool(value["reference_available"]))
+            self.assertEqual(tuple(value["reference_future"].shape), (8, 10, 64))
+            self.assertEqual(tuple(value["reference_time_offsets"].shape), (10,))
+            self.assertTrue(np.isfinite(value["reference_future"].numpy()).all())
+            dataset.close()
+
 
 if __name__ == "__main__":
     unittest.main()

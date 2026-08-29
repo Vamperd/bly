@@ -116,6 +116,7 @@ def write_physics_collection_run(
     motion_key: str,
     package: str,
     variants: tuple[int, ...],
+    reference: bool = False,
 ) -> Path:
     run = root / name
     (run / "data").mkdir(parents=True)
@@ -129,8 +130,9 @@ def write_physics_collection_run(
 
     per_env_29 = [[0.0] * 29 for _ in variants]
     per_env_limits = [[[-2.0, 2.0] for _ in range(29)] for _ in variants]
+    schema_version = "sonic_physics_sa_v5" if reference else "sonic_physics_sa_v3"
     schema = {
-        "schema_version": "sonic_physics_sa_v3",
+        "schema_version": schema_version,
         "dimensions": {"state": 70, "action": 29},
         "storage": {"state_tp1_duplicate": False, "previous_action_duplicate": False},
         "joint_names": [f"joint_{index}" for index in range(29)],
@@ -166,11 +168,20 @@ def write_physics_collection_run(
             "env_to_variant": list(variants),
         },
     }
+    if reference:
+        schema["reference_future"] = {
+            "frames": 10,
+            "joint_pos_vel_dimension": 58,
+            "root_orientation_dimension": 6,
+            "time_offsets_seconds": [0.1 * index for index in range(10)],
+            "source": "command_manager_runtime_observation",
+        }
     schema_path = run / "manifests/physics_state_action_schema.json"
     schema_path.write_text(json.dumps(schema))
     index = []
-    with h5py.File(run / "data/sonic_physics_sa_v3.hdf5", "w") as stream:
-        stream.attrs["schema_version"] = "sonic_physics_sa_v3"
+    hdf5_name = "sonic_physics_sa_v5.hdf5" if reference else "sonic_physics_sa_v3.hdf5"
+    with h5py.File(run / "data" / hdf5_name, "w") as stream:
+        stream.attrs["schema_version"] = schema_version
         contexts = stream.create_group("contexts")
         data = stream.create_group("data")
         for env_id, variant in enumerate(variants):
@@ -220,6 +231,24 @@ def write_physics_collection_run(
                 "initial_processed_target_canonical",
                 data=np.ones(29, dtype=np.float32) * variant / 100,
             )
+            if reference:
+                reference_group = episode.create_group("reference")
+                reference_group.create_dataset(
+                    "joint_pos_vel_future",
+                    data=np.arange(steps * 10 * 58, dtype=np.float32).reshape(
+                        steps, 10, 58
+                    ) / 1000 + variant,
+                )
+                reference_group.create_dataset(
+                    "root_orientation_future",
+                    data=np.arange(steps * 10 * 6, dtype=np.float32).reshape(
+                        steps, 10, 6
+                    ) / 1000,
+                )
+                reference_group.create_dataset(
+                    "time_offsets",
+                    data=np.arange(10, dtype=np.float32) * 0.1,
+                )
             diagnostics = episode.create_group("diagnostics")
             diagnostics.create_dataset(
                 "applied_joint_torque_mean", data=np.ones((steps, 29), dtype=np.float32)

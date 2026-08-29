@@ -97,9 +97,10 @@ PATCH_4="$PATCH_DIR/0004-fix-record-runtime-termination-terms.patch"
 PATCH_5="$PATCH_DIR/0005-feat-add-external-action-physics-replay.patch"
 PATCH_6="$PATCH_DIR/0006-feat-collect-physics-state-action-v3.patch"
 PATCH_7="$PATCH_DIR/0007-fix-lazy-physics-diagnostics-initialization.patch"
-git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6" "$PATCH_7"
+PATCH_8="$PATCH_DIR/0008-feat-record-deployable-reference-context.patch"
+git apply --check "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6" "$PATCH_7" "$PATCH_8"
 git switch -c codex/minimal-state-action-recorder
-git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6" "$PATCH_7"
+git am "$PATCH_1" "$PATCH_2" "$PATCH_3" "$PATCH_4" "$PATCH_5" "$PATCH_6" "$PATCH_7" "$PATCH_8"
 ```
 
 不要在 Ubuntu 手工编辑补丁内容。如果配置文件已存在，应先检查当前提交和工作树，
@@ -144,6 +145,54 @@ PATCH_7=~/bly/sonic-repro-kit/patches/0007-fix-lazy-physics-diagnostics-initiali
 git apply --check "$PATCH_7"
 git am "$PATCH_7"
 ```
+
+已经应用 `0001`–`0007` 的执行端，在采集 reference-aware Physics v5 前只应用新增补丁：
+
+```bash
+cd ~/bly/sonic-repro/GR00T-WholeBodyControl
+git status --short --branch
+PATCH_8=~/bly/sonic-repro-kit/patches/0008-feat-record-deployable-reference-context.patch
+git apply --check "$PATCH_8"
+git am "$PATCH_8"
+```
+
+`0008` 是默认关闭的 recorder：它逐控制时刻直接保存 command manager 向 SONIC 暴露的
+`10×58` future joint position/velocity 与 `10×6` root orientation，不使用 motion ID
+离线重建，也不记录未来真实 State 或 oracle dynamics。原 Physics v3 采集行为保持不变。
+
+先从已经通过的旧 overfit subset 提取精确 motion key，并只读链接回 2048-motion
+BONES ingest；该步骤不复制或修改 PKL：
+
+```bash
+export OVERFIT_SELECTION_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+export BONES_INGEST_RUN=/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447
+COLLECT_SEED=20260828 bash ./sonic_repro.sh prepare-overfit-reference-subset
+
+REFERENCE_MOTIONS="$(
+  cat /home/helloworld/bly/runs/latest_overfit_reference_motion_subset_run_dir.txt
+)"
+test -f "$REFERENCE_MOTIONS/markers/prepare_overfit_reference_subset.ok"
+export COLLECT_MOTION_FILE="$REFERENCE_MOTIONS/data/robot_filtered"
+export COLLECT_MOTION_MANIFEST="$REFERENCE_MOTIONS/manifests/motion_manifest.jsonl"
+```
+
+随后对该清单分别采集 variants 0–3 和 4–7；每条命令创建独立 run：
+
+```bash
+COLLECT_MOTION_COUNT=32 COLLECT_BATCH_MOTIONS=8 COLLECT_VARIANTS_PER_MOTION=4 \
+COLLECT_RANDOMIZATION_PROFILE=startup COLLECT_VARIANT_OFFSET=0 COLLECT_SEED=20260828 \
+  bash ./sonic_repro.sh collect-physics-state-action-reference
+
+COLLECT_MOTION_COUNT=32 COLLECT_BATCH_MOTIONS=8 COLLECT_VARIANTS_PER_MOTION=4 \
+COLLECT_RANDOMIZATION_PROFILE=initial_state_mild COLLECT_VARIANT_OFFSET=4 \
+COLLECT_SEED=20260828 \
+  bash ./sonic_repro.sh collect-physics-state-action-reference
+```
+
+成功 run 保存 `sonic_physics_sa_v5.hdf5`，仍使用
+`collect_physics_state_action.ok`；两个 v5 collection run 再由 CVAE 的
+`build-physics-index` 建立 32/0/0 的只读索引，再由 `build-overfit-subset` 重算统计。
+v3 与 v5 source 不允许混合。
 
 ```bash
 ./sonic_repro.sh collect-state-action

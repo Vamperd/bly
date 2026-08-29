@@ -5,10 +5,39 @@ import unittest
 import numpy as np
 
 from cvae_sa.schema import raw_action_to_relative, resolve_parameter
-from cvae_sa.physics_schema import structured_robot_information
+from cvae_sa.physics_schema import structured_robot_information, validate_physics_schema
 
 
 class SchemaTest(unittest.TestCase):
+    def test_v5_reference_contract_requires_runtime_provenance_and_ten_offsets(self) -> None:
+        schema = {
+            "schema_version": "sonic_physics_sa_v5",
+            "dimensions": {"state": 70, "action": 29},
+            "storage": {"state_tp1_duplicate": False},
+            "joint_names": [f"joint_{index}" for index in range(29)],
+            "action_term_type": "JointPositionAction",
+            "wrapper_action_transform_enabled": False,
+            "simulation": {"sim_dt": 0.005, "control_dt": 0.02, "decimation": 4},
+            "reference_future": {
+                "frames": 10,
+                "joint_pos_vel_dimension": 58,
+                "root_orientation_dimension": 6,
+                "time_offsets_seconds": [0.1 * index for index in range(10)],
+                "source": "command_manager_runtime_observation",
+            },
+        }
+        validate_physics_schema(schema)
+        invalid = {**schema, "reference_future": {
+            **schema["reference_future"], "source": "motion_id_reconstruction",
+        }}
+        with self.assertRaisesRegex(ValueError, "deployable reference contract"):
+            validate_physics_schema(invalid)
+        invalid_offsets = {**schema, "reference_future": {
+            **schema["reference_future"], "time_offsets_seconds": [0.0] * 9,
+        }}
+        with self.assertRaisesRegex(ValueError, "ten finite"):
+            validate_physics_schema(invalid_offsets)
+
     def test_resolves_per_environment_and_maps_clipped_action(self) -> None:
         schema = {
             "action_scale": {"scope": "global", "values": [2.0] * 29},

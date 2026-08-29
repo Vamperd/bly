@@ -1,0 +1,9 @@
+{
+  "extends": "overfit_32_lean_single_history_action.json",
+  "model": {
+    "profile": "lean_action_history_reference_dynamics",
+    "reference_conditioning": "required",
+    "action_queue_conditioning": true,
+    "causal_dynamics_embedding": true
+  }
+}

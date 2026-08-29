@@ -6,7 +6,7 @@ import torch
 
 from cvae_sa.losses import compute_loss
 from cvae_sa.masking import MaskGenerator
-from cvae_sa.models import build_model
+from cvae_sa.models import build_model, parameter_count
 
 
 def batch(batch_size: int = 2, transitions: int = 8) -> dict[str, torch.Tensor]:
@@ -44,6 +44,9 @@ def physics_batch(batch_size: int = 2, transitions: int = 8) -> dict[str, torch.
     value["global_robot_information"] = torch.randn(batch_size, 9)
     value["dynamics_context"] = torch.randn(batch_size, 648)
     value["auxiliary_transition"] = torch.randn(batch_size, transitions, 35)
+    value["reference_future"] = torch.randn(batch_size, transitions, 10, 64)
+    value["reference_time_offsets"] = torch.arange(10).float() * 0.1
+    value["reference_available"] = torch.ones(batch_size, dtype=torch.bool)
     return value
 
 
@@ -87,6 +90,136 @@ MODEL_CONFIG = {
 
 
 class MaskingModelTest(unittest.TestCase):
+    @staticmethod
+    def lean_config(reference_conditioning: str = "required") -> dict[str, object]:
+        return {
+            "kind": "physics_lean_split",
+            "d_model": 48,
+            "heads": 6,
+            "ffn_dim": 96,
+            "latent_dim": 8,
+            "joint_width": 48,
+            "joint_spatial_layers": 1,
+            "history_layers": 1,
+            "completion_encoder_layers": 1,
+            "completion_decoder_layers": 1,
+            "reference_layers": 1,
+            "dropout": 0.0,
+            "context_mode": "hidden",
+            "reference_conditioning": reference_conditioning,
+            "history_steps": 4,
+            "state_dim": 70,
+            "include_previous_action": False,
+            "joint_robot_info_dim": 11,
+            "global_robot_info_dim": 9,
+            "actuator_type_count": 1,
+            "auxiliary_dim": 35,
+        }
+
+    def test_lean_split_production_parameter_budget_is_exact(self) -> None:
+        config = dict(
+            self.lean_config(),
+            d_model=192,
+            ffn_dim=768,
+            latent_dim=64,
+            joint_width=96,
+            joint_spatial_layers=2,
+            history_layers=4,
+            completion_encoder_layers=2,
+            completion_decoder_layers=2,
+            reference_layers=2,
+            history_steps=10,
+            actuator_type_count=2,
+        )
+        self.assertEqual(parameter_count(build_model(config)), 6_204_665)
+
+    def test_lean_split_reference_changes_action_but_not_forward(self) -> None:
+        torch.manual_seed(11)
+        value = physics_batch(batch_size=1)
+        masks = MaskGenerator(PHYSICS_MASK_CONFIG).generate(
+            value, force_task="arbitrary", force_target="action",
+            force_granularity="step", force_length=2,
+        )
+        model = build_model(self.lean_config()).eval()
+        first = model(value, masks, deterministic=True)
+        changed = dict(value)
+        changed["reference_future"] = value["reference_future"] + 5.0
+        second = model(changed, masks, deterministic=True)
+        self.assertTrue(torch.equal(first.forward_delta, second.forward_delta))
+        self.assertTrue(torch.equal(first.rollout_state, second.rollout_state))
+        self.assertFalse(torch.allclose(first.action, second.action))
+        self.assertFalse(torch.allclose(first.history_action, second.history_action))
+
+    def test_lean_split_causal_heads_ignore_future_measured_state(self) -> None:
+        torch.manual_seed(17)
+        value = physics_batch(batch_size=1)
+        masks = MaskGenerator(PHYSICS_MASK_CONFIG).generate(
+            value, force_task="history_action", force_length=2,
+        )
+        model = build_model(self.lean_config()).eval()
+        first = model(value, masks, deterministic=True)
+        changed = dict(value)
+        changed_state = value["physical_state"].clone()
+        changed_state[:, 4:] += 100.0
+        changed["physical_state"] = changed_state
+        second = model(changed, masks, deterministic=True)
+        self.assertTrue(torch.equal(first.forward_delta[:, :3], second.forward_delta[:, :3]))
+        self.assertTrue(torch.equal(first.history_action[:, :3], second.history_action[:, :3]))
+
+    def test_lean_split_rollout_is_autoregressive_and_future_state_is_hidden(self) -> None:
+        torch.manual_seed(23)
+        value = physics_batch(batch_size=1, transitions=16)
+        masker = MaskGenerator(PHYSICS_MASK_CONFIG)
+        masker.set_step(100)
+        masks = masker.generate(value, force_task="forward_rollout")
+        model = build_model(self.lean_config()).eval()
+        first = model(value, masks, deterministic=True)
+        start = int(masks.rollout_start[0])
+        changed = dict(value)
+        changed_state = value["physical_state"].clone()
+        changed_state[:, start + 1 :] += 100.0
+        changed["physical_state"] = changed_state
+        second = model(changed, masks, deterministic=True)
+        self.assertTrue(torch.equal(first.rollout_state, second.rollout_state))
+
+    def test_lean_split_enforces_reference_and_oracle_isolation(self) -> None:
+        value = physics_batch(batch_size=1)
+        masks = MaskGenerator(PHYSICS_MASK_CONFIG).generate(value, force_task="forward")
+        missing = dict(value)
+        missing.pop("reference_future")
+        with self.assertRaisesRegex(ValueError, "reference tensors are missing"):
+            build_model(self.lean_config())(missing, masks, deterministic=True)
+        unavailable = dict(value)
+        unavailable["reference_available"] = torch.zeros(1, dtype=torch.bool)
+        with self.assertRaisesRegex(ValueError, "no runtime reference"):
+            build_model(self.lean_config())(unavailable, masks, deterministic=True)
+        with self.assertRaisesRegex(ValueError, "forbids oracle"):
+            build_model(dict(self.lean_config(), context_mode="explicit"))
+
+    def test_lean_split_restores_cycle_paths_for_full_cvae(self) -> None:
+        value = physics_batch(batch_size=1)
+        masker = MaskGenerator(PHYSICS_MASK_CONFIG)
+        model = build_model(self.lean_config()).eval()
+        inverse_masks = masker.generate(value, force_task="inverse", force_length=2)
+        inverse = model(value, inverse_masks, deterministic=True)
+        self.assertEqual(tuple(inverse.cycle_state.shape), (1, 8, 70))
+        self.assertEqual(tuple(inverse.inverse_action_log_scale.shape), (1, 8, 29))
+        self.assertTrue(torch.isfinite(inverse.inverse_action_log_scale).all())
+        forward_masks = masker.generate(value, force_task="forward_one")
+        forward = model(value, forward_masks, deterministic=True)
+        self.assertEqual(tuple(forward.cycle_action.shape), (1, 8, 29))
+        loss = compute_loss(
+            forward, value, forward_masks,
+            {
+                "free_bits": 0.0, "forward_weight": 1.0, "inverse_weight": 1.0,
+                "history_action_weight": 1.0, "rollout_weight": 1.0,
+                "cycle_weight": 0.1, "gravity_weight": 0.1,
+                "auxiliary_weight": 0.1,
+            },
+            kl_beta=0.001,
+        )
+        self.assertTrue(torch.isfinite(loss.total))
+
     def test_action_finetune_curriculum_and_forced_masks(self) -> None:
         value = physics_batch(batch_size=2, transitions=128)
         config = dict(

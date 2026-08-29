@@ -202,7 +202,7 @@ train_model() {
 overfit_model() {
   local phase="$1" dataset_run="${CVAE_DATASET_RUN:-}"
   local profile="${CVAE_OVERFIT_MODEL:-compact}" checkpoint="${CVAE_INIT_CHECKPOINT:-}"
-  local config prefix marker run_dir seed="${CVAE_SEED:-20260828}"
+  local config prefix marker run_dir seed="${CVAE_SEED:-20260828}" model_kind="physics_transformer"
   local overfit_smoke="${CVAE_OVERFIT_SMOKE:-false}"
   SEED="$seed"
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
@@ -220,6 +220,8 @@ overfit_model() {
     joint_id_only:capacity) config="$SCRIPT_DIR/configs/overfit_32_joint_id_capacity.json" ;;
     joint_id_only:full) config="$SCRIPT_DIR/configs/overfit_32_joint_id_full.json" ;;
     no_aux:full) config="$SCRIPT_DIR/configs/overfit_32_no_aux_full.json" ;;
+    lean:capacity) config="$SCRIPT_DIR/configs/overfit_32_lean_capacity.json"; model_kind="physics_lean_split" ;;
+    lean:full) config="$SCRIPT_DIR/configs/overfit_32_lean_full.json"; model_kind="physics_lean_split" ;;
     *) die "unsupported CVAE_OVERFIT_MODEL/phase combination: $profile/$phase" ;;
   esac; fi
   config="${CVAE_CONFIG:-$config}"
@@ -242,13 +244,80 @@ overfit_model() {
       --dataset-run "$dataset_run" \
       --output-run "$run_dir" \
       --config "$config" \
-      --model-kind physics_transformer \
+      --model-kind "$model_kind" \
       --context-mode hidden \
       --seed "$seed" \
       --overfit-phase "$phase" \
       "${init_args[@]}"
   [[ -f "$run_dir/markers/$marker" ]] || die "overfit marker is missing: $marker"
   update_latest "overfit_${phase}_${profile}" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+overfit_single_task() {
+  local dataset_run="${CVAE_DATASET_RUN:-}" task="${CVAE_OVERFIT_TASK:-}"
+  local seed="${CVAE_SEED:-20260828}" profile="${CVAE_OVERFIT_MODEL:-compact}"
+  local config run_dir model_kind="physics_transformer" config_prefix="overfit_32_single"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  if [[ "$profile" == "lean" ]]; then
+    model_kind="physics_lean_split"
+    config_prefix="overfit_32_lean_single"
+  elif [[ "$profile" != "compact" ]]; then
+    die "single-task CVAE_OVERFIT_MODEL must be compact or lean"
+  fi
+  case "$task" in
+    forward_rollout) config="$SCRIPT_DIR/configs/${config_prefix}_forward_rollout.json" ;;
+    inverse) config="$SCRIPT_DIR/configs/${config_prefix}_inverse.json" ;;
+    history_action) config="$SCRIPT_DIR/configs/${config_prefix}_history_action.json" ;;
+    arbitrary_state) config="$SCRIPT_DIR/configs/${config_prefix}_arbitrary_state.json" ;;
+    arbitrary_action) config="$SCRIPT_DIR/configs/${config_prefix}_arbitrary_action.json" ;;
+    *) die "CVAE_OVERFIT_TASK must be forward_rollout, inverse, history_action, arbitrary_state, or arbitrary_action" ;;
+  esac
+  config="${CVAE_CONFIG:-$config}"
+  run_dir="$(new_run_dir "cvae_overfit_single_${profile}_${task}")"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" "overfit_single_${task}.log" \
+    "$PYTHON" -m cvae_sa.trainer \
+      --dataset-run "$dataset_run" \
+      --output-run "$run_dir" \
+      --config "$config" \
+      --model-kind "$model_kind" \
+      --context-mode hidden \
+      --seed "$seed" \
+      --overfit-phase capacity
+  [[ -f "$run_dir/markers/cvae_overfit_single_task.ok" ]] \
+    || die "single-task execution marker is missing"
+  update_latest "overfit_single_${profile}_${task}" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+analyze_overfit() {
+  local dataset_run="${CVAE_DATASET_RUN:-}" checkpoint="${CVAE_ANALYSIS_CHECKPOINT:-}"
+  local run_dir seed="${CVAE_SEED:-20260828}"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  local checkpoint_args=()
+  if [[ -n "$checkpoint" ]]; then
+    [[ -f "$checkpoint" ]] || die "CVAE_ANALYSIS_CHECKPOINT is missing: $checkpoint"
+    checkpoint_args+=(--checkpoint "$checkpoint")
+  fi
+  run_dir="$(new_run_dir cvae_overfit_analysis)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" overfit_analysis.log \
+    "$PYTHON" -m cvae_sa.overfit_analysis \
+      --dataset-run "$dataset_run" \
+      --output-run "$run_dir" \
+      --history-steps "${CVAE_ANALYSIS_HISTORY_STEPS:-1,4,10,32}" \
+      --max-samples "${CVAE_ANALYSIS_MAX_SAMPLES:-4096}" \
+      --max-sensitivity-batches "${CVAE_ANALYSIS_MAX_BATCHES:-16}" \
+      --seed "$seed" \
+      "${checkpoint_args[@]}"
+  [[ -f "$run_dir/markers/cvae_overfit_analysis.ok" ]] \
+    || die "overfit analysis marker is missing"
+  update_latest cvae_overfit_analysis "$run_dir"
   printf '%s\n' "$run_dir"
 }
 
@@ -271,6 +340,28 @@ summarize_overfit() {
   [[ -f "$run_dir/markers/cvae_overfit_suite.ok" ]] \
     || die "overfit suite marker is missing"
   update_latest cvae_overfit_suite "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+summarize_single_tasks() {
+  local encoded="${CVAE_OVERFIT_RUNS:-}" run_dir
+  [[ -n "$encoded" ]] || die "CVAE_OVERFIT_RUNS is required (colon-separated run directories)"
+  local runs=()
+  IFS=':' read -r -a runs <<< "$encoded"
+  local run_args=() item
+  for item in "${runs[@]}"; do
+    [[ -f "$item/manifests/training_summary.json" ]] \
+      || die "single-task training summary is missing: $item"
+    run_args+=(--run "$item")
+  done
+  run_dir="$(new_run_dir cvae_overfit_single_suite)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" summarize_single_tasks.log \
+    "$PYTHON" -m cvae_sa.overfit_single_report \
+      "${run_args[@]}" --output-run "$run_dir"
+  [[ -f "$run_dir/markers/cvae_overfit_single_suite.ok" ]] \
+    || die "single-task suite did not pass; diagnostics are preserved in $run_dir"
+  update_latest cvae_overfit_single_suite "$run_dir"
   printf '%s\n' "$run_dir"
 }
 
@@ -501,12 +592,15 @@ case "${1:-}" in
   train) train_model false ;;
   overfit-capacity) overfit_model capacity ;;
   overfit-full) overfit_model full ;;
+  overfit-single-task) overfit_single_task ;;
+  analyze-overfit) analyze_overfit ;;
   summarize-overfit) summarize_overfit ;;
+  summarize-single-tasks) summarize_single_tasks ;;
   smoke-action-finetune) action_finetune_model true ;;
   action-finetune) action_finetune_model false ;;
   evaluate) evaluate_model ;;
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|analyze-overfit|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

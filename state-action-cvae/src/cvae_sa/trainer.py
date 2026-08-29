@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -11,11 +12,11 @@ from typing import Any, Iterator
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, Sampler, WeightedRandomSampler
 
 from .dataset import StateActionWindowDataset, worker_seed
 from .losses import compute_loss
-from .masking import MaskGenerator
+from .masking import MaskBatch, MaskGenerator
 from .models import build_model, parameter_count
 from .overfit_diagnostics import evaluate_input_sensitivity
 from .overfit_visualization import write_latent_comparison_svg, write_training_svg
@@ -37,6 +38,26 @@ DEFAULT_OVERFIT_THRESHOLDS = {
     "history_action_normalized_rmse": 0.08,
     "forward_rollout_8_normalized_rmse": 0.10,
 }
+PHYSICS_MODEL_KINDS = {"physics_transformer", "physics_lean_split"}
+
+
+class CyclicSequentialSampler(Sampler[int]):
+    """Emit full deterministic batches without permanently dropping tail windows."""
+
+    def __init__(self, size: int, batch_size: int) -> None:
+        if size < 1 or batch_size < 1:
+            raise ValueError("cyclic sampler size and batch_size must be positive")
+        self.size = int(size)
+        self.count = int(math.ceil(size / batch_size) * batch_size)
+        self.cursor = 0
+
+    def __iter__(self):
+        start = self.cursor
+        self.cursor = (self.cursor + self.count) % self.size
+        return iter((start + index) % self.size for index in range(self.count))
+
+    def __len__(self) -> int:
+        return self.count
 
 
 def warmup_cosine_factor(
@@ -52,12 +73,17 @@ def warmup_cosine_factor(
 
 
 def overfit_gate(
-    metrics: dict[str, Any], thresholds: dict[str, float] | None = None
+    metrics: dict[str, Any],
+    thresholds: dict[str, float] | None = None,
+    *,
+    require_complete: bool = True,
 ) -> dict[str, Any]:
     limits = dict(DEFAULT_OVERFIT_THRESHOLDS if thresholds is None else thresholds)
-    missing = sorted(set(DEFAULT_OVERFIT_THRESHOLDS) - set(limits))
+    missing = sorted(set(DEFAULT_OVERFIT_THRESHOLDS) - set(limits)) if require_complete else []
     if missing:
         raise ValueError(f"overfit thresholds are missing metrics: {missing}")
+    if not limits:
+        raise ValueError("overfit thresholds cannot be empty")
     ratios = {
         name: float(metrics.get(name, math.inf)) / max(float(limit), 1e-12)
         for name, limit in limits.items()
@@ -69,6 +95,32 @@ def overfit_gate(
         "overfit_thresholds": limits,
         "overfit_ratios": ratios,
     }
+
+
+OVERFIT_TASK_GATE_METRICS = {
+    "combined": tuple(DEFAULT_OVERFIT_THRESHOLDS),
+    "forward_rollout": (
+        "forward_one_normalized_rmse",
+        "forward_rollout_8_normalized_rmse",
+    ),
+    "inverse": ("action_inverse_local_normalized_rmse",),
+    "history_action": ("history_action_normalized_rmse",),
+    "arbitrary_state": ("arbitrary_state_normalized_rmse",),
+    "arbitrary_action": ("action_completion_macro_normalized_rmse",),
+}
+
+
+def overfit_task_thresholds(training: dict[str, Any]) -> tuple[str, dict[str, float]]:
+    """Select only the metrics trained by a fixed single-task capacity run."""
+    task_mode = str(training.get("task_mode", "combined"))
+    if task_mode not in OVERFIT_TASK_GATE_METRICS:
+        raise ValueError(f"unsupported overfit task_mode {task_mode!r}")
+    declared = dict(training.get("overfit_thresholds", DEFAULT_OVERFIT_THRESHOLDS))
+    required = OVERFIT_TASK_GATE_METRICS[task_mode]
+    missing = sorted(set(required) - set(declared))
+    if missing:
+        raise ValueError(f"task {task_mode!r} is missing thresholds: {missing}")
+    return task_mode, {name: float(declared[name]) for name in required}
 
 
 def overfit_latent_protocol(
@@ -111,6 +163,85 @@ def _device_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]
     }
 
 
+def _fixed_mask_seed(batch: dict[str, Any], base_seed: int) -> int:
+    """Derive a stable Mask seed from the exact windows in a loader batch."""
+    references = batch.get("episode_ref", ())
+    starts = batch.get("window_start", ())
+    if isinstance(starts, torch.Tensor):
+        starts = starts.detach().cpu().tolist()
+    payload = "\n".join(
+        f"{reference}|{start}"
+        for reference, start in zip(list(references), list(starts), strict=True)
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).digest()
+    return (int(base_seed) + int.from_bytes(digest[:8], "little")) % (2**63 - 1)
+
+
+def generate_training_masks(
+    masker: MaskGenerator,
+    batch: dict[str, Any],
+    training: dict[str, Any],
+) -> Any:
+    """Generate either the legacy random task or a stable fixed single-task Mask."""
+    task_mode = str(training.get("task_mode", "combined"))
+    arguments: dict[str, Any] = {}
+    if task_mode == "forward_rollout":
+        arguments["force_task"] = "forward_rollout"
+    elif task_mode == "inverse":
+        arguments.update(force_task="inverse", force_length=32)
+    elif task_mode == "history_action":
+        arguments.update(force_task="history_action", force_length=32)
+    elif task_mode == "arbitrary_state":
+        arguments.update(force_task="arbitrary", force_target="state")
+    elif task_mode == "arbitrary_action":
+        arguments.update(force_task="arbitrary", force_target="action")
+    elif task_mode != "combined":
+        raise ValueError(f"unsupported overfit task_mode {task_mode!r}")
+    if not bool(training.get("fixed_training_masks", False)):
+        return masker.generate(batch, **arguments)
+    if task_mode == "combined":
+        raise ValueError("fixed_training_masks requires an explicit single task_mode")
+    device = batch["physical_state"].device
+    devices = [device.index if device.index is not None else torch.cuda.current_device()] \
+        if device.type == "cuda" else []
+    batch_size = int(batch["physical_state"].shape[0])
+    generated: list[MaskBatch] = []
+    for index in range(batch_size):
+        single = {
+            key: (
+                value[index : index + 1]
+                if isinstance(value, torch.Tensor) and value.ndim > 0
+                and value.shape[0] == batch_size
+                else [value[index]]
+                if isinstance(value, (list, tuple)) and len(value) == batch_size
+                else value
+            )
+            for key, value in batch.items()
+        }
+        seed = _fixed_mask_seed(single, int(training.get("fixed_mask_seed", 0)))
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(seed)
+            generated.append(masker.generate(single, **arguments))
+
+    def combine(name: str) -> torch.Tensor | None:
+        values = [getattr(item, name) for item in generated]
+        if values[0] is None:
+            if any(value is not None for value in values):
+                raise ValueError(f"fixed Mask field {name} differs across samples")
+            return None
+        return torch.cat(values, dim=0)
+
+    first = generated[0]
+    return MaskBatch(
+        combine("state_input"), combine("previous_input"), combine("action_input"),
+        combine("state_loss"), combine("previous_loss"), combine("action_loss"),
+        first.task_id, first.task_name, first.completion_name, first.causal,
+        combine("forward_transition"), combine("inverse_transition"),
+        combine("history_action_transition"), combine("rollout_start"),
+        combine("rollout_horizon"),
+    )
+
+
 def _infinite(loader: DataLoader) -> Iterator[dict[str, Any]]:
     while True:
         yield from loader
@@ -141,7 +272,9 @@ def validate(
     max_batches: int,
 ) -> dict[str, float]:
     model.eval()
-    if getattr(model, "__class__", type(model)).__name__ == "PhysicsTransformerCVAE":
+    if getattr(model, "__class__", type(model)).__name__ in {
+        "PhysicsTransformerCVAE", "LeanSplitPhysicsCVAE"
+    }:
         result = _validate_physics(model, loader, masker, device, amp, max_batches)
         model.train()
         return result
@@ -317,6 +450,14 @@ def _validate_action_finetune_modes(
     values_by_mode: dict[str, dict[str, list[float]]] = {
         mode: {name: [] for name, _ in cases} for mode in latent_modes
     }
+    reference_effects: dict[str, list[float]] = {mode: [] for mode in latent_modes}
+    reference_forward_changes: dict[str, list[float]] = {
+        mode: [] for mode in latent_modes
+    }
+    inverse_coverages: dict[str, list[float]] = {mode: [] for mode in latent_modes}
+    inverse_interval_widths: dict[str, list[float]] = {
+        mode: [] for mode in latent_modes
+    }
     model.eval()
     masker.set_step(max(masker.optimizer_step, 40_000))
     for batch_index, cpu_batch in enumerate(loader):
@@ -368,6 +509,19 @@ def _validate_action_finetune_modes(
             elif name.startswith("inverse_"):
                 mask = masks.inverse_transition[:, :, None].expand_as(output.inverse_action)
                 error = _masked_squared_error(output.inverse_action.float(), batch["action"].float(), mask)
+                inverse_log_scale = getattr(output, "inverse_action_log_scale", None)
+                if inverse_log_scale is not None and bool(mask.any()):
+                    scale = torch.exp(inverse_log_scale.float())
+                    covered = (
+                        torch.abs(batch["action"].float() - output.inverse_action.float())
+                        <= 1.96 * scale
+                    )
+                    inverse_coverages[latent_mode].append(float(
+                        covered.masked_select(mask).float().mean().cpu()
+                    ))
+                    inverse_interval_widths[latent_mode].append(float(
+                        (3.92 * scale).masked_select(mask).mean().cpu()
+                    ))
             elif name == "history_action":
                 mask = masks.history_action_transition[:, :, None].expand_as(output.history_action)
                 error = _masked_squared_error(output.history_action.float(), batch["action"].float(), mask)
@@ -379,6 +533,54 @@ def _validate_action_finetune_modes(
                 )
             if error is not None:
                 values_by_mode[latent_mode][name].append(float(torch.sqrt(error).cpu()))
+            if (
+                (
+                    name.startswith("inverse_")
+                    or name == "history_action"
+                    or name.startswith("completion_")
+                    or name == "arbitrary_action"
+                )
+                and getattr(model, "reference_conditioning", "off") == "required"
+            ):
+                changed_batch = dict(batch)
+                changed_batch["reference_future"] = torch.zeros_like(
+                    batch["reference_future"]
+                )
+                with _autocast(device, amp):
+                    changed_output = model(
+                        changed_batch,
+                        masks,
+                        sample_from_prior=latent_mode == "prior_mean",
+                        deterministic=True,
+                    )
+                if name.startswith("inverse_"):
+                    original_action = output.inverse_action
+                    changed_action = changed_output.inverse_action
+                    effect_mask = masks.inverse_transition[:, :, None].expand_as(
+                        output.inverse_action
+                    )
+                elif name == "history_action":
+                    original_action = output.history_action
+                    changed_action = changed_output.history_action
+                    effect_mask = masks.history_action_transition[:, :, None].expand_as(
+                        output.history_action
+                    )
+                else:
+                    original_action = output.action
+                    changed_action = changed_output.action
+                    effect_mask = masks.action_loss
+                effect_error = _masked_squared_error(
+                    changed_action.float(), original_action.float(), effect_mask,
+                )
+                if effect_error is not None:
+                    reference_effects[latent_mode].append(
+                        float(torch.sqrt(effect_error).cpu())
+                    )
+                reference_forward_changes[latent_mode].append(float(
+                    torch.max(torch.abs(
+                        changed_output.forward_delta.float() - output.forward_delta.float()
+                    )).cpu()
+                ))
 
     results: dict[str, dict[str, float]] = {}
     for latent_mode, values in values_by_mode.items():
@@ -408,6 +610,22 @@ def _validate_action_finetune_modes(
             "forward_rollout_8_normalized_rmse": means["forward_rollout"],
             "arbitrary_state_normalized_rmse": means["arbitrary_state"],
             "state_step_32_normalized_rmse": means["state_step32"],
+            "reference_action_effect_normalized_rms": (
+                float(np.mean(reference_effects[latent_mode]))
+                if reference_effects[latent_mode] else 0.0
+            ),
+            "forward_reference_max_abs_change": (
+                float(np.max(reference_forward_changes[latent_mode]))
+                if reference_forward_changes[latent_mode] else 0.0
+            ),
+            "inverse_probability_95_coverage": (
+                float(np.mean(inverse_coverages[latent_mode]))
+                if inverse_coverages[latent_mode] else math.nan
+            ),
+            "inverse_probability_95_width_normalized": (
+                float(np.mean(inverse_interval_widths[latent_mode]))
+                if inverse_interval_widths[latent_mode] else math.nan
+            ),
             **{f"rmse/{case_name}": value for case_name, value in means.items()},
         }
     model.train()
@@ -519,6 +737,11 @@ def load_weight_only_initialization(
         "global_robot_info_dim", "actuator_type_count", "context_mode",
         "include_previous_action", "robot_info_dim", "dynamics_context_dim",
         "auxiliary_dim", "token_layout", "robot_conditioning",
+        "history_steps", "joint_spatial_layers", "history_layers",
+        "completion_encoder_layers", "completion_decoder_layers",
+        "reference_layers", "reference_frames", "reference_dim",
+        "reference_conditioning", "forward_reference_conditioning",
+        "action_queue_conditioning", "causal_dynamics_embedding",
     )
     mismatches = {
         key: (parent_model.get(key), model_config.get(key))
@@ -556,7 +779,7 @@ def _checkpoint_state(
     state = {
         "format_version": (
             "sonic_state_action_cvae_checkpoint_v2"
-            if config["model"]["kind"] == "physics_transformer"
+            if config["model"]["kind"] in PHYSICS_MODEL_KINDS
             else "sonic_state_action_cvae_checkpoint_v1"
         ),
         "step": step,
@@ -642,14 +865,30 @@ def train(
     config["model"]["joint_robot_info_dim"] = train_dataset.joint_robot_info_dim
     config["model"]["global_robot_info_dim"] = train_dataset.global_robot_info_dim
     config["model"]["actuator_type_count"] = len(train_dataset.actuator_type_to_id)
+    config["model"]["reference_frames"] = 10
+    config["model"]["reference_dim"] = 64
+    config["model"]["reference_available"] = train_dataset.reference_available
     if config["model"].get("context_mode", "hidden") in {"explicit", "oracle"} and not train_dataset.physics_v3:
         raise ValueError("oracle dynamics context requires a Physics State-Action v3 dataset")
     config["model"]["token_layout"] = (
         "interleaved" if train_dataset.physics_v3 else "grouped"
     )
-    if config["model"]["kind"] == "physics_transformer" and not train_dataset.physics_v4:
-        raise ValueError("physics_transformer requires a Physics State-Action CVAE v4 index")
+    if config["model"]["kind"] in PHYSICS_MODEL_KINDS and not train_dataset.physics_v4:
+        raise ValueError("Physics models require a Physics State-Action CVAE v4/v5 index")
+    if (
+        config["model"].get("reference_conditioning") == "required"
+        and not train_dataset.reference_available
+    ):
+        raise ValueError("reference_conditioning=required needs a reference-aware v5 dataset")
     training = config["training"]
+    task_mode, task_thresholds = overfit_task_thresholds(training)
+    gate_policy = str(training.get("overfit_gate_policy", "strict"))
+    if gate_policy not in {"strict", "diagnostic"}:
+        raise ValueError(f"unsupported overfit_gate_policy {gate_policy!r}")
+    if overfit_phase is None and task_mode != "combined":
+        raise ValueError("single task_mode is supported only by the overfit protocol")
+    if gate_policy == "diagnostic" and task_mode not in {"inverse", "history_action"}:
+        raise ValueError("diagnostic gate policy is reserved for unidentifiable inverse/history tasks")
     overfit_gate_latent_mode: str | None = None
     overfit_diagnostic_latent_modes: tuple[str, ...] = ()
     if overfit_phase is not None:
@@ -659,7 +898,7 @@ def train(
         ) = overfit_latent_protocol(training, overfit_phase)
     generator = torch.Generator().manual_seed(seed)
     sampler = None
-    if config["model"]["kind"] == "physics_transformer" and bool(
+    if config["model"]["kind"] in PHYSICS_MODEL_KINDS and bool(
         data_config.get("status_balancing", True)
     ):
         statuses = [train_dataset.episodes[ref.episode_index]["status"] for ref in train_dataset.refs]
@@ -673,10 +912,16 @@ def train(
             sampler = WeightedRandomSampler(
                 weights, num_samples=len(weights), replacement=True, generator=generator
             )
+    if bool(training.get("fixed_training_masks", False)):
+        if sampler is not None:
+            raise ValueError("fixed training Masks cannot use a balancing sampler")
+        sampler = CyclicSequentialSampler(
+            len(train_dataset), int(training["micro_batch"])
+        )
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(training["micro_batch"]),
-        shuffle=sampler is None,
+        shuffle=sampler is None and bool(data_config.get("shuffle_train", True)),
         sampler=sampler,
         num_workers=int(data_config["num_workers"]),
         pin_memory=device.type == "cuda",
@@ -700,6 +945,31 @@ def train(
     dataset_manifest = dataset_run / "manifests" / "dataset_manifest.json"
     dataset_hash = file_sha256(dataset_manifest)
     dataset_metadata = json.loads(dataset_manifest.read_text(encoding="utf-8"))
+    provenance_policy = str(config["model"].get("input_provenance_policy", "legacy"))
+    if provenance_policy not in {"legacy", "deployment_only"}:
+        raise ValueError(f"unsupported input_provenance_policy {provenance_policy!r}")
+    if provenance_policy == "deployment_only":
+        if config["model"].get("context_mode", "hidden") != "hidden":
+            raise ValueError("deployment_only input policy forbids oracle dynamics context")
+        declared_provenance = dataset_metadata.get("input_provenance", {})
+        if declared_provenance.get("dynamics_context") not in {"oracle_only", None}:
+            raise ValueError("dataset does not isolate oracle dynamics context")
+        if config["model"].get("reference_conditioning") == "required" and (
+            declared_provenance.get("reference_future") != "known_runtime_command"
+        ):
+            raise ValueError("dataset reference is not proven to be a known runtime command")
+    if config["model"]["kind"] == "physics_lean_split":
+        observed_delay = int(
+            dataset_metadata.get("representations", {})
+            .get("known_action_queue", {})
+            .get("observed_max_delay_control_steps", 0)
+        )
+        minimum_history = max(10, observed_delay + 1)
+        if int(config["model"].get("history_steps", 0)) < minimum_history:
+            raise ValueError(
+                "LeanSplit history_steps must be at least "
+                f"max(10, observed_max_delay+1)={minimum_history}"
+            )
     if overfit_phase is not None:
         if dataset_metadata.get("purpose") != "physics_state_action_32_motion_memorization":
             raise ValueError("overfit training requires a dedicated memorization subset")
@@ -710,6 +980,11 @@ def train(
             raise ValueError("overfit training requires exactly 32 motions and 256 episodes")
         if validation_split != train_split or bool(data_config.get("random_crop", True)):
             raise ValueError("overfit training requires same-split evaluation and fixed windows")
+        if bool(training.get("fixed_training_masks", False)):
+            if bool(data_config.get("shuffle_train", True)):
+                raise ValueError("fixed training Masks require shuffle_train=false")
+            if config["masking"].get("action_step_curriculum"):
+                raise ValueError("fixed training Masks cannot use an Action-length curriculum")
         config["overfit_phase"] = overfit_phase
     actual_parameter_count = parameter_count(model)
     expected_parameter_count = config["model"].get("expected_parameter_count")
@@ -741,7 +1016,7 @@ def train(
             "--init-checkpoint is accepted only with Action fine-tune or full overfit phase"
         )
     reference_config = dict(config["model"])
-    if config["model"]["kind"] == "physics_transformer":
+    if config["model"]["kind"] in PHYSICS_MODEL_KINDS:
         reference_config["kind"] = None
         reference_parameter_count = None
     else:
@@ -820,6 +1095,9 @@ def train(
             "model_profile": config["model"].get("profile"),
             "overfit_gate_latent_mode": overfit_gate_latent_mode,
             "overfit_diagnostic_latent_modes": list(overfit_diagnostic_latent_modes),
+            "task_mode": task_mode,
+            "overfit_gate_policy": gate_policy,
+            "fixed_training_masks": bool(training.get("fixed_training_masks", False)),
             "fixed_window_count": len(train_dataset),
             "optimizer_parameter_groups": optimizer_groups,
             "initialization": provenance,
@@ -852,7 +1130,7 @@ def train(
         accumulated: dict[str, float] = {}
         for _ in range(accumulation):
             batch = _device_batch(next(stream), device)
-            masks = masker.generate(batch)
+            masks = generate_training_masks(masker, batch, training)
             beta = float(training["kl_beta"]) * min(
                 optimizer_step / max(int(training["kl_warmup_steps"]), 1), 1.0
             )
@@ -943,7 +1221,42 @@ def train(
                 validation["state_guard_pass"] = state_guard_pass
                 validation["state_guard_ratios"] = state_guard_ratios
             if overfit_phase is not None:
-                gate = overfit_gate(validation, training.get("overfit_thresholds"))
+                gate = overfit_gate(
+                    validation,
+                    task_thresholds,
+                    require_complete=task_mode == "combined",
+                )
+                reference_gated_tasks = {
+                    "combined", "inverse", "history_action", "arbitrary_action"
+                }
+                if (
+                    config["model"]["kind"] == "physics_lean_split"
+                    and config["model"].get("reference_conditioning") == "required"
+                    and task_mode in reference_gated_tasks
+                ):
+                    minimum_effect = float(
+                        training.get("reference_action_effect_min", 0.01)
+                    )
+                    maximum_forward_change = float(
+                        training.get("forward_reference_max_abs_change", 1e-8)
+                    )
+                    effect = float(
+                        validation.get("reference_action_effect_normalized_rms", 0.0)
+                    )
+                    forward_change = float(
+                        validation.get("forward_reference_max_abs_change", math.inf)
+                    )
+                    gate["overfit_ratios"]["reference_action_effect_min"] = (
+                        minimum_effect / max(effect, 1e-12)
+                    )
+                    gate["overfit_ratios"]["forward_reference_isolation"] = (
+                        forward_change / max(maximum_forward_change, 1e-12)
+                    )
+                    gate["overfit_score"] = max(gate["overfit_ratios"].values())
+                    gate["overfit_pass"] = bool(
+                        math.isfinite(gate["overfit_score"])
+                        and gate["overfit_score"] <= 1.0
+                    )
                 validation.update(gate)
                 overfit_pass_streak = overfit_pass_streak + 1 if gate["overfit_pass"] else 0
                 validation["overfit_pass_streak"] = overfit_pass_streak
@@ -1004,7 +1317,11 @@ def train(
                     )
                 minimum_steps = int(training.get("minimum_optimizer_steps", 0))
                 required_streak = int(training.get("overfit_consecutive_validations", 2))
-                if optimizer_step >= minimum_steps and overfit_pass_streak >= required_streak:
+                if (
+                    gate_policy == "strict"
+                    and optimizer_step >= minimum_steps
+                    and overfit_pass_streak >= required_streak
+                ):
                     overfit_consecutive_pass = True
                     break
             elif validations_without_improvement >= int(training["early_stopping_patience"]):
@@ -1036,7 +1353,7 @@ def train(
     reopened = torch.load(best_path, map_location="cpu", weights_only=False)
     expected_format = (
         "sonic_state_action_cvae_checkpoint_v2"
-        if config["model"]["kind"] == "physics_transformer"
+        if config["model"]["kind"] in PHYSICS_MODEL_KINDS
         else "sonic_state_action_cvae_checkpoint_v1"
     )
     if reopened.get("format_version") != expected_format:
@@ -1100,6 +1417,13 @@ def train(
             "passed": bool(overfit_consecutive_pass),
             "overfit_phase": overfit_phase,
             "model_profile": config["model"].get("profile", "unspecified"),
+            "task_mode": task_mode,
+            "overfit_gate_policy": gate_policy,
+            "fixed_training_masks": bool(training.get("fixed_training_masks", False)),
+            "fixed_mask_seed": training.get("fixed_mask_seed"),
+            "task_gate_metrics": list(task_thresholds),
+            "minimum_optimizer_steps": int(training.get("minimum_optimizer_steps", 0)),
+            "maximum_optimizer_steps": int(training["max_optimizer_steps"]),
             "gate_latent_mode": overfit_gate_latent_mode,
             "diagnostic_latent_modes": list(overfit_diagnostic_latent_modes),
             "seed": seed,
@@ -1111,6 +1435,7 @@ def train(
             ),
             "fixed_window_count": fixed_window_count,
             "samples_seen": len(losses) * samples_per_step,
+            "samples_seen_per_task": {task_mode: len(losses) * samples_per_step},
             "effective_epochs": len(losses) * samples_per_step / fixed_window_count,
             "memorization_benchmark": True,
             "generalization_claim_allowed": False,
@@ -1172,7 +1497,7 @@ def train(
     atomic_write_json(output_run / "manifests" / "training_summary.json", summary)
     if fine_tune_mode == "action" and not smoke and not summary["action_quality_pass"]:
         raise RuntimeError("Action fine-tune did not satisfy all offline improvement gates")
-    if overfit_phase is not None and not summary["passed"]:
+    if overfit_phase is not None and not summary["passed"] and gate_policy == "strict":
         train_dataset.close()
         validation_dataset.close()
         raise RuntimeError(
@@ -1181,7 +1506,11 @@ def train(
     marker_name = (
         "cvae_action_finetune_smoke.ok" if smoke else "cvae_action_finetune.ok"
     ) if fine_tune_mode == "action" else (
-        ("cvae_overfit_smoke.ok" if smoke else f"cvae_overfit_{overfit_phase}.ok")
+        (
+            "cvae_overfit_single_task.ok"
+            if task_mode != "combined"
+            else "cvae_overfit_smoke.ok" if smoke else f"cvae_overfit_{overfit_phase}.ok"
+        )
         if overfit_phase is not None else (
             "cvae_smoke_train.ok" if smoke else "cvae_train.ok"
         )
@@ -1198,7 +1527,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-run", type=Path, required=True)
     parser.add_argument("--output-run", type=Path, required=True)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--model-kind", choices=("transformer", "tcn", "physics_transformer"))
+    parser.add_argument(
+        "--model-kind",
+        choices=("transformer", "tcn", "physics_transformer", "physics_lean_split"),
+    )
     parser.add_argument("--seed", type=int)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--init-checkpoint", type=Path)

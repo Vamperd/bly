@@ -45,6 +45,8 @@ COLLECT_MOTION_MANIFEST="${COLLECT_MOTION_MANIFEST:-}"
 COLLECT_BASELINE_SUMMARY="${COLLECT_BASELINE_SUMMARY:-}"
 COLLECT_DATASET_NAME="${COLLECT_DATASET_NAME:-sonic_minimal_sa}"
 COLLECT_RUN_DIR="${COLLECT_RUN_DIR:-}"
+BONES_INGEST_RUN="${BONES_INGEST_RUN:-}"
+OVERFIT_SELECTION_RUN="${OVERFIT_SELECTION_RUN:-}"
 BONES_MIN_DOWNLOAD_FREE_GIB="${BONES_MIN_DOWNLOAD_FREE_GIB:-70}"
 BONES_MIN_STAGE_FREE_GIB="${BONES_MIN_STAGE_FREE_GIB:-40}"
 OFFLINE_RENDER_ENVS="${OFFLINE_RENDER_ENVS:-1}"
@@ -520,7 +522,8 @@ phase_render() {
 
 phase_collect_state_action() {
   local collection_format="${1:-minimal}"
-  [[ "$collection_format" == "minimal" || "$collection_format" == "physics_v3" ]] \
+  [[ "$collection_format" == "minimal" || "$collection_format" == "physics_v3" \
+    || "$collection_format" == "physics_v5_reference" ]] \
     || die "Unsupported collection format: $collection_format"
   activate_env
   prepare_dirs
@@ -538,6 +541,13 @@ phase_collect_state_action() {
     recorder_config_path="$SONIC_DIR/gear_sonic/config/manager_env/recorders/physics_state_action.yaml"
     dataset_name="sonic_physics_sa_raw"
     run_prefix="collect_physics_state_action"
+    schema_filename="physics_state_action_raw_schema.json"
+    success_marker="collect_physics_state_action.ok"
+  elif [[ "$collection_format" == "physics_v5_reference" ]]; then
+    recorder_config="physics_state_action_reference"
+    recorder_config_path="$SONIC_DIR/gear_sonic/config/manager_env/recorders/physics_state_action_reference.yaml"
+    dataset_name="sonic_physics_sa_raw"
+    run_prefix="collect_physics_state_action_reference"
     schema_filename="physics_state_action_raw_schema.json"
     success_marker="collect_physics_state_action.ok"
   fi
@@ -668,7 +678,7 @@ phase_collect_state_action() {
   metadata_override="++manager_env.recorders.minimal_metadata.schema_output_path=$run_dir/manifests/$schema_filename"
   local -a physics_config_args
   physics_config_args=()
-  if [[ "$collection_format" == "physics_v3" ]]; then
+  if [[ "$collection_format" == "physics_v3" || "$collection_format" == "physics_v5_reference" ]]; then
     metadata_override="++manager_env.recorders.physics_metadata.schema_output_path=$run_dir/manifests/$schema_filename"
     physics_config_args=("++manager_env.config.contact_history_length=4")
   fi
@@ -727,7 +737,7 @@ phase_collect_state_action() {
     verifier_manifest_args=(--motion-manifest "$runtime_manifest_path")
   fi
   local verify_ok=false
-  if [[ "$collection_format" == "physics_v3" ]]; then
+  if [[ "$collection_format" == "physics_v3" || "$collection_format" == "physics_v5_reference" ]]; then
     if python "$SCRIPT_DIR/consolidate_physics_state_action.py" --run-dir "$run_dir" \
       2>&1 | tee "$run_dir/logs/consolidate_physics_state_action.log" \
       && python "$SCRIPT_DIR/verify_physics_state_action.py" \
@@ -759,10 +769,16 @@ phase_collect_state_action() {
     fi
     record_exit_code "$run_dir" "$run_prefix" 0
     mark_stage "$run_dir" "$success_marker"
-    if [[ "$collection_format" == "physics_v3" ]]; then
+    if [[ "$collection_format" == "physics_v3" || "$collection_format" == "physics_v5_reference" ]]; then
       local latest_physics_tmp="$RUNS_ROOT/.latest_collect_physics_sa_run_dir.tmp.$$"
       printf '%s\n' "$run_dir" > "$latest_physics_tmp"
       mv -f -- "$latest_physics_tmp" "$RUNS_ROOT/latest_collect_physics_sa_run_dir.txt"
+      if [[ "$collection_format" == "physics_v5_reference" ]]; then
+        local latest_reference_tmp="$RUNS_ROOT/.latest_collect_physics_sa_reference_run_dir.tmp.$$"
+        printf '%s\n' "$run_dir" > "$latest_reference_tmp"
+        mv -f -- "$latest_reference_tmp" \
+          "$RUNS_ROOT/latest_collect_physics_sa_reference_run_dir.txt"
+      fi
     fi
   else
     record_exit_code "$run_dir" "$run_prefix" 1
@@ -772,6 +788,10 @@ phase_collect_state_action() {
 
 phase_collect_physics_state_action() {
   phase_collect_state_action physics_v3
+}
+
+phase_collect_physics_state_action_reference() {
+  phase_collect_state_action physics_v5_reference
 }
 
 phase_verify_state_action() {
@@ -889,6 +909,36 @@ phase_prepare_bones_subset() {
   else
     local rc=$?
     record_exit_code "$ingest_run" prepare_bones_subset "$rc"
+    return "$rc"
+  fi
+}
+
+phase_prepare_overfit_reference_subset() {
+  activate_env
+  prepare_dirs
+  [[ -n "$OVERFIT_SELECTION_RUN" ]] \
+    || die "Set OVERFIT_SELECTION_RUN to the passed 32-motion overfit subset run"
+  [[ -n "$BONES_INGEST_RUN" ]] \
+    || die "Set BONES_INGEST_RUN to the original BONES ingest run"
+  local selection_run ingest_run run_dir latest_tmp
+  selection_run="$(validated_run_dir "$OVERFIT_SELECTION_RUN")"
+  ingest_run="$(validated_run_dir "$BONES_INGEST_RUN")"
+  run_dir="$(new_run_dir prepare_overfit_reference_subset)"
+  RUN_SEED="$COLLECT_SEED" write_run_manifest "$run_dir"
+  if python "$SCRIPT_DIR/prepare_overfit_reference_subset.py" \
+    --selection-run "$selection_run" \
+    --ingest-run "$ingest_run" \
+    --output-run "$run_dir" \
+    2>&1 | tee "$run_dir/logs/prepare_overfit_reference_subset.log"; then
+    record_exit_code "$run_dir" prepare_overfit_reference_subset 0
+    latest_tmp="$RUNS_ROOT/.latest_overfit_reference_motion_subset_run_dir.tmp.$$"
+    printf '%s\n' "$run_dir" > "$latest_tmp"
+    mv -f -- "$latest_tmp" \
+      "$RUNS_ROOT/latest_overfit_reference_motion_subset_run_dir.txt"
+    log "Prepared exact read-only 32-motion reference collection input: $run_dir"
+  else
+    local rc=$?
+    record_exit_code "$run_dir" prepare_overfit_reference_subset "$rc"
     return "$rc"
   fi
 }
@@ -1374,12 +1424,16 @@ Phases:
                   Record and verify minimal (s_t, g_t, a_t, s_t+1) HDF5 data.
   collect-physics-state-action
                   Record canonical 70-D State, 29-D Action, robot context, and replay data.
+  collect-physics-state-action-reference
+                  Record Physics v5 data with the exact deployable SONIC future reference.
   verify-state-action
                   Revalidate an existing collection without rewriting its HDF5 data.
   bones-download-preflight
                   Require 70 GiB free before the manual gated BONES download.
   prepare-bones-subset
                   Select, extract, convert, filter, and audit the 256-motion subset.
+  prepare-overfit-reference-subset
+                  Link the exact selected 32 motions read-only for Physics v5 collection.
   smoke-train     Run five offline training iterations; SMOKE_ENVS defaults to 16.
   verify-minimal  Audit commits, logs, success markers, dependencies, and MP4 output.
   setup-minimal   Install dependencies and sample data; does not run Isaac Sim.
@@ -1391,6 +1445,7 @@ Environment overrides:
   COLLECT_ENVS, COLLECT_RANDOMIZATION_PROFILE, COLLECT_SEED, COLLECT_VARIANT_OFFSET,
   COLLECT_MOTION_FILE, COLLECT_SMPL_MOTION_FILE, COLLECT_MOTION_MANIFEST,
   COLLECT_BASELINE_SUMMARY, COLLECT_DATASET_NAME, COLLECT_RUN_DIR, BONES_INGEST_RUN,
+  OVERFIT_SELECTION_RUN,
   OFFLINE_RENDER_ENVS, OFFLINE_FRAME_SKIP, OFFLINE_WIDTH, OFFLINE_HEIGHT,
   OFFLINE_GL, OFFLINE_CAMERA_DISTANCE, OFFLINE_RUN_DIR,
   ACTION_MASK_RUN_DIR, ACTION_MASK_GL, ACTION_MASK_WIDTH, ACTION_MASK_HEIGHT,
@@ -1421,9 +1476,11 @@ main() {
     render-state-mask) phase_render_state_mask ;;
     collect-state-action) phase_collect_state_action ;;
     collect-physics-state-action) phase_collect_physics_state_action ;;
+    collect-physics-state-action-reference) phase_collect_physics_state_action_reference ;;
     verify-state-action) phase_verify_state_action ;;
     bones-download-preflight) phase_bones_download_preflight ;;
     prepare-bones-subset) phase_prepare_bones_subset ;;
+    prepare-overfit-reference-subset) phase_prepare_overfit_reference_subset ;;
     smoke-train) phase_smoke_train ;;
     verify-minimal) phase_verify_minimal ;;
     status) phase_status ;;

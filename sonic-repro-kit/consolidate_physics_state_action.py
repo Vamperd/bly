@@ -33,6 +33,10 @@ DIAGNOSTIC_FIELDS = {
     "applied_joint_torque_mean": (29,),
     "foot_contact_impulse": (2, 3),
 }
+REFERENCE_FIELDS = {
+    "joint_pos_vel_future": (10, 58),
+    "root_orientation_future": (10, 6),
+}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -175,21 +179,28 @@ def consolidate(run_dir: Path) -> dict[str, Any]:
     run_dir = run_dir.expanduser().resolve()
     raw_path = run_dir / "data" / "sonic_physics_sa_raw.hdf5"
     raw_schema_path = run_dir / "manifests" / "physics_state_action_raw_schema.json"
-    output_path = run_dir / "data" / "sonic_physics_sa_v3.hdf5"
     schema_path = run_dir / "manifests" / "physics_state_action_schema.json"
     for required in (raw_path, raw_schema_path):
         if not required.is_file() or required.stat().st_size == 0:
             raise FileNotFoundError(required)
-    if output_path.exists() or schema_path.exists():
-        raise FileExistsError("refusing to overwrite an existing v3 artifact")
     schema = _load_json(raw_schema_path)
-    if schema.get("schema_version") != "sonic_physics_sa_raw_v3":
-        raise ValueError("raw schema version is not sonic_physics_sa_raw_v3")
+    raw_version = schema.get("schema_version")
+    versions = {
+        "sonic_physics_sa_raw_v3": "sonic_physics_sa_v3",
+        "sonic_physics_sa_raw_v5": "sonic_physics_sa_v5",
+    }
+    if raw_version not in versions:
+        raise ValueError(f"unsupported raw schema version {raw_version!r}")
+    final_version = versions[raw_version]
+    reference_available = final_version == "sonic_physics_sa_v5"
+    output_path = run_dir / "data" / f"{final_version}.hdf5"
+    if output_path.exists() or schema_path.exists():
+        raise FileExistsError(f"refusing to overwrite an existing {final_version} artifact")
     temporary = output_path.with_name(f".{output_path.name}.tmp.{os.getpid()}")
     episode_count = 0
     try:
         with h5py.File(raw_path, "r") as source, h5py.File(temporary, "w") as target:
-            target.attrs["schema_version"] = "sonic_physics_sa_v3"
+            target.attrs["schema_version"] = final_version
             target.attrs["state_semantics"] = "S[0:T+1], A[0:T]"
             _write_contexts(target, schema)
             output_data = target.create_group("data")
@@ -245,6 +256,24 @@ def consolidate(run_dir: Path) -> dict[str, Any]:
                         raise ValueError(f"{source_episode.name}/{name}: found {values.shape}")
                     _write_dataset(diagnostics, name, values)
 
+                if reference_available:
+                    reference = episode.create_group("reference")
+                    for name, tail in REFERENCE_FIELDS.items():
+                        values = np.asarray(source_episode[f"physics_reference/{name}"])
+                        if values.shape != (steps, *tail):
+                            raise ValueError(
+                                f"{source_episode.name}/physics_reference/{name}: "
+                                f"found {values.shape}"
+                            )
+                        _write_dataset(reference, name, values)
+                    offsets = np.asarray(
+                        schema["reference_future"]["time_offsets_seconds"],
+                        dtype=np.float32,
+                    )
+                    if offsets.shape != (10,) or not np.isfinite(offsets).all():
+                        raise ValueError("raw schema has invalid reference time offsets")
+                    _write_dataset(reference, "time_offsets", offsets)
+
                 transition_context = episode.create_group("transition_context")
                 _write_dataset(
                     transition_context,
@@ -289,7 +318,7 @@ def consolidate(run_dir: Path) -> dict[str, Any]:
         raise
 
     final_schema = dict(schema)
-    final_schema["schema_version"] = "sonic_physics_sa_v3"
+    final_schema["schema_version"] = final_version
     final_schema["dataset_file"] = output_path.name
     final_schema["storage"] = {
         "states": "data/<episode>/states/* with leading length T+1",

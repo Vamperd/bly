@@ -241,6 +241,67 @@ seed 20260828的reference pair，才生成`cvae_overfit_suite.ok`。所有报告
 泛化声明。汇总会拒绝缺少`gate_latent_mode`/`diagnostic_latent_modes`的新旧协议混合
 run，因此旧的prior-gated capacity失败run只能保留作诊断，不能进入suite。
 
+当前 compact/reference 联合实验不能再称为“严格记忆容量测试”。严格测试使用固定
+窗口、固定 Mask、固定任务以及每任务相同的 `samples_seen_per_task`，五个任务分别运行：
+
+```bash
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+for task in forward_rollout inverse history_action arbitrary_state arbitrary_action; do
+  CVAE_OVERFIT_MODEL=compact CVAE_OVERFIT_TASK="$task" CVAE_SEED=20260828 \
+    bash ./cvae_repro.sh overfit-single-task
+done
+
+# 可选地使用失败 capacity 的 best.pt 同时计算梯度余弦和输入遮挡；不提供 checkpoint
+# 时仍生成唯一 transition 近邻分散度和 RobotInfo 实际方差。
+CVAE_ANALYSIS_CHECKPOINT=/run/compact-capacity/checkpoints/best.pt \
+  bash ./cvae_repro.sh analyze-overfit
+
+CVAE_OVERFIT_RUNS="/run/task-a:/run/task-b:/run/task-c:/run/task-d:/run/task-e" \
+  bash ./cvae_repro.sh summarize-single-tasks
+```
+
+无 reference 的 deterministic inverse/history 只记录诊断值，不参与 compact 单任务
+suite 成功判定。`identifiability_heatmap.svg` 中的近邻目标分散度是排除自身及同 episode
+邻近帧后的经验歧义指标，不是数学误差下界；`input_sensitivity.svg` 只解释该训练集上的
+遮挡敏感性。
+
+`LeanSplit v1` 将确定性因果动力学、reference-conditioned Action 和双向 CVAE completion
+拆开，生产配置为 6,204,665 参数。forward 只读取最近
+`H=max(10, observed_max_delay+1)` 的 State/已知 Action，不读取 reference 或 CVAE latent；
+Action 分支可读取采集时真实可见的 `10×64` runtime reference；CVAE latent 只服务任意
+缺失补全。State 70维、Action 29维及 Isaac replay 合同保持不变。reference-aware 数据
+必须是 Physics v5，manifest 会把输入标成 configured、measured、causally_estimated 或
+oracle_only；deployment-only 模式拒绝 oracle context 和来源不明的 reference。
+
+Physics v5 子集建立后，LeanSplit 固定单任务用法如下：
+
+```bash
+export CVAE_SOURCE_RUNS=/run/v5-startup:/run/v5-initial-state-mild
+CVAE_EXPECTED_MOTIONS=32 CVAE_EXPECTED_EPISODES=256 \
+CVAE_SPLIT_COUNTS=32,0,0 CVAE_SEED=20260828 \
+  bash ./cvae_repro.sh build-physics-index
+
+export CVAE_DATASET_RUN="$(
+  cat /home/helloworld/bly/runs/latest_cvae_physics_dataset_run_dir.txt
+)"
+CVAE_SEED=20260828 bash ./cvae_repro.sh build-overfit-subset
+
+export CVAE_DATASET_RUN="$(
+  cat /home/helloworld/bly/runs/latest_cvae_overfit_subset_run_dir.txt
+)"
+CVAE_OVERFIT_MODEL=lean CVAE_OVERFIT_TASK=forward_rollout CVAE_SEED=20260828 \
+  bash ./cvae_repro.sh overfit-single-task
+
+# Action 信息增量实验通过 CVAE_CONFIG 依次选择：
+# overfit_32_lean_action_history_only.json
+# overfit_32_lean_action_history_queue.json
+# overfit_32_lean_action_history_reference.json
+# overfit_32_lean_action_history_reference_dynamics.json
+CVAE_OVERFIT_MODEL=lean CVAE_OVERFIT_TASK=history_action \
+CVAE_CONFIG=configs/overfit_32_lean_action_history_reference.json \
+  bash ./cvae_repro.sh overfit-single-task
+```
+
 复合 Mask 以40% forward、35% Action inference、25% arbitrary S/A completion 采样。
 模型分别报告一步/8步 forward、inverse Action、history-conditioned Action 和任意联合
 补全；torque/impulse 只从 `(S_t,A_t)` 转移表示进行辅助监督，不能读取 `S_{t+1}`。

@@ -1,0 +1,19 @@
+{
+  "extends": "overfit_32_lean_capacity.json",
+  "model": {"dropout": 0.1},
+  "training": {
+    "max_optimizer_steps": 10000,
+    "minimum_optimizer_steps": 2500,
+    "learning_rate": 0.00005,
+    "weight_decay": 0.0001,
+    "warmup_steps": 250,
+    "scheduler": {"kind": "warmup_cosine", "warmup_steps": 250, "min_lr_ratio": 0.01},
+    "kl_warmup_steps": 2500,
+    "kl_beta": 0.001,
+    "latent_mode": "sample",
+    "overfit_gate_latent_mode": "prior_mean",
+    "overfit_diagnostic_latent_modes": [],
+    "cycle_weight": 0.1,
+    "auxiliary_weight": 0.1
+  }
+}

@@ -21,11 +21,14 @@ from .physics_schema import (
     GLOBAL_ROBOT_INFO_DIM,
     JOINT_ROBOT_INFO_DIM,
     PHYSICS_STATE_DIM,
+    REFERENCE_DIM,
+    REFERENCE_FRAMES,
     ROBOT_INFO_DIM,
     actuator_type_names,
     dynamics_context_vector,
     load_physics_schema,
     read_physics_states,
+    read_reference_future,
     read_auxiliary_transitions,
     robot_information_vector,
     structured_robot_information,
@@ -43,13 +46,17 @@ class PhysicsSource:
     schema: dict[str, Any]
     profile: str
     cohort: str
+    reference_available: bool
 
 
 def _source(path: Path) -> PhysicsSource:
     run = path.expanduser().resolve()
+    reference_dataset = run / "data/sonic_physics_sa_v5.hdf5"
+    legacy_dataset = run / "data/sonic_physics_sa_v3.hdf5"
+    dataset = reference_dataset if reference_dataset.is_file() else legacy_dataset
     required = {
         "marker": run / "markers/collect_physics_state_action.ok",
-        "dataset": run / "data/sonic_physics_sa_v3.hdf5",
+        "dataset": dataset,
         "schema": run / "manifests/physics_state_action_schema.json",
         "summary": run / "manifests/collection_summary.json",
         "index": run / "manifests/canonical_episode_index.json",
@@ -64,9 +71,10 @@ def _source(path: Path) -> PhysicsSource:
     profile = str(schema["motion_collection"]["randomization_profile"])
     motion_count = len(schema["motion_id_to_key"])
     cohort = "old256" if motion_count == 256 else "new512" if motion_count == 512 else f"m{motion_count}"
+    reference_available = schema.get("schema_version") == "sonic_physics_sa_v5"
     return PhysicsSource(
         run, required["dataset"], required["schema"], required["summary"],
-        required["index"], schema, profile, cohort
+        required["index"], schema, profile, cohort, reference_available
     )
 
 
@@ -108,6 +116,10 @@ def build_physics_index(
     sources = [_source(path) for path in source_paths]
     if not sources:
         raise ValueError("at least one Physics State-Action source run is required")
+    reference_modes = {source.reference_available for source in sources}
+    if len(reference_modes) != 1:
+        raise ValueError("Physics sources cannot mix reference-aware v5 and legacy v3 data")
+    reference_available = reference_modes == {True}
     if expected_motions == 768 and len(sources) != 4:
         raise ValueError(f"production physics index requires four source runs, found {len(sources)}")
     if expected_motions == 768:
@@ -147,6 +159,14 @@ def build_physics_index(
     if "unknown" not in actuator_types:
         actuator_types.insert(0, "unknown")
     actuator_type_to_id = {name: index for index, name in enumerate(actuator_types)}
+    observed_max_delay = max([
+        0,
+        *(
+            int(group.get("max_delay", 0))
+            for source in sources
+            for group in source.schema.get("actuator_groups", {}).values()
+        ),
+    ])
     records: list[dict[str, Any]] = []
     motion_meta: dict[str, dict[str, Any]] = {}
     identities: set[tuple[str, int]] = set()
@@ -178,6 +198,16 @@ def build_physics_index(
                 states = read_physics_states(episode["states"])
                 actions = np.asarray(episode["actions/action_target_canonical"], dtype=np.float32)
                 auxiliary = read_auxiliary_transitions(episode["diagnostics"])
+                if reference_available:
+                    reference, offsets = read_reference_future(episode)
+                    expected_offsets = np.asarray(
+                        source.schema["reference_future"]["time_offsets_seconds"],
+                        dtype=np.float32,
+                    )
+                    if reference.shape != (steps, REFERENCE_FRAMES, REFERENCE_DIM):
+                        raise ValueError(f"{episode.name}: invalid reference length")
+                    if not np.array_equal(offsets, expected_offsets):
+                        raise ValueError(f"{episode.name}: reference offsets differ from schema")
                 if (
                     states.shape != (steps + 1, PHYSICS_STATE_DIM)
                     or actions.shape != (steps, ACTION_DIM)
@@ -253,6 +283,7 @@ def build_physics_index(
     global_robot_stats = RunningStats(GLOBAL_ROBOT_INFO_DIM)
     dynamics_stats = RunningStats(DYNAMICS_CONTEXT_DIM)
     auxiliary_stats = RunningStats(AUXILIARY_TRANSITION_DIM)
+    reference_stats = RunningStats(REFERENCE_DIM) if reference_available else None
     handles: dict[str, h5py.File] = {}
     schemas = {str(source.schema_path): source.schema for source in sources}
     try:
@@ -272,6 +303,7 @@ def build_physics_index(
             )
             dynamics_context = dynamics_context_vector(context)
             auxiliary = read_auxiliary_transitions(episode["diagnostics"])
+            reference = read_reference_future(episode)[0] if reference_available else None
             state_stats.update(states)
             action_stats.update(actions)
             robot_stats.update(robot_info[None])
@@ -279,6 +311,8 @@ def build_physics_index(
             global_robot_stats.update(global_robot[None])
             dynamics_stats.update(dynamics_context[None])
             auxiliary_stats.update(auxiliary)
+            if reference_stats is not None and reference is not None:
+                reference_stats.update(reference.reshape(-1, REFERENCE_DIM))
     finally:
         for stream in handles.values():
             stream.close()
@@ -293,6 +327,11 @@ def build_physics_index(
     global_robot_mean, global_robot_std = global_robot_stats.finalize()
     dynamics_mean, dynamics_std = dynamics_stats.finalize()
     auxiliary_mean, auxiliary_std = auxiliary_stats.finalize()
+    if reference_stats is not None:
+        reference_mean, reference_std = reference_stats.finalize()
+    else:
+        reference_mean = np.zeros(REFERENCE_DIM, dtype=np.float32)
+        reference_std = np.ones(REFERENCE_DIM, dtype=np.float32)
     normalization_path = output_run / "data/normalization.npz"
     temporary = normalization_path.with_name(f".{normalization_path.name}.tmp.{os.getpid()}")
     with temporary.open("wb") as stream:
@@ -312,6 +351,8 @@ def build_physics_index(
             dynamics_context_std=dynamics_std,
             auxiliary_transition_mean=auxiliary_mean,
             auxiliary_transition_std=auxiliary_std,
+            reference_future_mean=reference_mean,
+            reference_future_std=reference_std,
         )
     os.replace(temporary, normalization_path)
     records.sort(key=lambda item: (item["motion_key"], item["variant_id"]))
@@ -340,7 +381,10 @@ def build_physics_index(
         }
     atomic_write_json(output_run / "data/action_feature_audit.json", audit)
     manifest = {
-        "schema_version": "sonic_physics_state_action_cvae_dataset_v4",
+        "schema_version": (
+            "sonic_physics_state_action_cvae_dataset_v5"
+            if reference_available else "sonic_physics_state_action_cvae_dataset_v4"
+        ),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "seed": seed,
         "source_runs": [str(source.run_dir) for source in sources],
@@ -406,7 +450,44 @@ def build_physics_index(
                 "dimension": 29,
                 "definition": "actions[start-1] or initial_processed_target_canonical",
             },
+            "known_action_queue": {
+                "source": "causal_history_of_sent_processed_targets",
+                "observed_max_delay_control_steps": observed_max_delay,
+            },
+            "reference_future": {
+                "available": reference_available,
+                "shape_per_transition": [REFERENCE_FRAMES, REFERENCE_DIM],
+                "joint_pos_vel_dimension": 58,
+                "root_orientation_dimension": 6,
+                "source": (
+                    "command_manager_runtime_observation"
+                    if reference_available else None
+                ),
+                "model_visibility": "action_branch_only",
+            },
             "token_layout": "A_before_S0_A0_S1_A1_to_ST",
+        },
+        "input_provenance": {
+            "physical_state": "measured",
+            "action": "known_command",
+            "action_before_window": "known_command",
+            "joint_robot_information": "configured_or_calibrated",
+            "global_robot_information": "configured",
+            "reference_future": (
+                "known_runtime_command" if reference_available else "unavailable"
+            ),
+            "dynamics_context": "oracle_only",
+            "auxiliary_transition": "supervision_only",
+        },
+        "input_provenance_classification": {
+            "physical_state": "measured",
+            "action_and_queue": "configured",
+            "joint_robot_information": "configured",
+            "global_robot_information": "configured",
+            "reference_future": "configured" if reference_available else "unavailable",
+            "causal_dynamics_embedding": "causally_estimated",
+            "dynamics_context": "oracle_only",
+            "auxiliary_transition": "supervision_only",
         },
         "normalization": {"path": str(normalization_path), "training_split_only": True, "gravity": "unit_vector", "contact": "binary"},
         "episodes_index_sha256": file_sha256(episodes_path),
@@ -425,7 +506,7 @@ def _split_counts(value: str) -> tuple[int, int, int]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build the SONIC Physics State-Action v3 index")
+    parser = argparse.ArgumentParser(description="Build the SONIC Physics State-Action v3/v5 index")
     parser.add_argument("--source-run", action="append", type=Path, required=True)
     parser.add_argument("--output-run", type=Path, required=True)
     parser.add_argument("--expected-motions", type=int, default=768)

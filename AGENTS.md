@@ -45,8 +45,8 @@ p(S_{0:T},A_{0:T-1}\mid RobotInfo)
 
 截至 2026-08-27 的已观测状态：
 
-- 外层分支字面值为 `ubantu`；Action-focused fine-tune 实现提交为 `197a1730fd829a512e153755f56e6e97d4b1329d`。后续提交可能前移，禁止为了匹配本文自动 reset。
-- SONIC 当前分支为 `codex/minimal-state-action-recorder`，已观测 HEAD `fdd6dcf9c0c054ab0fbbde98a5bc8d4326ec00a6`，包含外层 `patches/0001`–`0007` 对应能力。
+- Windows 外层当前分支字面值为 `tiny-model`；Action-focused fine-tune 实现提交为 `197a1730fd829a512e153755f56e6e97d4b1329d`。Ubuntu 同步前仍须读取其实际分支，禁止为了匹配本文自动 reset。
+- SONIC 当前分支为 `codex/minimal-state-action-recorder`，已观测 HEAD `fdd6dcf9c0c054ab0fbbde98a5bc8d4326ec00a6`，包含外层 `patches/0001`–`0007` 对应能力；`0008` reference recorder 已在 Windows 外层实现并通过 `git apply --check`，但尚未在 Ubuntu 应用或采集。
 - IsaacLab 固定基线为 detached HEAD `37ddf626871758333d6ed89cf64ad702aef127d0`；Windows 有 9 个历史修改/元数据差异，当前任务不得触碰。
 - Ubuntu 固定环境为 Ubuntu 24.04.3、RTX 4090 24 GB、driver 595.84、Isaac Sim 5.1、Python 3.11.14、PyTorch 2.7.0+cu128。
 - released SONIC 原始基线是 `c374bae5b9039cd0ee71377e654d11ce1bc69e1d`，checkpoint 为 `sonic_release/last.pt`。
@@ -157,7 +157,22 @@ A_before, S0, A0, S1, A1, ..., A127, S128
 
 模型使用 joint-aware encoder/query decoder、RoPE 时间位置、State/Action 类型 embedding，并提供四条输出路径：任意 masked reconstruction、forward dynamics、inverse Action、history-conditioned Action。Forward head 只能读取 `S_t,A_t`；inverse head 只能读取 `S_t,S_{t+1}`；history head 使用 causal attention，不能读取未来 State。相关防泄漏测试已实现。
 
-### 6.1 已完成 parent 训练
+### 6.1 32-motion 诊断与 LeanSplit v1：代码已实现但待 Ubuntu 执行
+
+基于 compact/reference 均未通过联合 overfit gate 的结果，Windows 代码新增了固定窗口、
+固定 Mask 的五个单任务容量入口、唯一 transition 近邻目标分散度、RobotInfo 方差、共享
+主干梯度余弦和输入遮挡分析。无 reference 的 deterministic inverse/history 只作诊断，
+不参与 compact 单任务 suite 成功判定。
+
+新增 `physics_lean_split` 为 6,204,665 参数：因果动力学分支使用至少10步历史与已发送
+Action，不读取 reference/CVAE latent；Action 分支可读取 runtime command manager 直接记录的
+`10×64` reference；双向 CVAE 仅负责 arbitrary completion。State/Action 仍为70/29维。
+Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量配置均已实现，但本文尚未
+收到 Ubuntu smoke、v5 collection 或正式单任务训练日志，不得表述为已经验证成功。
+`sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
+32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
+
+### 6.2 已完成 parent 训练
 
 ```text
 Dataset:
@@ -326,14 +341,14 @@ nvidia-smi
 df -h /home/helloworld/bly/runs
 ```
 
-不得因为本文记录了某个旧 HEAD 就自动 checkout/reset/pull。先保护实际工作树，再进行 `git pull --ff-only origin ubantu`；若不满足 fast-forward 条件，停止并回传状态。
+不得因为本文记录了某个旧 HEAD 就自动 checkout/reset/pull。先保护实际工作树，再对实际分支执行 `git pull --ff-only`；若不满足 fast-forward 条件，停止并回传状态。
 
 ## 12. 代码入口索引
 
 | 任务 | 主要文件 |
 |---|---|
 | Physics v3 采集/验证 | `sonic-repro-kit/sonic_repro.sh`、`consolidate_physics_state_action.py`、`verify_physics_state_action.py` |
-| SONIC 嵌套改动 | `sonic-repro-kit/patches/0001`–`0007` |
+| SONIC 嵌套改动 | `sonic-repro-kit/patches/0001`–`0008`（`0008`待 Ubuntu 应用） |
 | Physics v4 index/dataset | `state-action-cvae/src/cvae_sa/physics_indexer.py`、`dataset.py`、`physics_schema.py` |
 | 模型与损失 | `models.py`、`losses.py`、`masking.py` |
 | 常规/fine-tune 训练 | `trainer.py`、`configs/physics_v3*.json`、`cvae_repro.sh` |

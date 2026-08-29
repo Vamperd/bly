@@ -1,0 +1,10 @@
+{
+  "extends": "overfit_32_lean_capacity.json",
+  "data": {"shuffle_train": false},
+  "model": {"profile": "lean_single_arbitrary_state"},
+  "training": {
+    "task_mode": "arbitrary_state", "fixed_training_masks": true,
+    "fixed_mask_seed": 20260828, "minimum_optimizer_steps": 20000,
+    "overfit_gate_policy": "strict"
+  }
+}

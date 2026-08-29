@@ -175,6 +175,14 @@ def compute_loss(
     if output.inverse_action is not None and bool(masks.inverse_transition.any()):
         inverse_mask = masks.inverse_transition[:, :, None].expand_as(output.inverse_action)
         inverse = _masked_huber(output.inverse_action, batch["action"], inverse_mask)
+        if output.inverse_action_log_scale is not None:
+            log_scale = output.inverse_action_log_scale.float()
+            residual = batch["action"].float() - output.inverse_action.float()
+            gaussian_nll = 0.5 * torch.square(residual) * torch.exp(-2.0 * log_scale) \
+                + log_scale
+            inverse = inverse + float(config.get("inverse_nll_weight", 0.0)) * (
+                gaussian_nll.masked_select(inverse_mask).mean()
+            )
     elif masks.task_name == "inverse":
         inverse = _masked_huber(output.action, batch["action"], masks.action_loss)
     else:

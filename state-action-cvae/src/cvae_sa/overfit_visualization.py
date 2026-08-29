@@ -283,3 +283,137 @@ def write_comparison_svg(records: list[dict[str, Any]], output_path: Path) -> No
         parts.append(f'<text x="{480 + bar:.1f}" y="{y + 21}" font-size="12">{score:.3f}</text>')
     parts.append("</svg>")
     atomic_write_text(output_path, "".join(parts))
+
+
+def _heat_color(value: float, maximum: float, signed: bool = False) -> str:
+    if not math.isfinite(value):
+        return "#e2e8f0"
+    if signed:
+        scaled = max(-1.0, min(1.0, value))
+        return "#ef4444" if scaled < -0.15 else "#22c55e" if scaled > 0.15 else "#facc15"
+    scaled = max(0.0, min(1.0, value / max(maximum, 1e-12)))
+    red = int(37 + scaled * 202)
+    green = int(99 - scaled * 31)
+    blue = int(235 - scaled * 167)
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def write_identifiability_svg(
+    ambiguity: list[dict[str, Any]],
+    gradient_cosines: dict[str, dict[str, float]],
+    output_path: Path,
+) -> None:
+    """Render empirical nearest-neighbor ambiguity and shared-stem gradient conflict."""
+    tasks = sorted({str(item["task"]) for item in ambiguity})
+    histories = sorted({int(item["history_steps"]) for item in ambiguity})
+    lookup = {
+        (str(item["task"]), int(item["history_steps"])): float(
+            item["target_disagreement_normalized_rmse_p50"]
+        )
+        for item in ambiguity
+    }
+    finite_values = [value for value in lookup.values() if math.isfinite(value)]
+    maximum = max([1e-6, *finite_values])
+    cell_w, cell_h = 145, 42
+    left, top = 230, 92
+    gradient_tasks = sorted(gradient_cosines)
+    gradient_top = top + (len(tasks) + 2) * cell_h + 80
+    width = max(1000, left + max(len(histories), len(gradient_tasks)) * cell_w + 70)
+    height = gradient_top + (len(gradient_tasks) + 2) * cell_h + 50
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
+        '<rect width="100%" height="100%" fill="#f8fafc"/>',
+        '<style>text{font-family:Arial,"Microsoft YaHei",sans-serif;fill:#0f172a}</style>',
+        '<text x="24" y="34" font-size="21" font-weight="700">32-motion identifiability diagnostics</text>',
+        '<text x="24" y="61" font-size="12" fill="#64748b">empirical indicator only; self and nearby same-episode frames excluded</text>',
+        '<text x="24" y="91" font-size="15" font-weight="600">Nearest-neighbor target disagreement (normalized RMSE, median)</text>',
+    ]
+    for column, history in enumerate(histories):
+        parts.append(
+            f'<text x="{left + column * cell_w + cell_w / 2}" y="{top + 25}" '
+            f'text-anchor="middle" font-size="12">history={history}</text>'
+        )
+    for row, task in enumerate(tasks):
+        y = top + (row + 1) * cell_h
+        parts.append(f'<text x="24" y="{y + 27}" font-size="12">{escape(task)}</text>')
+        for column, history in enumerate(histories):
+            value = lookup.get((task, history), math.nan)
+            x = left + column * cell_w
+            parts.append(
+                f'<rect x="{x}" y="{y}" width="{cell_w - 4}" height="{cell_h - 4}" '
+                f'fill="{_heat_color(value, maximum)}" opacity="0.86"/>'
+            )
+            label = "n/a" if not math.isfinite(value) else f"{value:.4f}"
+            parts.append(
+                f'<text x="{x + (cell_w - 4) / 2}" y="{y + 25}" '
+                f'text-anchor="middle" font-size="12" fill="#ffffff">{label}</text>'
+            )
+    parts.append(
+        f'<text x="24" y="{gradient_top - 18}" font-size="15" font-weight="600">'
+        'Shared-stem task gradient cosine (negative indicates conflict)</text>'
+    )
+    if not gradient_tasks:
+        parts.append(
+            f'<text x="24" y="{gradient_top + 20}" font-size="12" fill="#64748b">'
+            'checkpoint not supplied; gradient diagnostic not computed</text>'
+        )
+    for column, task in enumerate(gradient_tasks):
+        parts.append(
+            f'<text x="{left + column * cell_w + cell_w / 2}" y="{gradient_top + 25}" '
+            f'text-anchor="middle" font-size="11">{escape(task)}</text>'
+        )
+    for row, task in enumerate(gradient_tasks):
+        y = gradient_top + (row + 1) * cell_h
+        parts.append(f'<text x="24" y="{y + 27}" font-size="11">{escape(task)}</text>')
+        for column, other in enumerate(gradient_tasks):
+            value = float(gradient_cosines[task][other])
+            x = left + column * cell_w
+            parts.append(
+                f'<rect x="{x}" y="{y}" width="{cell_w - 4}" height="{cell_h - 4}" '
+                f'fill="{_heat_color(value, 1.0, signed=True)}" opacity="0.82"/>'
+                f'<text x="{x + (cell_w - 4) / 2}" y="{y + 25}" '
+                f'text-anchor="middle" font-size="12">{value:.3f}</text>'
+            )
+    parts.append("</svg>")
+    atomic_write_text(output_path, "".join(parts))
+
+
+def write_parameter_efficiency_svg(records: list[dict[str, Any]], output_path: Path) -> None:
+    """Compare task score against parameter count under the fixed single-task protocol."""
+    width, height = 1150, 680
+    finite = [
+        item for item in records
+        if math.isfinite(float(item.get("best_overfit_score", math.inf)))
+        and int(item.get("parameter_count", 0)) > 0
+    ]
+    max_parameters = max([1, *[int(item["parameter_count"]) for item in finite]])
+    max_score = max([1.0, *[float(item["best_overfit_score"]) for item in finite]])
+    left, top, plot_w, plot_h = 110, 80, 970, 510
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
+        '<rect width="100%" height="100%" fill="#f8fafc"/>',
+        '<style>text{font-family:Arial,"Microsoft YaHei",sans-serif;fill:#0f172a}</style>',
+        '<text x="24" y="34" font-size="21" font-weight="700">Fixed-task parameter efficiency</text>',
+        f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="#64748b"/>',
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="#64748b"/>',
+    ]
+    pass_y = top + (max_score - 1.0) / max_score * plot_h
+    parts.append(
+        f'<line x1="{left}" y1="{pass_y}" x2="{left + plot_w}" y2="{pass_y}" '
+        'stroke="#dc2626" stroke-dasharray="6 4"/>'
+    )
+    for index, item in enumerate(finite):
+        parameters = int(item["parameter_count"])
+        score = float(item["best_overfit_score"])
+        x = left + parameters / max_parameters * plot_w
+        y = top + (max_score - score) / max_score * plot_h
+        color = COLORS[index % len(COLORS)]
+        label = f"{item.get('model_profile')} / {item.get('task_mode')}"
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7" fill="{color}"/>')
+        parts.append(f'<text x="{x + 10:.1f}" y="{y - 7:.1f}" font-size="11">{escape(label)}</text>')
+    parts.extend((
+        f'<text x="{left + plot_w / 2}" y="{height - 25}" text-anchor="middle" font-size="13">parameter count</text>',
+        f'<text x="24" y="{top + plot_h / 2}" font-size="13" transform="rotate(-90 24 {top + plot_h / 2})">worst threshold ratio (lower is better)</text>',
+        "</svg>",
+    ))
+    atomic_write_text(output_path, "".join(parts))

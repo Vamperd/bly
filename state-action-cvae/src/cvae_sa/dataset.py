@@ -16,8 +16,11 @@ from .physics_schema import (
     AUXILIARY_TRANSITION_DIM,
     dynamics_context_vector,
     PHYSICS_STATE_DIM,
+    REFERENCE_DIM,
+    REFERENCE_FRAMES,
     load_physics_schema,
     read_physics_states,
+    read_reference_future,
     read_auxiliary_transitions,
     resolve_parameter as resolve_physics_parameter,
     robot_information_vector,
@@ -67,13 +70,20 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
             "sonic_state_action_cvae_dataset_v1",
             "sonic_physics_state_action_cvae_dataset_v3",
             "sonic_physics_state_action_cvae_dataset_v4",
+            "sonic_physics_state_action_cvae_dataset_v5",
         }:
             raise ValueError("unsupported CVAE dataset manifest")
         self.physics_v3 = manifest_version in {
             "sonic_physics_state_action_cvae_dataset_v3",
             "sonic_physics_state_action_cvae_dataset_v4",
+            "sonic_physics_state_action_cvae_dataset_v5",
         }
-        self.physics_v4 = manifest_version == "sonic_physics_state_action_cvae_dataset_v4"
+        self.physics_v4 = manifest_version in {
+            "sonic_physics_state_action_cvae_dataset_v4",
+            "sonic_physics_state_action_cvae_dataset_v5",
+        }
+        self.physics_v5 = manifest_version == "sonic_physics_state_action_cvae_dataset_v5"
+        self.reference_available = self.physics_v5
         self.state_dim = PHYSICS_STATE_DIM if self.physics_v3 else PHYSICAL_STATE_DIM
         self.include_previous_action = not self.physics_v3
         episodes_path = self.dataset_run / "manifests" / "episodes.jsonl"
@@ -121,6 +131,12 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
                 self.dynamics_std = normalization["dynamics_context_std"].astype(np.float32)
                 self.auxiliary_mean = normalization["auxiliary_transition_mean"].astype(np.float32)
                 self.auxiliary_std = normalization["auxiliary_transition_std"].astype(np.float32)
+                self.reference_mean = normalization.get(
+                    "reference_future_mean", np.zeros(REFERENCE_DIM, dtype=np.float32)
+                ).astype(np.float32)
+                self.reference_std = normalization.get(
+                    "reference_future_std", np.ones(REFERENCE_DIM, dtype=np.float32)
+                ).astype(np.float32)
             else:
                 self.previous_mean = normalization["previous_action_mean"].astype(np.float32)
                 self.previous_std = normalization["previous_action_std"].astype(np.float32)
@@ -134,6 +150,8 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
                 self.dynamics_std = np.empty((0,), dtype=np.float32)
                 self.auxiliary_mean = np.empty((0,), dtype=np.float32)
                 self.auxiliary_std = np.empty((0,), dtype=np.float32)
+                self.reference_mean = np.zeros(REFERENCE_DIM, dtype=np.float32)
+                self.reference_std = np.ones(REFERENCE_DIM, dtype=np.float32)
             self.action_mean = normalization["action_mean"].astype(np.float32)
             self.action_std = normalization["action_std"].astype(np.float32)
         if self.state_mean.shape != (self.state_dim,):
@@ -143,6 +161,10 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         self.global_robot_info_dim = int(self.global_robot_mean.size)
         self.dynamics_context_dim = int(self.dynamics_mean.size)
         self.auxiliary_dim = int(self.auxiliary_mean.size)
+        if self.reference_mean.shape != (REFERENCE_DIM,) or self.reference_std.shape != (
+            REFERENCE_DIM,
+        ):
+            raise ValueError("invalid reference normalization")
         vocabulary = self.manifest.get("representations", {}).get(
             "joint_actuator_type", {}
         ).get("vocabulary", ["unknown"])
@@ -386,11 +408,20 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         auxiliary_output = np.zeros(
             (self.window, AUXILIARY_TRANSITION_DIM), dtype=np.float32
         )
+        reference_output = np.zeros(
+            (self.window, REFERENCE_FRAMES, REFERENCE_DIM), dtype=np.float32
+        )
+        reference_offsets = np.zeros(REFERENCE_FRAMES, dtype=np.float32)
         state_output[: count + 1] = (physical - self.state_mean) / self.state_std
         action_output[:count] = (actions - self.action_mean) / self.action_std
         auxiliary_output[:count] = (
             auxiliary - self.auxiliary_mean
         ) / self.auxiliary_std
+        if self.reference_available:
+            reference, reference_offsets = read_reference_future(episode, start, end)
+            reference_output[:count] = (
+                reference - self.reference_mean[None, None]
+            ) / self.reference_std[None, None]
         valid_state = np.zeros(self.window + 1, dtype=bool)
         valid_action = np.zeros(self.window, dtype=bool)
         valid_state[: count + 1] = True
@@ -423,6 +454,9 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
                 ((dynamics_context - self.dynamics_mean) / self.dynamics_std).astype(np.float32)
             ),
             "auxiliary_transition": torch.from_numpy(auxiliary_output),
+            "reference_future": torch.from_numpy(reference_output),
+            "reference_time_offsets": torch.from_numpy(reference_offsets.copy()),
+            "reference_available": torch.tensor(self.reference_available, dtype=torch.bool),
             "valid_state": torch.from_numpy(valid_state),
             "valid_action": torch.from_numpy(valid_action),
             "progress": torch.from_numpy(progress),
