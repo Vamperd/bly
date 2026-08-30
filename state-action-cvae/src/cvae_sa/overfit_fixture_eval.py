@@ -230,11 +230,46 @@ def sample_metric_contributions(
     raise ValueError(f"unsupported exact fixture task {task!r}")
 
 
+def accumulate_metric_contributions(
+    contributions: dict[str, tuple[float, int]],
+    batch_contributions: dict[str, list[tuple[float, int]]],
+    window_rmses: dict[str, list[float]],
+    squared_errors: dict[str, float],
+    element_counts: dict[str, int],
+    targetless_window_counts: dict[str, int],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Accumulate one window while retaining valid zero-target fixture windows."""
+    record_metrics: dict[str, dict[str, Any]] = {}
+    targetless_metrics: list[str] = []
+    for name, (squared, count) in contributions.items():
+        if count < 0 or squared < 0.0:
+            raise ValueError(f"invalid exact fixture contribution for {name}")
+        if count == 0:
+            targetless_window_counts[name] = (
+                targetless_window_counts.get(name, 0) + 1
+            )
+            window_rmses.setdefault(name, [])
+            targetless_metrics.append(name)
+            continue
+        value = math.sqrt(squared / count)
+        batch_contributions.setdefault(name, []).append((squared, count))
+        window_rmses.setdefault(name, []).append(value)
+        squared_errors[name] = squared_errors.get(name, 0.0) + squared
+        element_counts[name] = element_counts.get(name, 0) + count
+        record_metrics[name] = {
+            "normalized_rmse": value,
+            "element_count": count,
+            "target_available": True,
+        }
+    return record_metrics, targetless_metrics
+
+
 def _metric_result(
     batch_rmses: dict[str, list[float]],
     window_rmses: dict[str, list[float]],
     squared_errors: dict[str, float],
     element_counts: dict[str, int],
+    targetless_window_counts: dict[str, int],
 ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
     primary: dict[str, float] = {}
     details: dict[str, dict[str, Any]] = {}
@@ -242,6 +277,8 @@ def _metric_result(
         batches = batch_rmses.get(name, [])
         windows = window_rmses.get(name, [])
         count = int(element_counts.get(name, 0))
+        targetless = int(targetless_window_counts.get(name, 0))
+        fixture_windows = len(windows) + targetless
         value = float(np.mean(batches)) if batches else math.inf
         primary[name] = value
         details[name] = {
@@ -254,6 +291,12 @@ def _metric_result(
             ),
             "batch_count": len(batches),
             "window_count": len(windows),
+            "target_window_count": len(windows),
+            "targetless_window_count": targetless,
+            "fixture_window_count": fixture_windows,
+            "target_window_fraction": (
+                len(windows) / fixture_windows if fixture_windows else 0.0
+            ),
             "element_count": count,
         }
     return primary, details
@@ -402,6 +445,7 @@ def _evaluate_exact_checkpoint(
     window_rmses: dict[str, list[float]] = {}
     squared_errors: dict[str, float] = {}
     element_counts: dict[str, int] = {}
+    targetless_window_counts: dict[str, int] = {}
     loss_sums: dict[str, float] = {}
     loss_batches = 0
     sample_hashes: dict[str, str] = {}
@@ -434,19 +478,14 @@ def _evaluate_exact_checkpoint(
             contributions = sample_metric_contributions(
                 task, output, batch, masks, index
             )
-            record_metrics: dict[str, dict[str, Any]] = {}
-            for name, (squared, count) in contributions.items():
-                if count <= 0:
-                    raise ValueError(f"exact fixture metric {name} has no targets")
-                value = math.sqrt(squared / count)
-                batch_contributions.setdefault(name, []).append((squared, count))
-                window_rmses.setdefault(name, []).append(value)
-                squared_errors[name] = squared_errors.get(name, 0.0) + squared
-                element_counts[name] = element_counts.get(name, 0) + count
-                record_metrics[name] = {
-                    "normalized_rmse": value,
-                    "element_count": count,
-                }
+            record_metrics, targetless_metrics = accumulate_metric_contributions(
+                contributions,
+                batch_contributions,
+                window_rmses,
+                squared_errors,
+                element_counts,
+                targetless_window_counts,
+            )
             window_records.append({
                 "checkpoint_kind": checkpoint_kind,
                 "checkpoint_step": checkpoint_step,
@@ -455,14 +494,27 @@ def _evaluate_exact_checkpoint(
                 "mask_sha256": mask_hash,
                 "completion_name": masks.completion_name,
                 "metrics": record_metrics,
+                "targetless_metrics": targetless_metrics,
             })
         for name, contributions in batch_contributions.items():
             squared = sum(item[0] for item in contributions)
             count = sum(item[1] for item in contributions)
             batch_rmses.setdefault(name, []).append(math.sqrt(squared / count))
     metrics, metric_details = _metric_result(
-        batch_rmses, window_rmses, squared_errors, element_counts
+        batch_rmses,
+        window_rmses,
+        squared_errors,
+        element_counts,
+        targetless_window_counts,
     )
+    missing_targets = [
+        name for name in thresholds if int(element_counts.get(name, 0)) <= 0
+    ]
+    if missing_targets:
+        raise ValueError(
+            "exact fixture produced no targets for required metrics after scanning "
+            f"all windows: {missing_targets}"
+        )
     gate = overfit_gate(metrics, thresholds, require_complete=False)
     mean_losses = {
         name: value / max(loss_batches, 1) for name, value in loss_sums.items()
@@ -840,8 +892,8 @@ def _write_report(result: dict[str, Any], path: Path) -> None:
         f"- best 正式任务全部 exact 通过：{result['quality_summary'].get('best_all_compact_gate_tasks_exact_pass')}",
         f"- last 正式任务全部 exact 通过：{result['quality_summary'].get('last_all_compact_gate_tasks_exact_pass')}",
         "",
-        "| 任务 | checkpoint | exact ratio | unseen ratio | exact | unseen | 解释 |",
-        "|---|---|---:|---:|---|---|---|",
+        "| 任务 | checkpoint | exact ratio | unseen ratio | 有目标窗口 | 无目标窗口 | exact | unseen | 解释 |",
+        "|---|---|---:|---:|---:|---:|---|---|---|",
     ]
     classifications = {
         (item["task_mode"], item["checkpoint_kind"]): item
@@ -852,9 +904,12 @@ def _write_report(result: dict[str, Any], path: Path) -> None:
             exact = checkpoint["exact_training_fixture"]
             unseen = checkpoint["unseen_mask_diagnostic"]
             classification = classifications[(run["task_mode"], kind)]["classification"]
+            detail = next(iter(exact.get("metric_details", {}).values()), {})
             lines.append(
                 f"| {run['task_mode']} | {kind} | {exact['exact_score']:.4f} | "
                 f"{unseen['unseen_score']:.4f} | "
+                f"{detail.get('target_window_count', 'n/a')} | "
+                f"{detail.get('targetless_window_count', 'n/a')} | "
                 f"{'PASS' if exact['exact_pass'] else 'FAIL'} | "
                 f"{'PASS' if unseen['unseen_pass'] else 'FAIL'} | {classification} |"
             )
@@ -867,6 +922,7 @@ def _write_report(result: dict[str, Any], path: Path) -> None:
         "- last 优于 best：旧 unseen-Mask checkpoint 选择没有保留最佳训练记忆点。",
         "- objective_metric_gap_flag 为真：训练目标的 RMSE proxy 与 exact 指标存在超过2倍的启发式差距。",
         "- arbitrary Action 的 exact 指标沿用旧阈值字段名，但统计的是实际 mixed 训练 Mask，不是四类 unseen Mask 的 macro。",
+        "- 无目标窗口仍计入 fixture hash 和逐窗口 JSONL，但不参与该指标 RMSE；这是 Action-only 遇到 State-only semantic 分组时的真实训练行为。",
     ))
     atomic_write_text(path, "\n".join(lines) + "\n")
 

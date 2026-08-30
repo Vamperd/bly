@@ -10,6 +10,7 @@ import torch
 
 from cvae_sa.masking import MaskBatch
 from cvae_sa.overfit_fixture_eval import (
+    accumulate_metric_contributions,
     classify_fixture_result,
     diagnose_overfit_fixture,
     fixture_sha256,
@@ -136,6 +137,50 @@ class OverfitFixtureEvalTest(unittest.TestCase):
             for squared, count in contributions.values():
                 self.assertGreater(count, 0)
                 self.assertAlmostEqual((squared / count) ** 0.5, 1.0)
+
+    def test_zero_target_action_window_is_retained_but_not_aggregated(self) -> None:
+        batch, masks = self._batch_and_masks()
+        masks.action_loss[0] = False
+        output = SimpleNamespace(action=batch["action"] + 1.0)
+        batch_contributions: dict[str, list[tuple[float, int]]] = {}
+        window_rmses: dict[str, list[float]] = {}
+        squared_errors: dict[str, float] = {}
+        element_counts: dict[str, int] = {}
+        targetless_counts: dict[str, int] = {}
+
+        empty = sample_metric_contributions(
+            "arbitrary_action", output, batch, masks, 0
+        )
+        record, targetless = accumulate_metric_contributions(
+            empty,
+            batch_contributions,
+            window_rmses,
+            squared_errors,
+            element_counts,
+            targetless_counts,
+        )
+        metric = "action_completion_macro_normalized_rmse"
+        self.assertEqual(record, {})
+        self.assertEqual(targetless, [metric])
+        self.assertEqual(targetless_counts[metric], 1)
+        self.assertEqual(window_rmses[metric], [])
+
+        observed = sample_metric_contributions(
+            "arbitrary_action", output, batch, masks, 1
+        )
+        record, targetless = accumulate_metric_contributions(
+            observed,
+            batch_contributions,
+            window_rmses,
+            squared_errors,
+            element_counts,
+            targetless_counts,
+        )
+        self.assertEqual(targetless, [])
+        self.assertAlmostEqual(record[metric]["normalized_rmse"], 1.0)
+        self.assertEqual(record[metric]["target_available"], True)
+        self.assertEqual(len(window_rmses[metric]), 1)
+        self.assertGreater(element_counts[metric], 0)
 
     def test_best_and_last_must_cover_the_same_complete_fixture(self) -> None:
         results = {
