@@ -43,9 +43,13 @@ p(S_{0:T},A_{0:T-1}\mid RobotInfo)
 | Python 环境 | Windows 仅做静态/轻量测试 | `~/bly/sonic-repro/.venv-sonic` |
 | 全部运行产物 | `bly/runs`（通常不放大数据） | `~/bly/runs` |
 
-截至 2026-08-27 的已观测状态：
+截至 2026-08-30 的已观测状态：
 
-- Windows 外层当前分支字面值为 `tiny-model`；Action-focused fine-tune 实现提交为 `197a1730fd829a512e153755f56e6e97d4b1329d`。Ubuntu 同步前仍须读取其实际分支，禁止为了匹配本文自动 reset。
+- Windows 外层当前分支字面值为 `tiny-model`，已观测 HEAD 为
+  `d4005de2a9c949e89f4df34fad9c16cd1abd75ce`；它包含 Exact Training Fixture
+  检测及零 Action-target 窗口修复。Action-focused fine-tune 的较早实现提交为
+  `197a1730fd829a512e153755f56e6e97d4b1329d`。Ubuntu 同步前仍须读取其实际分支，
+  禁止为了匹配本文自动 reset。
 - SONIC 当前分支为 `codex/minimal-state-action-recorder`，已观测 HEAD `fdd6dcf9c0c054ab0fbbde98a5bc8d4326ec00a6`，包含外层 `patches/0001`–`0007` 对应能力；`0008` reference recorder 已在 Windows 外层实现并通过 `git apply --check`，但尚未在 Ubuntu 应用或采集。
 - IsaacLab 固定基线为 detached HEAD `37ddf626871758333d6ed89cf64ad702aef127d0`；Windows 有 9 个历史修改/元数据差异，当前任务不得触碰。
 - Ubuntu 固定环境为 Ubuntu 24.04.3、RTX 4090 24 GB、driver 595.84、Isaac Sim 5.1、Python 3.11.14、PyTorch 2.7.0+cu128。
@@ -157,28 +161,100 @@ A_before, S0, A0, S1, A1, ..., A127, S128
 
 模型使用 joint-aware encoder/query decoder、RoPE 时间位置、State/Action 类型 embedding，并提供四条输出路径：任意 masked reconstruction、forward dynamics、inverse Action、history-conditioned Action。Forward head 只能读取 `S_t,A_t`；inverse head 只能读取 `S_t,S_{t+1}`；history head 使用 causal attention，不能读取未来 State。相关防泄漏测试已实现。
 
-### 6.1 32-motion 诊断与 LeanSplit v1：代码已实现但待 Ubuntu 执行
+### 6.1 32-motion 数据与联合容量实验：已在 Ubuntu 完成
 
-基于 compact/reference 均未通过联合 overfit gate 的结果，Windows 代码新增了固定窗口、
-固定 Mask 的五个单任务容量入口、唯一 transition 近邻目标分散度、RobotInfo 方差、共享
-主干梯度余弦和输入遮挡分析。无 reference 的 deterministic inverse/history 只作诊断，
-不参与 compact 单任务 suite 成功判定。
+固定记忆数据集为：
 
-五个 compact 固定单任务已在 Ubuntu 各完成 20k step，均未达到原 unseen-Mask 阈值；但
-训练 loss 与门禁 RMSE 明显分离，确认当前门禁并未重放训练时的同一 Mask。Windows 已新增
-`diagnose-overfit-fixture` 只读入口，用已有 best/last checkpoint 重建全部训练 fixture 并与
-unseen-Mask 指标对照；代码完成后仍须 Ubuntu 完整测试和真实 run 验收，执行 `.ok` 不代表
-模型质量通过。
+```text
+/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+```
+
+它使用 seed `20260828`，从 Physics v4 原 train split 的八个 package 各选择 4 个
+八 variant 全 completed motion，共 32 motion、256 episode。窗口为 128 transition、stride 64，
+共有 1248 个固定 train 窗口；子集 HDF5 只读引用原数据并重新计算归一化统计。全部数据均标记
+为 train，只能解释为 memorization benchmark，不能作为泛化结果。
+
+容量阶段已修正为 posterior mean gate、prior mean 仅诊断；训练仍为 dropout/KL/auxiliary/cycle
+权重 0、20k optimizer step、effective batch 64、500 step warmup 到 `2e-4` 后 cosine 降到
+`2e-6`。修正后 compact/reference 仍未通过当时的固定 seed **unseen-Mask** 同集门禁：
+
+| 模型 | 参数量 | 最佳 unseen score | step | forward | inverse | arbitrary State | arbitrary Action | history | rollout-8 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| compact | 15,065,048 | 5.7831 | 20000 | 0.1835 | 0.2892 | 0.2826 | 0.0956 | 0.2002 | 0.3097 |
+| reference | 28,475,448 | 5.4818 | 19500 | 0.1735 | 0.2741 | 0.2560 | 0.0819 | 0.1749 | 0.2679 |
+
+reference 参数增加约 89%，各项仅改善约 5%–14%，因此现有证据不支持“继续扩大统一主干”是
+主要解法。由于 capacity 未通过，compact/reference 的 Full CVAE 阶段、额外 compact seeds
+均未启动；不得把尚未执行的 Full/prior 结果写成失败或成功。
+
+### 6.2 五个单任务与 Exact Training Fixture：已在 Ubuntu 完成
+
+五个 compact 单任务均从随机初始化训练 20k step，单个 run 各见 1,280,000 samples，约
+1025.64 effective epoch；源 run 为：
+
+```text
+forward_rollout:
+/home/helloworld/bly/runs/cvae_overfit_single_compact_forward_rollout_20260829_204847
+inverse:
+/home/helloworld/bly/runs/cvae_overfit_single_compact_inverse_20260830_025717
+history_action:
+/home/helloworld/bly/runs/cvae_overfit_single_compact_history_action_20260830_063605
+arbitrary_state:
+/home/helloworld/bly/runs/cvae_overfit_single_compact_arbitrary_state_20260830_095617
+arbitrary_action:
+/home/helloworld/bly/runs/cvae_overfit_single_compact_arbitrary_action_20260830_130446
+```
+
+`diagnose-overfit-fixture` 已在 Ubuntu 对上述五个 run 的 `best.pt`/`last.pt` 完成只读验收，
+对每个 checkpoint 重建全部 1248 个训练窗口的相同 Mask，并与旧 unseen-Mask suite 分命名空间
+比较。manifest 格式为 `sonic_overfit_exact_fixture_diagnostic_v1`，`execution_pass=true`；
+`cvae_overfit_fixture_diagnostic.ok` **只表示检测完整和数据一致**。最佳/最后 checkpoint 均没有
+使三个正式 compact 任务全部 exact 通过：
+
+| 任务/指标 | last exact RMSE | 阈值 | last unseen RMSE | 结论 |
+|---|---:|---:|---:|---|
+| forward-one | 0.0542 | 0.05 | 0.2736 | exact 仅超阈值 8.3% |
+| rollout-8 | 0.0578 | 0.10 | 0.3339 | exact PASS |
+| inverse | 0.2182 | 0.05 | 0.2926 | 无 reference 诊断，远未通过 |
+| history Action | 0.0880 | 0.08 | 0.3879 | 无 reference 诊断，exact 超阈值 9.9% |
+| arbitrary State | 0.1254 | 0.05 | 0.4563 | exact 超阈值 150.9% |
+| arbitrary Action | 0.0662 | 0.05 | 0.1995 | exact 超阈值 32.4% |
+
+Exact 与 unseen 对照证明两个事实必须同时保留：旧门禁确实额外测量了较强的 Mask 组合迁移，
+但模型对训练 fixture 本身也没有全部过拟合。`objective_metric_gap_flag` 对全部 task/checkpoint
+均为 false，训练 loss proxy 与 exact RMSE 没有超过 2 倍的异常脱节，不能再把失败归因于
+RMSE 实现错误。
+
+旧 unseen-Mask checkpoint 选择还错过了更好的训练记忆点：forward 的 exact score 从
+best step 6000 的 3.2422 降到 last step 20000 的 1.0833；history 从 step 15000 的 1.3851
+降到 1.0994；arbitrary State 从 step 15500 的 3.1044 降到 2.5088。inverse 和 arbitrary
+Action 的 best 已是 step 20000，与 last 相同。后续容量实验必须保存 `best_exact.pt`，unseen
+Mask 只作诊断，不能继续用它选择记忆 checkpoint。
+
+`arbitrary_action` 的 exact fixture 还发现 1248 个窗口中只有 1112 个含 Action target，136 个
+窗口（10.9%）为零目标。这来自 Action-only 任务抽到 4 个 State-only semantic group；这些窗口
+仍正确计入 fixture hash/逐窗口 JSONL，但不参与 Action RMSE。当前训练结果是真实协议的忠实
+重放，下一轮则必须把 Action-only semantic 抽样限制到五个 Action 关节组，并要求每个固定
+窗口至少有一个目标。
+
+独立 `analyze-overfit` 入口也已在 Ubuntu 成功执行。已回传的定性结论为：该 32-motion 子集的
+RobotInfo 数值方差接近零，任务间梯度余弦大多为正，输入敏感度以足接触、gravity、base
+linear/angular velocity 等组更高。单任务 exact 仍失败说明多任务梯度冲突不是唯一原因；
+inverse/history 的不可辨识或缺 reference、arbitrary completion 的编码/池化路径和训练协议
+应优先于继续增加统一 Transformer 宽度。若需引用具体数值，必须重新读取实际 analysis
+manifest，不得从本段定性描述反推数值。
+
+### 6.3 LeanSplit v1 与 Physics v5：代码已实现但尚未运行
 
 新增 `physics_lean_split` 为 6,204,665 参数：因果动力学分支使用至少10步历史与已发送
 Action，不读取 reference/CVAE latent；Action 分支可读取 runtime command manager 直接记录的
 `10×64` reference；双向 CVAE 仅负责 arbitrary completion。State/Action 仍为70/29维。
 Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量配置均已实现，但本文尚未
-收到 Ubuntu smoke、v5 collection 或正式单任务训练日志，不得表述为已经验证成功。
+收到 Ubuntu smoke、v5 collection 或 LeanSplit 正式单任务训练日志，不得表述为已经验证成功。
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.2 已完成 parent 训练
+### 6.4 已完成 parent 训练
 
 ```text
 Dataset:
@@ -206,9 +282,11 @@ Selected checkpoint:
 
 负对照全部通过：打乱 Action 后 forward RMSE 恶化 28.3%；打乱 `S_{t+1}` 后 inverse RMSE 恶化 152.3%；修改不可见未来 State 对 history Action 的最大影响为 0。模型确实使用了 S–A 关系，但长 Action 补全的物理重放仍不够好，这是当前 fine-tune 的直接动机。
 
-## 7. Action-focused fine-tune：当前正在推进的任务
+## 7. Action-focused fine-tune：代码已实现但尚未运行的独立分支
 
-代码已经在外层提交 `197a173` 中实现，**但本文没有收到 Ubuntu smoke/正式训练完成日志，因此不得写成已训练完成**。新入口：
+代码已经在外层提交 `197a173` 中实现，但当前 overfit 结果表明确定性容量、Mask 合同和
+reference 条件仍需先处理；该 fine-tune 暂不列为当前最高优先级。本文仍没有收到 Ubuntu
+smoke/正式训练完成日志，因此不得写成已训练完成。新入口：
 
 ```bash
 bash ./cvae_repro.sh smoke-action-finetune
@@ -305,19 +383,31 @@ bash ./cvae_repro.sh validate-state-mask-video
 | Action fine-tune 正式 | `cvae_action_finetune.ok` |
 | Action replay | `cvae_action_mask_replay.ok` |
 | State 视频 | `cvae_state_mask_video.ok` |
+| 32-motion 子集 | `cvae_overfit_subset.ok` |
+| 只读数据分析 | `cvae_overfit_analysis.ok` |
+| 单任务训练 | `cvae_overfit_single_task.ok`（只有严格 gate 通过才生成；当前五个 run 均未生成） |
 | Exact fixture只读诊断 | `cvae_overfit_fixture_diagnostic.ok`（仅表示执行完整） |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. 在 Ubuntu 核对 `197a173` 已同步，运行 Action fine-tune smoke；回传 `training_summary.json`、parent baseline、最后 train/validation metric 和 marker。
-2. smoke 通过后运行 40k 正式 fine-tune，监控三组学习率、curriculum stage、State guard 与 Action score；预计约 9 小时，但以实际 step rate 为准。
-3. 只使用满足 State guard 且通过 Action 改善门禁的 `best.pt`；若无成功 marker，parent 仍是有效模型，不得用 `best_unguarded.pt` 冒充正式结果。
-4. 对选中 checkpoint 运行 validation 离线指标、简单直行与两个非 Locomotion Action replay 视频，并用 State 视频回归确认 State 能力未退化。
-5. 最终 test 可以复用既有 split，但报告必须明确写 `reused test`；优先比较 parent 与 fine-tune 的同一固定 validation fixture。
-6. 若 Action 仍差，先按 Mask 类型/区间长度/关节组诊断，不立即扩大模型或重新采集；区分多解性、缺 goal、latent prior 和物理开环漂移。
-7. oracle dynamics context 仅作为后续上限实验；不得将其结果与 hidden-context 主模型混为部署性能。
+1. 先修正单任务协议：Action-only semantic Mask 只允许五个 Action 关节组；所有固定窗口必须
+   有目标；容量 checkpoint 以 exact score 保存 `best_exact.pt`，unseen-Mask 只作诊断。
+2. 给 exact fixture 增加 element/step/feature/semantic、关节组和 State 物理语义组分层统计，
+   定位 arbitrary State `0.1254` 与 arbitrary Action `0.0662` 的具体误差来源。
+3. 对接近阈值的 forward、history 和修正后的 arbitrary Action 做同协议 40k 控制实验，仍从
+   随机初始化开始并保持相同 samples-per-task；inverse/arbitrary State 不先靠盲目延长训练。
+4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
+   history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
+   forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
+5. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
+   LeanSplit v1；inverse 使用 reference-conditioned deterministic 指标和概率覆盖率双报告。
+6. 只有确定性 capacity 连续两次 exact 通过后，才恢复联合多任务与 Full CVAE prior gate；
+   在此之前不要启动额外 compact seed、Full CVAE 或把 prior 失败解释成部署结论。
+7. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
+   motion ID、package/outcome、未来真实 State、真实随机 delay draw 和 oracle dynamics context
+   不得进入部署模型；oracle 结果只能明确标注为上限实验。
 
 ## 11. 后续代理启动检查
 
