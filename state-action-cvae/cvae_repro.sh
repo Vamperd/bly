@@ -365,6 +365,38 @@ summarize_single_tasks() {
   printf '%s\n' "$run_dir"
 }
 
+diagnose_overfit_fixture() {
+  local dataset_run="${CVAE_DATASET_RUN:-}" encoded="${CVAE_OVERFIT_RUNS:-}"
+  local checkpoint_kinds="${CVAE_FIXTURE_CHECKPOINTS:-best,last}" run_dir
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  [[ -n "$encoded" ]] \
+    || die "CVAE_OVERFIT_RUNS is required (five colon-separated single-task runs)"
+  local runs=()
+  IFS=':' read -r -a runs <<< "$encoded"
+  [[ "${#runs[@]}" -eq 5 ]] \
+    || die "diagnose-overfit-fixture requires exactly five single-task runs"
+  local run_args=() item
+  for item in "${runs[@]}"; do
+    [[ -f "$item/manifests/training_summary.json" ]] \
+      || die "single-task training summary is missing: $item"
+    run_args+=(--training-run "$item")
+  done
+  run_dir="$(new_run_dir cvae_overfit_fixture_diagnostic)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" overfit_fixture_diagnostic.log \
+    "$PYTHON" -m cvae_sa.overfit_fixture_eval \
+      --dataset-run "$dataset_run" \
+      --output-run "$run_dir" \
+      --checkpoint-kinds "$checkpoint_kinds" \
+      "${run_args[@]}"
+  [[ -f "$run_dir/markers/cvae_overfit_fixture_diagnostic.ok" ]] \
+    || die "exact fixture diagnostic execution marker is missing"
+  update_latest cvae_overfit_fixture_diagnostic "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 action_finetune_model() {
   local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
   local checkpoint="${CVAE_INIT_CHECKPOINT:-}" prefix config marker run_dir
@@ -594,6 +626,7 @@ case "${1:-}" in
   overfit-full) overfit_model full ;;
   overfit-single-task) overfit_single_task ;;
   analyze-overfit) analyze_overfit ;;
+  diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
   summarize-single-tasks) summarize_single_tasks ;;
   smoke-action-finetune) action_finetune_model true ;;
@@ -602,5 +635,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|analyze-overfit|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

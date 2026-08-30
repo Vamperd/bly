@@ -164,6 +164,12 @@ A_before, S0, A0, S1, A1, ..., A127, S128
 主干梯度余弦和输入遮挡分析。无 reference 的 deterministic inverse/history 只作诊断，
 不参与 compact 单任务 suite 成功判定。
 
+五个 compact 固定单任务已在 Ubuntu 各完成 20k step，均未达到原 unseen-Mask 阈值；但
+训练 loss 与门禁 RMSE 明显分离，确认当前门禁并未重放训练时的同一 Mask。Windows 已新增
+`diagnose-overfit-fixture` 只读入口，用已有 best/last checkpoint 重建全部训练 fixture 并与
+unseen-Mask 指标对照；代码完成后仍须 Ubuntu 完整测试和真实 run 验收，执行 `.ok` 不代表
+模型质量通过。
+
 新增 `physics_lean_split` 为 6,204,665 参数：因果动力学分支使用至少10步历史与已发送
 Action，不读取 reference/CVAE latent；Action 分支可读取 runtime command manager 直接记录的
 `10×64` reference；双向 CVAE 仅负责 arbitrary completion。State/Action 仍为70/29维。
@@ -299,6 +305,7 @@ bash ./cvae_repro.sh validate-state-mask-video
 | Action fine-tune 正式 | `cvae_action_finetune.ok` |
 | Action replay | `cvae_action_mask_replay.ok` |
 | State 视频 | `cvae_state_mask_video.ok` |
+| Exact fixture只读诊断 | `cvae_overfit_fixture_diagnostic.ok`（仅表示执行完整） |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
@@ -352,6 +359,7 @@ df -h /home/helloworld/bly/runs
 | Physics v4 index/dataset | `state-action-cvae/src/cvae_sa/physics_indexer.py`、`dataset.py`、`physics_schema.py` |
 | 模型与损失 | `models.py`、`losses.py`、`masking.py` |
 | 常规/fine-tune 训练 | `trainer.py`、`configs/physics_v3*.json`、`cvae_repro.sh` |
+| Exact fixture诊断 | `overfit_fixture_eval.py`、`cvae_repro.sh` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

@@ -265,6 +265,28 @@ suite 成功判定。`identifiability_heatmap.svg` 中的近邻目标分散度�
 邻近帧后的经验歧义指标，不是数学误差下界；`input_sensitivity.svg` 只解释该训练集上的
 遮挡敏感性。
 
+单任务训练结束后，使用只读 exact-fixture 入口比较 `best.pt`、`last.pt` 在训练时原始
+窗口/Mask 上的记忆指标与现有 unseen-Mask 门禁。该入口不会改变 checkpoint、训练门禁或
+历史 marker；它的 `.ok` 只表示诊断执行和数据一致性通过：
+
+```bash
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+export CVAE_OVERFIT_RUNS="/run/forward:/run/inverse:/run/history:/run/state:/run/action"
+export CVAE_FIXTURE_CHECKPOINTS=best,last
+bash ./cvae_repro.sh diagnose-overfit-fixture
+
+FIXTURE_RUN="$(
+  cat /home/helloworld/bly/runs/latest_cvae_overfit_fixture_diagnostic_run_dir.txt
+)"
+cat "$FIXTURE_RUN/manifests/fixture_diagnostic.json"
+cat "$FIXTURE_RUN/manifests/fixture_report_zh.md"
+ls -lh "$FIXTURE_RUN/videos"
+```
+
+入口会对全部固定窗口重建 `episode_ref + window_start + fixed_mask_seed` 对应的训练 Mask，
+并验证 step 1 与 checkpoint step 的 fixture hash 一致。质量结论保存在
+`quality_summary`；即使 exact 指标失败，只要只读诊断完整，执行 marker 仍为 PASS。
+
 `LeanSplit v1` 将确定性因果动力学、reference-conditioned Action 和双向 CVAE completion
 拆开，生产配置为 6,204,665 参数。forward 只读取最近
 `H=max(10, observed_max_delay+1)` 的 State/已知 Action，不读取 reference 或 CVAE latent；
