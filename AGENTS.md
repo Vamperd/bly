@@ -46,7 +46,7 @@ p(S_{0:T},A_{0:T-1}\mid RobotInfo)
 截至 2026-08-30 的已观测状态：
 
 - Windows 外层当前分支字面值为 `tiny-model`，已观测 HEAD 为
-  `d4005de2a9c949e89f4df34fad9c16cd1abd75ce`；它包含 Exact Training Fixture
+  `cd0fd00f5a49125ae3716cf7a87dedd5968f38f4`；它包含 Exact Training Fixture
   检测及零 Action-target 窗口修复。Action-focused fine-tune 的较早实现提交为
   `197a1730fd829a512e153755f56e6e97d4b1329d`。Ubuntu 同步前仍须读取其实际分支，
   禁止为了匹配本文自动 reset。
@@ -254,7 +254,24 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 已完成 parent 训练
+### 6.4 最简 posterior Transformer capacity：代码已实现但尚未运行
+
+新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
+使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
+relation/rollout/auxiliary head。固定10类 Mask fixture 包括全 State、全 Action、全序列与部分
+element/time/feature/semantic Mask；训练使用 posterior mean、`KL beta=0`，按 exact score 保存
+`best_exact.pt`。代码与 Windows 轻量测试已完成，但尚无 Ubuntu HDF5/CUDA smoke 或正式容量
+阶梯结果，不得写成已经实现完美拟合。入口为：
+
+```bash
+bash ./cvae_repro.sh posterior-capacity-smoke
+bash ./cvae_repro.sh posterior-capacity
+```
+
+当前用户明确选择先执行该 posterior-only 容量实验；它只证明 posterior 无损记忆，不证明
+部署时 `State→Action`、`Action→State` 或 conditional prior 能力。
+
+### 6.5 已完成 parent 训练
 
 ```text
 Dataset:
@@ -450,6 +467,7 @@ df -h /home/helloworld/bly/runs
 | 模型与损失 | `models.py`、`losses.py`、`masking.py` |
 | 常规/fine-tune 训练 | `trainer.py`、`configs/physics_v3*.json`、`cvae_repro.sh` |
 | Exact fixture诊断 | `overfit_fixture_eval.py`、`cvae_repro.sh` |
+| 最简 posterior capacity | `posterior_capacity.py`、`models.py`、`configs/posterior_capacity_minimal.json` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

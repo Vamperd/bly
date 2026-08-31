@@ -287,6 +287,32 @@ ls -lh "$FIXTURE_RUN/videos"
 并验证 step 1 与 checkpoint step 的 fixture hash 一致。质量结论保存在
 `quality_summary`；即使 exact 指标失败，只要只读诊断完整，执行 marker 仍为 PASS。
 
+## 最简 posterior capacity
+
+`physics_posterior_transformer` 是独立的 posterior-only 记忆实验：只使用70维 State、29维
+Action、逐特征 Mask 和位置/类型；共享双向 encoder 输出单个256维 global latent，单个双向
+decoder 负责全部 reconstruction。它不包含 RobotInfo、reference 或 relation/rollout head，
+`KL beta=0`，因此通过只证明 posterior capacity，不证明部署时条件推理。
+
+```bash
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=8 \
+  bash ./cvae_repro.sh posterior-capacity-smoke
+
+CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=16 \
+  bash ./cvae_repro.sh posterior-capacity
+
+CVAE_POSTERIOR_PHASE=generalization \
+CVAE_INIT_CHECKPOINT=/run/fixed/checkpoints/best_exact.pt \
+CVAE_POSTERIOR_MOTIONS=32 CVAE_POSTERIOR_WINDOW=16 \
+  bash ./cvae_repro.sh posterior-capacity
+```
+
+固定阶段使用10类 deterministic Mask bank，并按 exact score 保存 `best_exact.pt`；只有全部窗口
+连续3次满足 State/Action RMSE、max error、contact 和 zero-latent 门禁才写
+`cvae_posterior_capacity.ok`。泛化阶段必须保持 checkpoint 的 motion 数与窗口长度，在每个已见
+窗口16个 held-out Mask 上通过后才写 `cvae_posterior_mask_generalization.ok`。
+
 `LeanSplit v1` 将确定性因果动力学、reference-conditioned Action 和双向 CVAE completion
 拆开，生产配置为 6,204,665 参数。forward 只读取最近
 `H=max(10, observed_max_delay+1)` 的 State/已知 Action，不读取 reference 或 CVAE latent；

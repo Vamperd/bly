@@ -12,6 +12,7 @@ def main() -> int:
             "build-index", "build-physics-index", "build-overfit-subset",
             "smoke-train", "train", "evaluate", "sample", "summarize-overfit",
             "analyze-overfit", "diagnose-overfit-fixture", "summarize-single-tasks",
+            "posterior-capacity",
         ),
     )
     args, remainder = parser.parse_known_args()
@@ -30,6 +31,8 @@ def main() -> int:
         from .overfit_fixture_eval import main as command_main
     elif args.command == "summarize-single-tasks":
         from .overfit_single_report import main as command_main
+    elif args.command == "posterior-capacity":
+        from .posterior_capacity import main as command_main
     elif args.command in {"smoke-train", "train"}:
         from .trainer import main as command_main
 

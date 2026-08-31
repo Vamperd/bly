@@ -254,6 +254,47 @@ overfit_model() {
   printf '%s\n' "$run_dir"
 }
 
+posterior_capacity() {
+  local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
+  local phase="${CVAE_POSTERIOR_PHASE:-fixed}" motions="${CVAE_POSTERIOR_MOTIONS:-1}"
+  local window="${CVAE_POSTERIOR_WINDOW:-16}" checkpoint="${CVAE_INIT_CHECKPOINT:-}"
+  local config="${CVAE_CONFIG:-$SCRIPT_DIR/configs/posterior_capacity_minimal.json}"
+  local prefix marker run_dir seed="${CVAE_SEED:-20260830}"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  [[ "$phase" == "fixed" || "$phase" == "generalization" ]] \
+    || die "CVAE_POSTERIOR_PHASE must be fixed or generalization"
+  if [[ "$phase" == "generalization" ]]; then
+    [[ -n "$checkpoint" && -f "$checkpoint" ]] \
+      || die "generalization requires CVAE_INIT_CHECKPOINT=.../best_exact.pt"
+  elif [[ -n "$checkpoint" ]]; then
+    die "fixed posterior capacity must start from random initialization"
+  fi
+  prefix="cvae_posterior_capacity_${phase}_m${motions}_t${window}"
+  marker="cvae_posterior_capacity.ok"
+  [[ "$phase" == "generalization" ]] && marker="cvae_posterior_mask_generalization.ok"
+  [[ "$smoke" == "true" ]] && marker="cvae_posterior_capacity_smoke.ok"
+  run_dir="$(new_run_dir "$prefix")"
+  capture_environment "$run_dir"
+  local extra_args=()
+  [[ "$phase" == "generalization" ]] && extra_args+=(--init-checkpoint "$checkpoint")
+  [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
+  run_logged "$run_dir" posterior_capacity.log \
+    "$PYTHON" -m cvae_sa.posterior_capacity \
+      --dataset-run "$dataset_run" \
+      --output-run "$run_dir" \
+      --config "$config" \
+      --motions "$motions" \
+      --window-transitions "$window" \
+      --mask-phase "$phase" \
+      --seed "$seed" \
+      "${extra_args[@]}"
+  [[ -f "$run_dir/markers/$marker" ]] || die "posterior capacity marker is missing: $marker"
+  update_latest "posterior_capacity_${phase}" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 overfit_single_task() {
   local dataset_run="${CVAE_DATASET_RUN:-}" task="${CVAE_OVERFIT_TASK:-}"
   local seed="${CVAE_SEED:-20260828}" profile="${CVAE_OVERFIT_MODEL:-compact}"
@@ -625,6 +666,8 @@ case "${1:-}" in
   overfit-capacity) overfit_model capacity ;;
   overfit-full) overfit_model full ;;
   overfit-single-task) overfit_single_task ;;
+  posterior-capacity-smoke) posterior_capacity true ;;
+  posterior-capacity) posterior_capacity false ;;
   analyze-overfit) analyze_overfit ;;
   diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
@@ -635,5 +678,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

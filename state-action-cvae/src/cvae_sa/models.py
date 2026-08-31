@@ -34,6 +34,20 @@ class ModelOutput:
     inverse_action_log_scale: torch.Tensor | None = None
 
 
+@dataclass
+class PosteriorCapacityOutput:
+    """Minimal reconstruction-only output for the posterior capacity experiment."""
+
+    physical_state: torch.Tensor
+    action: torch.Tensor
+    state_contact_logits: torch.Tensor
+    posterior_mean: torch.Tensor
+    posterior_logvar: torch.Tensor
+    prior_mean: torch.Tensor
+    prior_logvar: torch.Tensor
+    latent: torch.Tensor
+
+
 class MLPTokenizer(nn.Module):
     def __init__(self, input_dim: int, output_dim: int) -> None:
         super().__init__()
@@ -1643,6 +1657,159 @@ class TCNCVAE(nn.Module):
         )
 
 
+class PosteriorCapacityTransformerCVAE(nn.Module):
+    """Plain bidirectional CVAE used only to measure posterior memorization.
+
+    The posterior sees the complete normalized State-Action sequence.  The
+    decoder sees only masked values, feature-level mask bits, and one global
+    latent.  No robot metadata or task-specific relation heads are present.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.width = int(config["d_model"])
+        self.latent_dim = int(config["latent_dim"])
+        self.state_dim = int(config.get("state_dim", 70))
+        if self.state_dim != 70:
+            raise ValueError("posterior capacity model requires the 70-D Physics State")
+        dropout = float(config.get("dropout", 0.0))
+        self.state_input = nn.Linear(self.state_dim * 2, self.width)
+        self.action_input = nn.Linear(ACTION_DIM * 2, self.width)
+        self.type_embedding = nn.Embedding(2, self.width)
+        self.encoder_cls = nn.Parameter(torch.zeros(1, 1, self.width))
+        self.decoder_latent_token = nn.Parameter(torch.zeros(1, 1, self.width))
+        self.encoder = TransformerStack(
+            int(config["encoder_layers"]), self.width, int(config["heads"]),
+            int(config["ffn_dim"]), dropout,
+        )
+        self.decoder = TransformerStack(
+            int(config["decoder_layers"]), self.width, int(config["heads"]),
+            int(config["ffn_dim"]), dropout,
+        )
+        self.posterior = nn.Linear(self.width, self.latent_dim * 2)
+        self.prior = nn.Linear(self.width, self.latent_dim * 2)
+        self.latent_projection = nn.Linear(self.latent_dim, self.width)
+        self.state_continuous_output = nn.Linear(self.width, 68)
+        self.state_contact_output = nn.Linear(self.width, 2)
+        self.action_output = nn.Linear(self.width, ACTION_DIM)
+        nn.init.normal_(self.encoder_cls, std=0.02)
+        nn.init.normal_(self.decoder_latent_token, std=0.02)
+
+    @staticmethod
+    def _distribution(parameters: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        mean, logvar = parameters.chunk(2, dim=-1)
+        return mean, logvar.clamp(-12.0, 8.0)
+
+    def _tokens(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        *,
+        full: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        state = batch["physical_state"]
+        action = batch["action"]
+        if state_mask.shape != state.shape or action_mask.shape != action.shape:
+            raise ValueError("posterior capacity masks must match State and Action shapes")
+        if full:
+            state_values = state
+            action_values = action
+        else:
+            state_values = state.masked_fill(state_mask, 0.0)
+            action_values = action.masked_fill(action_mask, 0.0)
+        state_tokens = self.state_input(
+            torch.cat((state_values, state_mask.to(state.dtype)), dim=-1)
+        ) + self.type_embedding.weight[0]
+        action_tokens = self.action_input(
+            torch.cat((action_values, action_mask.to(action.dtype)), dim=-1)
+        ) + self.type_embedding.weight[1]
+        interleaved = torch.stack((state_tokens[:, :-1], action_tokens), dim=2).flatten(1, 2)
+        tokens = torch.cat((interleaved, state_tokens[:, -1:]), dim=1)
+        valid_interleaved = torch.stack(
+            (batch["valid_state"][:, :-1], batch["valid_action"]), dim=2
+        ).flatten(1, 2)
+        valid = torch.cat((valid_interleaved, batch["valid_state"][:, -1:]), dim=1)
+        times = torch.arange(tokens.shape[1], device=tokens.device, dtype=torch.long)
+        state_indices = torch.arange(0, tokens.shape[1], 2, device=tokens.device)
+        action_indices = torch.arange(1, tokens.shape[1] - 1, 2, device=tokens.device)
+        return tokens, valid, times, state_indices, action_indices
+
+    def _encode_distribution(
+        self,
+        tokens: torch.Tensor,
+        valid: torch.Tensor,
+        times: torch.Tensor,
+        head: nn.Linear,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cls = self.encoder_cls.expand(tokens.shape[0], -1, -1)
+        encoded = self.encoder(
+            torch.cat((cls, tokens), dim=1),
+            torch.cat(
+                (torch.ones(tokens.shape[0], 1, dtype=torch.bool, device=tokens.device), valid),
+                dim=1,
+            ),
+            torch.cat((times.new_tensor([-1]), times)),
+            False,
+        )
+        return self._distribution(head(encoded[:, 0]))
+
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        *,
+        latent_override: torch.Tensor | None = None,
+        use_prior: bool = False,
+    ) -> PosteriorCapacityOutput:
+        visible, valid, times, state_indices, action_indices = self._tokens(
+            batch, state_mask, action_mask, full=False
+        )
+        full, _, _, _, _ = self._tokens(batch, state_mask, action_mask, full=True)
+        posterior_mean, posterior_logvar = self._encode_distribution(
+            full, valid, times, self.posterior
+        )
+        prior_mean, prior_logvar = self._encode_distribution(
+            visible, valid, times, self.prior
+        )
+        latent = prior_mean if use_prior else posterior_mean
+        if latent_override is not None:
+            if latent_override.shape != latent.shape:
+                raise ValueError("latent override shape does not match the global latent")
+            latent = latent_override
+        latent_token = self.decoder_latent_token + self.latent_projection(latent)[:, None]
+        decoded = self.decoder(
+            torch.cat((latent_token, visible), dim=1),
+            torch.cat(
+                (torch.ones(visible.shape[0], 1, dtype=torch.bool, device=visible.device), valid),
+                dim=1,
+            ),
+            torch.cat((times.new_tensor([-1]), times)),
+            False,
+        )[:, 1:]
+        state_hidden = decoded[:, state_indices]
+        action_hidden = decoded[:, action_indices]
+        state_contact_logits = self.state_contact_output(state_hidden)
+        physical_state = torch.cat(
+            (
+                self.state_continuous_output(state_hidden),
+                torch.sigmoid(state_contact_logits),
+            ),
+            dim=-1,
+        )
+        return PosteriorCapacityOutput(
+            physical_state=physical_state,
+            action=self.action_output(action_hidden),
+            state_contact_logits=state_contact_logits,
+            posterior_mean=posterior_mean,
+            posterior_logvar=posterior_logvar,
+            prior_mean=prior_mean,
+            prior_logvar=prior_logvar,
+            latent=latent,
+        )
+
+
 def build_model(config: dict[str, Any]) -> nn.Module:
     kind = str(config.get("kind", "transformer"))
     if kind == "transformer":
@@ -1651,6 +1818,8 @@ def build_model(config: dict[str, Any]) -> nn.Module:
         return PhysicsTransformerCVAE(config)
     if kind == "physics_lean_split":
         return LeanSplitPhysicsCVAE(config)
+    if kind == "physics_posterior_transformer":
+        return PosteriorCapacityTransformerCVAE(config)
     if kind == "tcn":
         return TCNCVAE(config)
     raise ValueError(f"unsupported model kind {kind!r}")
