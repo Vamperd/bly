@@ -243,6 +243,15 @@ def make_random_masks(
     return make_fixture_masks(varied, seed + optimizer_step, held_out=True)
 
 
+def validation_fixture_seed(seed: int, phase: str) -> int:
+    """Keep fixed validation identical to training; separate held-out evaluation."""
+    if phase == "fixed":
+        return int(seed)
+    if phase == "generalization":
+        return int(seed) + 700_001
+    raise ValueError("mask_phase must be fixed or generalization")
+
+
 def reconstruction_loss(
     output: PosteriorCapacityOutput,
     batch: dict[str, torch.Tensor],
@@ -565,6 +574,7 @@ def run_experiment(
     accumulation = int(training["gradient_accumulation"])
     validation_interval = 1 if smoke else int(training["validation_interval"])
     thresholds = {key: float(value) for key, value in training["thresholds"].items()}
+    validation_seed = validation_fixture_seed(seed, phase)
     stream = _infinite(train_loader)
     metrics_path = output_run / "logs/metrics.jsonl"
     best_score = math.inf
@@ -604,7 +614,7 @@ def run_experiment(
         if optimizer_step % validation_interval != 0 and optimizer_step != max_steps:
             continue
         metrics = evaluate_exact(
-            model, validation_loader, device, seed + 700_001,
+            model, validation_loader, device, validation_seed,
             held_out=phase == "generalization", thresholds=thresholds,
         )
         metrics["optimizer_step"] = optimizer_step
@@ -633,6 +643,9 @@ def run_experiment(
         "format_version": "sonic_posterior_capacity_summary_v1",
         "scope": "posterior memorization only; no conditional-direction claim",
         "mask_phase": phase,
+        "training_mask_seed": seed,
+        "validation_mask_seed": validation_seed,
+        "fixed_fixture_identity_match": phase == "fixed" and validation_seed == seed,
         "smoke": smoke,
         "passed": passed if not smoke else True,
         "motion_count": motion_count,

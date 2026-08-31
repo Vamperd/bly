@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-08-31  
-当前阶段：S0 Ubuntu smoke 已通过；F1（1 motion、16 transitions）在40k step后未通过 exact gate。D1 单窗口入口已在 Windows 实现并通过轻量测试，下一步只在 Ubuntu 执行 D1 smoke 与正式训练。  
+当前阶段：已确认旧F1的fixed validation错误使用独立Mask seed，导致partial fixture并非训练坐标；旧F1不再作为fixed memorization gate。协议修复已在Windows完成，下一步先执行corrected D1；仅D1通过后重跑F1R。
 本文是本轮 posterior-only 研究的执行计划、实验结果与后续决策的唯一台账。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -72,6 +72,12 @@ effective batch 固定为64：窗口不超过32时为 `16×4`，窗口64时为 `
 
 固定 Mask bank 对每个窗口生成10个 fixture：`full_state`、`full_action`、`full_both`、10%和50% element Both、50%连续 State 时间块、50%连续 Action 时间块、50% State feature、50% Action feature、一个 State+Action joint semantic group。每个 fixture 必须至少有一个有效 target，padding 永远不作为 target。
 
+fixed训练与exact validation必须使用同一个Mask seed，使每个窗口的element/time/feature/semantic
+坐标逐位一致。`training_mask_seed == validation_mask_seed`且summary中的
+`fixed_fixture_identity_match=true`是正式fixed run的启动断言。独立seed只允许用于
+generalization阶段；旧F1违反此合同，因此只能作为同Mask类型、不同坐标的诊断，不能回答训练
+fixture是否被完美记忆。
+
 训练 loss 仅包含被 Mask 坐标：State continuous MSE、Action MSE、contact BCE；当前 batch 中存在的三类 loss 等权平均。
 
 正式 exact gate 必须对每个窗口、每个 Mask 同时成立：
@@ -93,9 +99,10 @@ effective batch 固定为64：窗口不超过32时为 `16×4`，窗口64时为 `
 | ID | 阶段 | motion | window | 初始化 | 成功后下一步 |
 |---|---|---:|---:|---|---|
 | S0 | Ubuntu 工程 smoke | 1 | 8 | random | F1 |
-| F1 | 最小 fixed capacity | 1 | 16 | random | G0 |
-| D1 | F1失败后的单窗口诊断 | 1个固定窗口 | 16 | random | 根据10类Mask exact结果决定结构或规模问题 |
-| G0 | 最小 held-out Mask sanity | 1 | 16 | F1 `best_exact.pt` | F2 |
+| F1 | 历史运行；validation seed不符合fixed合同 | 1 | 16 | random | 不作为容量gate，保留诊断资产 |
+| D1 | 修复协议后的单窗口诊断 | 1个固定窗口 | 16 | random | PASS后F1R；FAIL则先修结构/目标 |
+| F1R | 修复协议后的最小fixed capacity重跑 | 1 | 16 | random | G0 |
+| G0 | 最小 held-out Mask sanity | 1 | 16 | F1R `best_exact.pt` | F2 |
 | F2 | motion 扩展 | 4 | 16 | random | F3 |
 | F3 | motion 扩展 | 8 | 16 | random | F4 |
 | F4 | motion 扩展 | 16 | 16 | random | F5 |
@@ -198,9 +205,10 @@ ls -lh "$RUN/checkpoints"
 |---|---|---|---|---|---:|---:|---:|---:|---:|---|---|
 | I0 Windows实现 | PASS | N/A | `fcdb4f8861e539e3ea364e578d6bc96ce7ebd9b0` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 27项组合测试、JSON、compile、Shell语法、diff check通过；执行S0 |
 | S0 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t8_20260831_114746` | 待读取 `source_commit.txt` | step 2 / 25194.9549（仅smoke诊断） | 2.5195 | 2.2020 | 15.7025 | 52.47% | 0.9985 | `cvae_posterior_capacity_smoke.ok` | 工程链路通过；F1随后执行并失败 |
-| F1 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_114833` | `fcdb4f8861e539e3ea364e578d6bc96ce7ebd9b0` | step 40000 / 752.0263 | 0.05842 | 0.02495 | 0.75203 | 100% | 371.67 | `cvae.failed` | full mask约0.0025但partial mask显著更差；执行D1，不进入G0 |
-| D1 | PENDING | — | Windows入口待提交 | — | — | — | — | — | — | — | `max_windows=1`已实现并测试；等待Ubuntu smoke/formal |
-| G0 | PENDING | — | — | — | — | — | — | — | — | — | 等待F1 |
+| F1 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_114833` | `fcdb4f8861e539e3ea364e578d6bc96ce7ebd9b0` | step 40000 / 752.0263 | 0.05842 | 0.02495 | 0.75203 | 100% | 371.67 | `cvae.failed` | validation部分Mask坐标与训练不同；结果不构成fixed记忆失败证据 |
+| D1 | PENDING | — | 协议修复待提交 | — | — | — | — | — | — | — | corrected `max_windows=1`；下一唯一实验 |
+| F1R | PENDING | — | — | — | — | — | — | — | — | — | 仅D1通过后执行 |
+| G0 | PENDING | — | — | — | — | — | — | — | — | — | 等待F1R |
 | F2 | PENDING | — | — | — | — | — | — | — | — | — | 等待G0 |
 | F3 | PENDING | — | — | — | — | — | — | — | — | — | 等待F2 |
 | F4 | PENDING | — | — | — | — | — | — | — | — | — | 等待F3 |
@@ -247,8 +255,17 @@ ls -lh "$RUN/checkpoints"
 - 执行：完成40,000 optimizer step；最后五次validation在39k–40k基本平台化；保存77MB `best_exact.pt` 与77MB `last.pt`，生成 `cvae.failed`，无正式PASS marker。
 - 最佳结果：step 40000，exact score 752.0263；worst State RMSE 0.05842、Action RMSE 0.02495、max abs 0.75203、contact 100%；correct/zero/swapped latent RMSE为0.002212/0.82213/0.85592，zero/swapped ratio为371.67/386.94。
 - 分层结果：`full_state` State RMSE 0.00256，`full_action` Action RMSE 0.00239，`full_both` State/Action 0.00260/0.00247；最差partial为`element_both_50` State/Action 0.05842/0.02495、max abs 0.75203，其次是`element_both_10`与State/Action feature/semantic Mask。
-- 事实结论：global latent 被模型强烈使用，contact已完全拟合，且全遮挡的纯latent重建显著优于部分遮挡。失败主因不是latent未使用或contact，而是统一decoder在融合“可见token + posterior latent + feature Mask”时对部分Mask的逐窗口最坏误差很大；即使全遮挡也仍未达到严格的`1e-4`门禁。39k–40k没有继续改善，不能只归因于训练提前停止。
-- 后续计划：执行D1——只取一个固定window，对同一10类Mask从随机初始化过拟合；若D1失败，定位为结构/Mask融合问题；若D1通过，再判断144窗口规模下的容量或优化问题。禁止启动G0/F2。
+- 事实结论（已修订）：global latent被模型强烈使用、contact已拟合、三个不依赖随机坐标的full Mask约为0.0025。事后代码审计发现训练使用`seed`，validation使用`seed+700001`，所以partial element/time/feature/semantic并不是训练过的具体Mask。该run测量了部分Mask坐标迁移，不能证明统一decoder无法记忆训练fixture，也不能作为fixed exact gate。
+- 后续计划：修复协议后先执行D1；只有D1通过才重跑F1R，禁止直接进入G0/F2。
+
+### 2026-08-31 — Fixed Mask seed协议修复 READY
+
+- Run：N/A；尚未在Ubuntu运行修复后的真实数据实验。
+- 根因：fixed训练调用`make_fixture_masks(batch, seed)`，旧validation却传入`seed+700001`；三个full Mask不受影响，七类partial Mask的具体坐标发生变化。
+- 修复：fixed validation复用训练seed；generalization继续使用独立`seed+700001`。summary新增`training_mask_seed`、`validation_mask_seed`、`fixed_fixture_identity_match`。
+- 验证：新增回归测试逐位比较fixed训练/validation State与Action Mask，并验证generalization seed保持独立；10项posterior测试、与模型/隔离组合共30项、Python compile、全部config JSON和Shell语法均通过。
+- 结论边界：旧F1保留且不删除，但降级为Mask坐标迁移诊断；不能再用它支持decoder融合缺陷结论。
+- 后续计划：执行corrected D1 smoke与formal；D1 PASS后执行F1R，D1 FAIL则停止扩展并检查decoder/逐fixture loss。
 
 ### 2026-08-31 — D1 Windows入口 READY
 

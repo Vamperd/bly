@@ -13,6 +13,7 @@ from cvae_sa.posterior_capacity import (
     make_fixture_masks,
     reconstruction_loss,
     selected_window_identities,
+    validation_fixture_seed,
     validate_motion_prefix,
 )
 
@@ -106,6 +107,17 @@ class PosteriorCapacityTest(unittest.TestCase):
         self.assertTrue(bool((first_state.flatten(1).any(1) | first_action.flatten(1).any(1)).all()))
         self.assertTrue(bool(first_state[2].all()))
         self.assertTrue(bool(first_action[2].all()))
+
+    def test_fixed_validation_reuses_training_fixture_seed(self) -> None:
+        value = batch(batch_size=len(FIXED_MASK_NAMES))
+        value["mask_slot"] = torch.arange(len(FIXED_MASK_NAMES))
+        training_state, training_action, _ = make_fixture_masks(value, 123)
+        fixed_seed = validation_fixture_seed(123, "fixed")
+        validation_state, validation_action, _ = make_fixture_masks(value, fixed_seed)
+        self.assertEqual(fixed_seed, 123)
+        self.assertTrue(torch.equal(training_state, validation_state))
+        self.assertTrue(torch.equal(training_action, validation_action))
+        self.assertEqual(validation_fixture_seed(123, "generalization"), 700_124)
 
     def test_mask_bank_repeats_every_window_by_slot(self) -> None:
         base = _ListDataset([{"value": 0}, {"value": 1}])

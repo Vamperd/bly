@@ -279,21 +279,26 @@ bash ./cvae_repro.sh posterior-capacity
 HDF5/CUDA/训练/evaluator/checkpoint/marker 工程链路；step-2 State RMSE 2.5195、Action RMSE
 2.2020 等质量失败属于预期，不是容量结论。
 
-随后正式 F1（1 motion、window 16、fixed）已运行结束，并由
+随后正式 F1（1 motion、window 16、名义fixed）已运行结束，并由
 `posterior_capacity.py` 抛出 `posterior capacity experiment did not satisfy every exact gate`。
 失败 run 为 `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_114833`，
 完成40k step；最佳/最后均在step 40000，score 752.0263，worst State/Action RMSE为
 0.05842/0.02495、max abs 0.75203、contact 100%、zero-latent ratio 371.67。`full_state`、
 `full_action`、`full_both` 已分别约0.00256、0.00239和0.00260/0.00247，但partial element/
 feature/semantic Mask显著更差，尤其`element_both_50`达到0.05842/0.02495。39k–40k指标平台化；
-这说明latent确实被使用且contact已拟合，主要瓶颈是部分Mask下可见token、Mask与global latent的
-统一decoder融合，或144窗口规模下的容量/优化。下一步只做单固定window×10 Mask的D1诊断；
-在D1结论前不得启动G0或扩大motion/window。
+这说明latent确实被使用且contact已拟合，但后续代码审计发现该run训练Mask使用`seed`、validation
+使用`seed+700001`：三个full Mask保持相同，七类partial Mask的具体坐标不同。因此旧F1只能作为
+Mask坐标迁移诊断，不能证明训练fixture记忆失败，也不能据此确认统一decoder融合存在缺陷。
 
 D1入口已在Windows实现：设置`CVAE_POSTERIOR_MAX_WINDOWS=1`后，代码仍先校验1个motion的8个
 variant完整性，再按固定索引顺序只选择第一个window供训练和exact验收。summary会记录可用/实际
 窗口数及所选window的motion、variant、episode和start；默认不设置该变量时保持原协议。当前只完成
 轻量测试，尚未收到Ubuntu D1 smoke或formal结果，不得推断单窗口能够过拟合。
+
+fixed协议现已修复为训练与exact validation复用同一Mask seed；summary显式记录train/validation
+seed及`fixed_fixture_identity_match`，generalization才使用独立seed。下一步只运行corrected D1；
+若D1通过，再从随机初始化重跑F1R（1 motion、144 windows）；若D1失败则停止扩展，不能运行F1R、
+G0或F2。旧F1 run必须保留，但不得作为fixed capacity gate。
 
 ### 6.5 已完成 parent 训练
 
@@ -435,8 +440,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 1. 只执行D1：`CVAE_POSTERIOR_MAX_WINDOWS=1`、1 motion、window 16，先smoke再formal；两次都
    从随机初始化开始，记录summary中的唯一`selected_windows`身份。在D1结论前禁止G0/F2。
-2. 若D1通过，按相同结构逐级把窗口数扩为4、16、64、144，定位首次失败规模；每级独立随机
-   初始化，一次只改变窗口数量，不改变Mask、阈值、学习率或模型。
+2. 若D1通过，先从随机初始化重跑修复协议后的F1R（全部144窗口）；在F1R前不插入其他结构、
+   Mask、阈值、学习率或模型改动。F1R通过后才进入G0。
 3. 若D1仍呈现full mask好而partial mask差，优先做decoder融合单变量对照；不得直接增加motion、
    latent维度、Transformer层数或恢复KL/relation/rollout等复杂路径。
 4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
