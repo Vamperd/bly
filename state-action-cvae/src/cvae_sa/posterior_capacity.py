@@ -59,6 +59,47 @@ class MaskBankDataset(Dataset[dict[str, Any]]):
         return item
 
 
+class DeterministicWindowSubset(Dataset[dict[str, Any]]):
+    """Use the first N fixed windows without changing their underlying identities."""
+
+    def __init__(self, base: Dataset[dict[str, Any]], max_windows: int | None) -> None:
+        if max_windows is not None and int(max_windows) <= 0:
+            raise ValueError("max_windows must be positive when provided")
+        self.base = base
+        limit = len(base) if max_windows is None else min(int(max_windows), len(base))
+        self.indices = tuple(range(limit))
+        if not self.indices:
+            raise ValueError("posterior capacity window subset is empty")
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        source_index = self.indices[int(index)]
+        item = dict(self.base[source_index])
+        item["source_window_index"] = source_index
+        return item
+
+
+def selected_window_identities(dataset: Any, indices: tuple[int, ...]) -> list[dict[str, Any]]:
+    """Describe fixed window refs without opening the underlying HDF5 files."""
+    identities: list[dict[str, Any]] = []
+    for source_index in indices:
+        ref = dataset.refs[source_index]
+        if ref.fixed_start is None:
+            raise ValueError("posterior capacity requires deterministic fixed window starts")
+        episode = dataset.episodes[ref.episode_index]
+        identities.append({
+            "source_window_index": int(source_index),
+            "motion_key": str(episode["motion_key"]),
+            "variant_id": int(episode["variant_id"]),
+            "episode": str(episode["episode"]),
+            "episode_ref": f"{episode['source_run']}::{episode['episode']}",
+            "window_start": int(ref.fixed_start),
+        })
+    return identities
+
+
 @dataclass(frozen=True)
 class ReconstructionLoss:
     total: torch.Tensor
@@ -429,6 +470,12 @@ def run_experiment(
     training = config["training"]
     motion_count = int(data["motion_count"])
     window = int(data["window_transitions"])
+    configured_max_windows = data.get("max_windows")
+    max_windows = (
+        None if configured_max_windows is None else int(configured_max_windows)
+    )
+    if max_windows is not None and max_windows <= 0:
+        raise ValueError("data.max_windows must be positive when provided")
     phase = str(training.get("mask_phase", "fixed"))
     if phase not in {"fixed", "generalization"}:
         raise ValueError("mask_phase must be fixed or generalization")
@@ -464,19 +511,31 @@ def run_experiment(
         if checkpoint_config.get("training", {}).get("mask_phase") != "fixed":
             raise ValueError("generalization must initialize from a fixed-mask checkpoint")
         checkpoint_data = checkpoint_config.get("data", {})
+        checkpoint_max_windows = checkpoint_data.get("max_windows")
+        checkpoint_max_windows = (
+            None if checkpoint_max_windows is None else int(checkpoint_max_windows)
+        )
         if (
             int(checkpoint_data.get("motion_count", -1)) != motion_count
             or int(checkpoint_data.get("window_transitions", -1)) != window
+            or checkpoint_max_windows != max_windows
         ):
-            raise ValueError("generalization must keep the checkpoint motion count and window length")
+            raise ValueError(
+                "generalization must keep the checkpoint motion count, window length, "
+                "and deterministic window subset"
+            )
         model.load_state_dict(checkpoint["model"], strict=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     fixed_slots = len(FIXED_MASK_NAMES)
+    selected_base = DeterministicWindowSubset(base, max_windows)
+    selected_windows = selected_window_identities(base, selected_base.indices)
     train_data: Dataset[dict[str, Any]] = (
-        MaskBankDataset(base, fixed_slots) if phase == "fixed" else base
+        MaskBankDataset(selected_base, fixed_slots) if phase == "fixed" else selected_base
     )
-    validation_data = MaskBankDataset(base, fixed_slots if phase == "fixed" else 16)
+    validation_data = MaskBankDataset(
+        selected_base, fixed_slots if phase == "fixed" else 16
+    )
     workers = 0 if smoke else int(data.get("num_workers", 4))
     generator = torch.Generator().manual_seed(seed)
     micro_batch = int(training["micro_batch"])
@@ -579,7 +638,10 @@ def run_experiment(
         "motion_count": motion_count,
         "selected_motion_keys": selected_motions,
         "episode_count": len(base.episodes),
-        "window_count": len(base),
+        "available_window_count": len(base),
+        "max_windows": max_windows,
+        "window_count": len(selected_base),
+        "selected_windows": selected_windows,
         "window_transitions": window,
         "mask_fixture_count": len(validation_data),
         "parameter_count": count,
@@ -613,6 +675,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--motions", type=int)
     parser.add_argument("--window-transitions", type=int)
+    parser.add_argument("--max-windows", type=int)
     parser.add_argument("--mask-phase", choices=("fixed", "generalization"))
     parser.add_argument("--init-checkpoint", type=Path)
     parser.add_argument("--seed", type=int)
@@ -627,6 +690,8 @@ def main() -> int:
         config["data"]["motion_count"] = args.motions
     if args.window_transitions is not None:
         config["data"]["window_transitions"] = args.window_transitions
+    if args.max_windows is not None:
+        config["data"]["max_windows"] = args.max_windows
     if args.mask_phase is not None:
         config["training"]["mask_phase"] = args.mask_phase
     if args.seed is not None:

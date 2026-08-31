@@ -6,11 +6,13 @@ import torch
 
 from cvae_sa.models import PosteriorCapacityTransformerCVAE
 from cvae_sa.posterior_capacity import (
+    DeterministicWindowSubset,
     FIXED_MASK_NAMES,
     MaskBankDataset,
     evaluate_exact,
     make_fixture_masks,
     reconstruction_loss,
+    selected_window_identities,
     validate_motion_prefix,
 )
 
@@ -113,6 +115,39 @@ class PosteriorCapacityTest(unittest.TestCase):
             [(bank[index]["value"], bank[index]["mask_slot"]) for index in range(6)],
             [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)],
         )
+
+    def test_deterministic_window_subset_keeps_first_window_identity(self) -> None:
+        base = _ListDataset([
+            {"value": 10, "motion_key": "first"},
+            {"value": 20, "motion_key": "second"},
+        ])
+        subset = DeterministicWindowSubset(base, 1)
+        self.assertEqual(len(subset), 1)
+        self.assertEqual(subset.indices, (0,))
+        self.assertEqual(subset[0]["value"], 10)
+        self.assertEqual(subset[0]["motion_key"], "first")
+        self.assertEqual(subset[0]["source_window_index"], 0)
+        self.assertEqual(len(DeterministicWindowSubset(base, None)), 2)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            DeterministicWindowSubset(base, 0)
+
+    def test_selected_window_identity_is_manifest_ready(self) -> None:
+        fake = type("FakeDataset", (), {})()
+        fake.refs = [type("Ref", (), {"episode_index": 0, "fixed_start": 16})()]
+        fake.episodes = [{
+            "motion_key": "motion-a",
+            "variant_id": 3,
+            "episode": "episode_0003",
+            "source_run": "/source/run",
+        }]
+        self.assertEqual(selected_window_identities(fake, (0,)), [{
+            "source_window_index": 0,
+            "motion_key": "motion-a",
+            "variant_id": 3,
+            "episode": "episode_0003",
+            "episode_ref": "/source/run::episode_0003",
+            "window_start": 16,
+        }])
 
     def test_motion_prefix_requires_eight_complete_variants(self) -> None:
         fake = type("FakeDataset", (), {})()

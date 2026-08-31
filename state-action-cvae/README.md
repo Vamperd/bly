@@ -302,6 +302,11 @@ CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=8 \
 CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=16 \
   bash ./cvae_repro.sh posterior-capacity
 
+# 单窗口诊断：仍校验1个motion的8个variant，但只训练/验收索引中的第一个固定窗口
+CVAE_POSTERIOR_MAX_WINDOWS=1 \
+CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=16 \
+  bash ./cvae_repro.sh posterior-capacity
+
 CVAE_POSTERIOR_PHASE=generalization \
 CVAE_INIT_CHECKPOINT=/run/fixed/checkpoints/best_exact.pt \
 CVAE_POSTERIOR_MOTIONS=32 CVAE_POSTERIOR_WINDOW=16 \
@@ -310,8 +315,10 @@ CVAE_POSTERIOR_MOTIONS=32 CVAE_POSTERIOR_WINDOW=16 \
 
 固定阶段使用10类 deterministic Mask bank，并按 exact score 保存 `best_exact.pt`；只有全部窗口
 连续3次满足 State/Action RMSE、max error、contact 和 zero-latent 门禁才写
-`cvae_posterior_capacity.ok`。泛化阶段必须保持 checkpoint 的 motion 数与窗口长度，在每个已见
-窗口16个 held-out Mask 上通过后才写 `cvae_posterior_mask_generalization.ok`。
+`cvae_posterior_capacity.ok`。设置 `CVAE_POSTERIOR_MAX_WINDOWS=N` 会按既有固定索引顺序只取
+前N个窗口，并在 summary 的 `selected_windows` 中记录身份。泛化阶段必须保持 checkpoint 的
+motion 数、窗口长度与窗口子集一致，在每个已见窗口16个 held-out Mask 上通过后才写
+`cvae_posterior_mask_generalization.ok`。
 
 `LeanSplit v1` 将确定性因果动力学、reference-conditioned Action 和双向 CVAE completion
 拆开，生产配置为 6,204,665 参数。forward 只读取最近

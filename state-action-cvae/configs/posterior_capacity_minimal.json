@@ -3,6 +3,7 @@
   "data": {
     "motion_count": 1,
     "window_transitions": 16,
+    "max_windows": null,
     "num_workers": 4
   },
   "model": {

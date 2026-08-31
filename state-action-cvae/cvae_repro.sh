@@ -258,6 +258,7 @@ posterior_capacity() {
   local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
   local phase="${CVAE_POSTERIOR_PHASE:-fixed}" motions="${CVAE_POSTERIOR_MOTIONS:-1}"
   local window="${CVAE_POSTERIOR_WINDOW:-16}" checkpoint="${CVAE_INIT_CHECKPOINT:-}"
+  local max_windows="${CVAE_POSTERIOR_MAX_WINDOWS:-}"
   local config="${CVAE_CONFIG:-$SCRIPT_DIR/configs/posterior_capacity_minimal.json}"
   local prefix marker run_dir seed="${CVAE_SEED:-20260830}"
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
@@ -265,6 +266,8 @@ posterior_capacity() {
     || die "dedicated overfit subset marker is missing: $dataset_run"
   [[ "$phase" == "fixed" || "$phase" == "generalization" ]] \
     || die "CVAE_POSTERIOR_PHASE must be fixed or generalization"
+  [[ -z "$max_windows" || "$max_windows" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_MAX_WINDOWS must be a positive integer"
   if [[ "$phase" == "generalization" ]]; then
     [[ -n "$checkpoint" && -f "$checkpoint" ]] \
       || die "generalization requires CVAE_INIT_CHECKPOINT=.../best_exact.pt"
@@ -272,6 +275,7 @@ posterior_capacity() {
     die "fixed posterior capacity must start from random initialization"
   fi
   prefix="cvae_posterior_capacity_${phase}_m${motions}_t${window}"
+  [[ -n "$max_windows" ]] && prefix="${prefix}_w${max_windows}"
   marker="cvae_posterior_capacity.ok"
   [[ "$phase" == "generalization" ]] && marker="cvae_posterior_mask_generalization.ok"
   [[ "$smoke" == "true" ]] && marker="cvae_posterior_capacity_smoke.ok"
@@ -280,6 +284,7 @@ posterior_capacity() {
   local extra_args=()
   [[ "$phase" == "generalization" ]] && extra_args+=(--init-checkpoint "$checkpoint")
   [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
+  [[ -n "$max_windows" ]] && extra_args+=(--max-windows "$max_windows")
   run_logged "$run_dir" posterior_capacity.log \
     "$PYTHON" -m cvae_sa.posterior_capacity \
       --dataset-run "$dataset_run" \

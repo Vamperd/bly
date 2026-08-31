@@ -46,7 +46,7 @@ p(S_{0:T},A_{0:T-1}\mid RobotInfo)
 截至 2026-08-30 的已观测状态：
 
 - Windows 外层当前分支字面值为 `tiny-model`，已观测 HEAD 为
-  `cd0fd00f5a49125ae3716cf7a87dedd5968f38f4`；它包含 Exact Training Fixture
+  `fcdb4f8861e539e3ea364e578d6bc96ce7ebd9b0`；它包含 Exact Training Fixture
   检测及零 Action-target 窗口修复。Action-focused fine-tune 的较早实现提交为
   `197a1730fd829a512e153755f56e6e97d4b1329d`。Ubuntu 同步前仍须读取其实际分支，
   禁止为了匹配本文自动 reset。
@@ -254,13 +254,13 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 最简 posterior Transformer capacity：代码已实现但尚未运行
+### 6.4 最简 posterior Transformer capacity：S0已通过、F1已失败、D1待运行
 
 新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
 使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
 relation/rollout/auxiliary head。固定10类 Mask fixture 包括全 State、全 Action、全序列与部分
 element/time/feature/semantic Mask；训练使用 posterior mean、`KL beta=0`，按 exact score 保存
-`best_exact.pt`。代码与 Windows 轻量测试已完成，但尚无 Ubuntu HDF5/CUDA smoke 或正式容量
+`best_exact.pt`。代码、Windows 轻量测试和 Ubuntu S0 工程 smoke 已完成，但尚无正式容量
 阶梯结果，不得写成已经实现完美拟合。入口为：
 
 ```bash
@@ -269,7 +269,31 @@ bash ./cvae_repro.sh posterior-capacity
 ```
 
 当前用户明确选择先执行该 posterior-only 容量实验；它只证明 posterior 无损记忆，不证明
-部署时 `State→Action`、`Action→State` 或 conditional prior 能力。
+部署时 `State→Action`、`Action→State` 或 conditional prior 能力。完整执行阶梯与结果台账位于
+根目录 `plan.md`；每个 run 完成后必须用实际 summary/metrics/marker 更新该文件的状态、结论和
+唯一下一步，再启动后续实验。
+
+2026-08-31 已回传 S0 smoke run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t8_20260831_114746`：1 motion、window 8、
+2 optimizer step、288 windows、2,880 fixtures，`cvae_posterior_capacity_smoke.ok` 已通过。这只验证
+HDF5/CUDA/训练/evaluator/checkpoint/marker 工程链路；step-2 State RMSE 2.5195、Action RMSE
+2.2020 等质量失败属于预期，不是容量结论。
+
+随后正式 F1（1 motion、window 16、fixed）已运行结束，并由
+`posterior_capacity.py` 抛出 `posterior capacity experiment did not satisfy every exact gate`。
+失败 run 为 `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_114833`，
+完成40k step；最佳/最后均在step 40000，score 752.0263，worst State/Action RMSE为
+0.05842/0.02495、max abs 0.75203、contact 100%、zero-latent ratio 371.67。`full_state`、
+`full_action`、`full_both` 已分别约0.00256、0.00239和0.00260/0.00247，但partial element/
+feature/semantic Mask显著更差，尤其`element_both_50`达到0.05842/0.02495。39k–40k指标平台化；
+这说明latent确实被使用且contact已拟合，主要瓶颈是部分Mask下可见token、Mask与global latent的
+统一decoder融合，或144窗口规模下的容量/优化。下一步只做单固定window×10 Mask的D1诊断；
+在D1结论前不得启动G0或扩大motion/window。
+
+D1入口已在Windows实现：设置`CVAE_POSTERIOR_MAX_WINDOWS=1`后，代码仍先校验1个motion的8个
+variant完整性，再按固定索引顺序只选择第一个window供训练和exact验收。summary会记录可用/实际
+窗口数及所选window的motion、variant、episode和start；默认不设置该变量时保持原协议。当前只完成
+轻量测试，尚未收到Ubuntu D1 smoke或formal结果，不得推断单窗口能够过拟合。
 
 ### 6.5 已完成 parent 训练
 
@@ -409,12 +433,12 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. 先修正单任务协议：Action-only semantic Mask 只允许五个 Action 关节组；所有固定窗口必须
-   有目标；容量 checkpoint 以 exact score 保存 `best_exact.pt`，unseen-Mask 只作诊断。
-2. 给 exact fixture 增加 element/step/feature/semantic、关节组和 State 物理语义组分层统计，
-   定位 arbitrary State `0.1254` 与 arbitrary Action `0.0662` 的具体误差来源。
-3. 对接近阈值的 forward、history 和修正后的 arbitrary Action 做同协议 40k 控制实验，仍从
-   随机初始化开始并保持相同 samples-per-task；inverse/arbitrary State 不先靠盲目延长训练。
+1. 只执行D1：`CVAE_POSTERIOR_MAX_WINDOWS=1`、1 motion、window 16，先smoke再formal；两次都
+   从随机初始化开始，记录summary中的唯一`selected_windows`身份。在D1结论前禁止G0/F2。
+2. 若D1通过，按相同结构逐级把窗口数扩为4、16、64、144，定位首次失败规模；每级独立随机
+   初始化，一次只改变窗口数量，不改变Mask、阈值、学习率或模型。
+3. 若D1仍呈现full mask好而partial mask差，优先做decoder融合单变量对照；不得直接增加motion、
+   latent维度、Transformer层数或恢复KL/relation/rollout等复杂路径。
 4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
