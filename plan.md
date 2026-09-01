@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-01
-当前阶段：W4在40k step下接近但未通过：State/Action RMSE为`1.61e-4/1.19e-4`，其余门禁通过，末段在已衰减学习率下平台化。唯一下一步是W4-E80：同seed随机初始化，仅把总步数/对应cosine长度改为80k，使每fixture暴露接近D1通过水平。
+当前阶段：新增独立的规模推进门禁（State/Action RMSE与max abs均`≤1e-2`，contact 100%，zero-latent ratio `≥10`），原exact门禁保留为诊断。W4历史结果已连续满足推进阈值，因此取消W4-E80/W16/W64；唯一下一步是P1，直接在1 motion全部144个window上执行推进门禁，80k仅作上限并允许提前停止。
 本文是本轮 posterior-only 研究的执行计划、实验结果与后续决策的唯一台账。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -70,7 +70,7 @@ $$
 | exact validation | 每250 step |
 | early success | 连续3次 exact validation 全部通过 |
 
-effective batch 固定为64：窗口不超过32时为 `16×4`，窗口64时为 `8×8`，窗口128时为 `4×16`。所有正式阶段均从随机初始化开始；只有 held-out Mask 泛化阶段允许从对应 fixed 阶段的 `best_exact.pt` 初始化。
+effective batch 固定为64：窗口不超过32时为 `16×4`，窗口64时为 `8×8`，窗口128时为 `4×16`。所有 fixed 正式阶段均从随机初始化开始；held-out Mask阶段从对应fixed阶段的活动门禁checkpoint初始化（exact为`best_exact.pt`，progression为`best_progression.pt`）。
 
 ### 2.3 Mask、loss 与验收
 
@@ -84,47 +84,34 @@ fixture是否被完美记忆。
 
 训练 loss 仅包含被 Mask 坐标：State continuous MSE、Action MSE、contact BCE；当前 batch 中存在的三类 loss 等权平均。
 
-正式 exact gate 必须对每个窗口、每个 Mask 同时成立：
+每次validation同时计算两套互不替代的门禁：
 
-| 指标 | 阈值 |
-|---|---:|
-| worst per-window State continuous normalized RMSE | `≤1e-4` |
-| worst per-window Action normalized RMSE | `≤1e-4` |
-| worst continuous/Action absolute error | `≤1e-3` |
-| masked contact classification accuracy | `100%` |
-| `full_both` zero-latent RMSE / correct-latent RMSE | `≥10` |
+| 指标 | exact诊断门禁 | progression规模推进门禁 |
+|---|---:|---:|
+| worst per-window State continuous normalized RMSE | `≤1e-4` | `≤1e-2` |
+| worst per-window Action normalized RMSE | `≤1e-4` | `≤1e-2` |
+| worst continuous/Action normalized absolute error | `≤1e-3` | `≤1e-2` |
+| masked contact classification accuracy | `100%` | `100%` |
+| `full_both` zero-latent RMSE / correct-latent RMSE | `≥10` | `≥10` |
 
-总 exact score 为各阈值比值的最大值，`≤1` 才算一次 validation PASS。只有连续3次 PASS 才生成正式 marker。`best_exact.pt` 按最低 exact score 保存；`last.pt` 始终保存。swapped-latent 指标保留为诊断，不作为正式 gate，因为同 batch 可能含同一窗口的多个 Mask。
+两套score都取各自阈值比值的最大值。默认`CVAE_POSTERIOR_GATE=exact`保持历史协议；显式设为`progression`时，推进score控制checkpoint选择、提前停止、退出码和独立marker。两种门禁均要求连续3次PASS；分别保存`best_exact.pt`或`best_progression.pt`，`last.pt`始终保存。summary必须同时记录`exact_gate`与`progression_gate`，所以放宽推进门禁不会把严格失败改写成严格通过。swapped-latent仅作诊断。
 
-## 3. 执行阶梯与停止规则
+## 3. 最短必要执行链与停止规则
 
-所有阶段严格顺序执行。任何正式阶段失败时，不得继续增加 motion 数或窗口长度；必须先更新第5节台账和第6节完成记录，再按失败诊断矩阵决定唯一下一项实验。
+本轮不再把“32 motion、128 transition、第二seed都达到`1e-4`”设为进入CVAE的前置条件；那会把容量精度、数据规模与条件生成三个问题绑在一起。进入CVAE前只要求同一motion的完整窗口和新随机Mask均通过progression gate，同时保留exact曲线作为诊断。
 
-| ID | 阶段 | motion | window | 初始化 | 成功后下一步 |
-|---|---|---:|---:|---|---|
-| S0 | Ubuntu 工程 smoke | 1 | 8 | random | F1 |
-| F1 | 历史运行；validation seed不符合fixed合同 | 1 | 16 | random | 不作为容量gate，保留诊断资产 |
-| D1 | 修复协议后的单窗口诊断 | 1个固定窗口 | 16 | random | PASS后F1R；FAIL则先修结构/目标 |
-| F1R | 修复协议后的144窗口fixed重跑 | 1 | 16 | random | 已FAIL；转W4定位规模边界 |
-| W4 | 窗口容量阶梯 | 前4个固定窗口 | 16 | random | 已FAIL；转W4-E80验证暴露预算 |
-| W4-E80 | 训练暴露对照 | 前4个固定窗口 | 16 | random，80k step | PASS后W16；FAIL则检查目标/结构 |
-| W16 | 窗口容量阶梯 | 前16个固定窗口 | 16 | random | PASS后W64 |
-| W64 | 窗口容量阶梯 | 前64个固定窗口 | 16 | random | PASS后评估64→144边界 |
-| G0 | 最小 held-out Mask sanity | 1 | 16 | 通过fixed规模的`best_exact.pt` | 后续另定 |
-| F2 | motion 扩展 | 4 | 16 | random | F3 |
-| F3 | motion 扩展 | 8 | 16 | random | F4 |
-| F4 | motion 扩展 | 16 | 16 | random | F5 |
-| F5 | motion 扩展 | 32 | 16 | random | F6 |
-| F6 | 序列扩展 | 32 | 32 | random | F7 |
-| F7 | 序列扩展 | 32 | 64 | random | F8 |
-| F8 | 完整目标容量 | 32 | 128 | random | G1 |
-| G1 | 完整 held-out Mask | 32 | 128 | F8 `best_exact.pt` | R1 |
-| R1 | 第二 seed fixed 复现 | 32 | 128 | random，seed 20260831 | R2 |
-| R2 | 第二 seed held-out 复现 | 32 | 128 | R1 `best_exact.pt` | posterior capacity 阶段完成 |
+| ID | 阶段 | 数据/初始化 | 上限 | 成功后下一步 |
+|---|---|---|---:|---|
+| P1 | 全窗口fixed推进门禁 | 1 motion、144 window、T=16、random init | 80k，连续3次通过即停 | P2 |
+| P2 | 动态随机Mask与16-slot held-out验收 | 同一144 window，从P1 `best_progression.pt`初始化 | 40k，连续3次通过即停 | C0 |
+| C0 | 最小CVAE管线smoke | 1 motion、T=16、物理结构Mask；posterior采样、conditional prior与KL全部接通 | 2k | C1 |
+| C1 | 小规模CVAE能力 | 4 motion、T=16、物理结构Mask；KL warmup，分别报告posterior与prior | 20k | C2 |
+| C2 | motion规模扩展 | 32 motion、T=16；沿用C1唯一确定的结构/损失 | 40k | C3 |
+| C3 | 长序列扩展 | 32 motion，先T=64再按需要T=128 | 每级40k | 正式条件/物理评测 |
 
-S0 只验证 HDF5、CUDA、forward/backward、checkpoint 和 manifest/marker 管线，生成 `cvae_posterior_capacity_smoke.ok`；它不是质量 PASS。F 系列生成 `cvae_posterior_capacity.ok`；G/R2 held-out 阶段生成 `cvae_posterior_mask_generalization.ok`。
+P1失败时才回退W16/W64定位容量边界，不预先支付两次训练成本。P2失败说明问题是随机Mask迁移而不是fixed记忆，不增加motion。C0/C1必须使用不读取目标真值的prior路径验收；全State+Action同时遮挡不作为条件prior的确定性RMSE任务，因为此时条件为空。32 motion从C2开始，目标是检验已经可工作的CVAE机制能否扩展，而不是继续证明posterior能把数据背下来。
 
-固定 fixture 与 held-out Mask 均在两个 seed 的32-motion、128-transition配置通过后，才能声明“当前纯 posterior CVAE 在本 memorization benchmark 上实现了可复现的数值近零拟合”。
+marker保持可区分：exact fixed/generalization沿用`cvae_posterior_capacity.ok`与`cvae_posterior_mask_generalization.ok`；progression使用`cvae_posterior_capacity_progression.ok`与`cvae_posterior_mask_generalization_progression.ok`。progression PASS只允许声明“精度足以推进规模/机制实验”，不能称为完美拟合或物理单位无损。
 
 ## 4. Ubuntu 执行命令
 
@@ -157,52 +144,24 @@ CVAE_POSTERIOR_MOTIONS=1 \
 CVAE_POSTERIOR_WINDOW=8 \
 bash ./cvae_repro.sh posterior-capacity-smoke
 
-# 任一 F 阶段；替换 MOTIONS/WINDOW 为第3节表中的值
+# P1：直接训练1 motion的全部144个window；80k是上限，不是必须跑满
+unset CVAE_POSTERIOR_MAX_WINDOWS CVAE_INIT_CHECKPOINT
 CVAE_SEED=20260830 \
 CVAE_POSTERIOR_PHASE=fixed \
-CVAE_POSTERIOR_MOTIONS=<MOTIONS> \
-CVAE_POSTERIOR_WINDOW=<WINDOW> \
-bash ./cvae_repro.sh posterior-capacity
-
-# D1工程 smoke：确定性选择索引中的第一个固定窗口，共10个fixture
-CVAE_SEED=20260830 \
-CVAE_POSTERIOR_PHASE=fixed \
-CVAE_POSTERIOR_MAX_WINDOWS=1 \
-CVAE_POSTERIOR_MOTIONS=1 \
-CVAE_POSTERIOR_WINDOW=16 \
-bash ./cvae_repro.sh posterior-capacity-smoke
-
-# D1正式训练：必须新建run并从随机初始化开始
-CVAE_SEED=20260830 \
-CVAE_POSTERIOR_PHASE=fixed \
-CVAE_POSTERIOR_MAX_WINDOWS=1 \
-CVAE_POSTERIOR_MOTIONS=1 \
-CVAE_POSTERIOR_WINDOW=16 \
-bash ./cvae_repro.sh posterior-capacity
-
-# F1R失败后的唯一下一实验W4：只把固定窗口数从1改为4
-CVAE_SEED=20260830 \
-CVAE_POSTERIOR_PHASE=fixed \
-CVAE_POSTERIOR_MAX_WINDOWS=4 \
-CVAE_POSTERIOR_MOTIONS=1 \
-CVAE_POSTERIOR_WINDOW=16 \
-bash ./cvae_repro.sh posterior-capacity
-
-# W4-E80：W4近阈值失败后，只把训练上限/cosine长度从40k改为80k
-CVAE_SEED=20260830 \
-CVAE_POSTERIOR_PHASE=fixed \
-CVAE_POSTERIOR_MAX_WINDOWS=4 \
+CVAE_POSTERIOR_GATE=progression \
 CVAE_POSTERIOR_MAX_STEPS=80000 \
 CVAE_POSTERIOR_MOTIONS=1 \
 CVAE_POSTERIOR_WINDOW=16 \
 bash ./cvae_repro.sh posterior-capacity
 
-# 任一 G/R2 阶段；motion和window必须与来源 checkpoint 完全一致
-CVAE_SEED=<SEED> \
+# P2：P1通过后训练动态随机Mask，并在每窗口16个固定held-out Mask上验收
+unset CVAE_POSTERIOR_MAX_WINDOWS CVAE_POSTERIOR_MAX_STEPS
+CVAE_SEED=20260830 \
 CVAE_POSTERIOR_PHASE=generalization \
-CVAE_INIT_CHECKPOINT=<FIXED_RUN>/checkpoints/best_exact.pt \
-CVAE_POSTERIOR_MOTIONS=<MOTIONS> \
-CVAE_POSTERIOR_WINDOW=<WINDOW> \
+CVAE_POSTERIOR_GATE=progression \
+CVAE_INIT_CHECKPOINT=<P1_RUN>/checkpoints/best_progression.pt \
+CVAE_POSTERIOR_MOTIONS=1 \
+CVAE_POSTERIOR_WINDOW=16 \
 bash ./cvae_repro.sh posterior-capacity
 ```
 
@@ -233,21 +192,13 @@ ls -lh "$RUN/checkpoints"
 | F1 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_114833` | `fcdb4f8861e539e3ea364e578d6bc96ce7ebd9b0` | step 40000 / 752.0263 | 0.05842 | 0.02495 | 0.75203 | 100% | 371.67 | `cvae.failed` | validation部分Mask坐标与训练不同；结果不构成fixed记忆失败证据 |
 | D1 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_w1_20260831_150654` | 待读取`source_commit.txt` | step 34000 / 1.0 | 4.719e-5 | 8.075e-5 | 2.255e-4 | 100% | 10342.86 | `cvae_posterior_capacity.ok` | 单窗口10类Mask全部exact；执行F1R |
 | F1R | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_202012` | `b3aa63d9514cd8dd284e7f6091fc26877f57f021` | step 39000 / 36.4095 | 0.003641 | 0.002903 | 0.017851 | 100% | 331.97 | `cvae.failed` | 全部Mask同量级且平台化；执行W4 |
-| W4 | FAIL | `<latest>/cvae_posterior_capacity_fixed_m1_t16_w4_*` | `b3aa63d9514cd8dd284e7f6091fc26877f57f021` | step 39750 / 1.6103 | 1.610e-4 | 1.194e-4 | 6.158e-4 | 100% | 8425.42 | `cvae.failed` | dense full/time Mask近阈值；执行W4-E80 |
-| W4-E80 | PENDING | — | Windows覆盖入口已实现 | — | — | — | — | — | — | — | 仅max step/cosine长度改为80k；下一唯一实验 |
-| W16 | PENDING | — | — | — | — | — | — | — | — | — | 等待W4-E80 |
-| W64 | PENDING | — | — | — | — | — | — | — | — | — | 等待W16 |
-| G0 | PENDING | — | — | — | — | — | — | — | — | — | 等待fixed窗口规模结论 |
-| F2 | PENDING | — | — | — | — | — | — | — | — | — | 等待G0 |
-| F3 | PENDING | — | — | — | — | — | — | — | — | — | 等待F2 |
-| F4 | PENDING | — | — | — | — | — | — | — | — | — | 等待F3 |
-| F5 | PENDING | — | — | — | — | — | — | — | — | — | 等待F4 |
-| F6 | PENDING | — | — | — | — | — | — | — | — | — | 等待F5 |
-| F7 | PENDING | — | — | — | — | — | — | — | — | — | 等待F6 |
-| F8 | PENDING | — | — | — | — | — | — | — | — | — | 等待F7 |
-| G1 | PENDING | — | — | — | — | — | — | — | — | — | 等待F8 |
-| R1 | PENDING | — | — | — | — | — | — | — | — | — | 等待G1 |
-| R2 | PENDING | — | — | — | — | — | — | — | — | — | 等待R1 |
+| W4 | FAIL | `<latest>/cvae_posterior_capacity_fixed_m1_t16_w4_*` | `b3aa63d9514cd8dd284e7f6091fc26877f57f021` | step 39750 / exact 1.6103；progression 1.0 | 1.610e-4 | 1.194e-4 | 6.158e-4 | 100% | 8425.42 | `cvae.failed`（旧exact协议） | exact失败；最近5次均满足新progression gate，不重跑，直接P1 |
+| P1 | PENDING | — | progression入口已实现 | — | — | — | — | — | — | — | 唯一下一实验：全144窗口fixed推进门禁 |
+| P2 | PENDING | — | — | — | — | — | — | — | — | — | 等待P1的`best_progression.pt` |
+| C0 | PENDING | — | 尚未实现CVAE最小训练协议 | — | — | — | — | — | — | — | P2通过后实现并smoke |
+| C1 | PENDING | — | — | — | — | — | — | — | — | — | 4 motion物理Mask CVAE |
+| C2 | PENDING | — | — | — | — | — | — | — | — | — | 32 motion从这里开始 |
+| C3 | PENDING | — | — | — | — | — | — | — | — | — | 长序列扩展 |
 
 ## 6. 每次实验完成后的强制总结
 
@@ -276,6 +227,16 @@ ls -lh "$RUN/checkpoints"
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
 
+### 2026-09-01 — Progression gate Windows入口 READY
+
+- Run：N/A；Ubuntu尚未执行新门禁run。
+- 实现：新增`CVAE_POSTERIOR_GATE=exact|progression`；progression阈值固定为State/Action normalized RMSE与continuous max abs均`1e-2`，contact 100%，zero-latent ratio至少10。
+- 隔离：每次validation同时保存exact/progression两套score；活动门禁独立控制连续3次PASS、`best_<gate>.pt`、退出码和marker，旧exact默认行为不变。
+- 验证：posterior/model/isolation组合32项通过；Python compile、全部config JSON、Shell语法、CLI help和`git diff --check`通过。Windows全发现测试另有3项因既有环境缺`h5py`无法导入，与本改动无关。
+- 历史解释：W4最后5次validation均满足progression阈值，可作为进入P1的证据；它仍是exact FAIL，且因旧代码没有progression marker，不追记正式marker。
+- 精简决策：取消W4-E80、W16、W64的预先执行；P1直接覆盖1 motion全部144窗口，P1失败时才恢复窗口边界诊断。
+- 后续计划：唯一下一项为P1；通过后执行P2动态随机Mask，然后进入C0最小CVAE管线。
+
 ### 2026-09-01 — W4 FAIL
 
 - Run：绝对run路径尚未回传；命名模式为`cvae_posterior_capacity_fixed_m1_t16_w4_*`。
@@ -285,16 +246,16 @@ ls -lh "$RUN/checkpoints"
 - 最佳结果：State RMSE 1.610e-4、Action RMSE 1.194e-4、max abs 6.158e-4、contact 100%；correct/zero/swapped latent RMSE为1.094e-4/0.92137/0.92147，zero/swapped ratio为8425.42/8426.26。
 - 分层结果：主要失败为`full_state` State 1.610e-4、`full_both` State 1.454e-4、`state_time_50` State 1.309e-4及`action_time_50` Action 1.194e-4；element/feature/semantic多数已显著低于阈值，max abs、contact和latent依赖全部通过。
 - 事实结论：模型已经能高精度记忆4个窗口，失败集中在需要稠密输出的full/time Mask，而非逐元素Mask融合。40k时每fixture约64k次暴露，仅为D1至最佳点约136k次的一半；当前结果支持先检验训练暴露预算，不支持立即扩模型或放宽`1e-4`门禁。
-- 后续计划：只执行W4-E80——同seed重新随机初始化、同4窗口/Mask/阈值/优化器，仅把max step及随之对应的cosine长度从40k改为80k；每fixture约128k次暴露。通过后W16，失败则停止规模扩展。
+- 后续计划（当时）：W4-E80。该决定已被上方新增的progression门禁记录取代；当前直接执行P1。
 
-### 2026-09-01 — W4-E80 Windows入口 READY
+### 2026-09-01 — W4-E80 Windows入口 READY（已取消执行）
 
 - Run：N/A；Ubuntu尚未执行。
 - 实现：新增`CVAE_POSTERIOR_MAX_STEPS`与`--max-optimizer-steps`，只覆盖posterior capacity的训练上限；run名前缀增加`_sN`。
 - 协议：设置80k时cosine按80k重算；默认不设置仍为40k，smoke无论覆盖值仍固定2 step。
 - 可追溯性：summary新增`max_optimizer_steps`与`completed_optimizer_steps`。
 - 验证：11项posterior测试、与模型/隔离组合共31项、Python compile、全部config JSON、Shell语法及CLI help通过。
-- 后续计划：同步Windows提交后只运行W4-E80；不得复用W4 checkpoint、放宽阈值或同时改变其他变量。
+- 后续计划（当时）：W4-E80。新增progression门禁后该严格精度追加训练不再位于关键路径，保留入口但不执行。
 
 ### 2026-09-01 — F1R FAIL
 
@@ -382,9 +343,9 @@ ls -lh "$RUN/checkpoints"
 | F1失败且合成过拟合仍通过 | 真实窗口数量或优化规模问题 | 增加“单固定窗口”诊断入口后先证实一窗口近零，不直接扩模型 |
 | G0/G1失败但对应F通过 | Mask泛化而非记忆容量问题 | 保持checkpoint与数据，只扩大随机Mask训练覆盖 |
 
-只有 F8、G1、R1、R2 全部通过后，才启动独立的“物理条件补全”计划，逐级恢复非零KL并分别评估
-posterior reconstruction与conditional prior；不得在本容量计划中临时混入物理Mask、reference或
-relation head。该后续计划固定区分三类任务：
+P1与P2通过后即可启动独立的“物理条件补全/CVAE”计划；无需先让32 motion、T=128在exact门禁下
+通过。CVAE阶段逐级恢复posterior采样、conditional prior与非零KL，并分别评估posterior上限和
+不读取目标真值的prior。该后续计划固定区分三类任务：
 
 1. **State前向递推**：选择起点`u`和长度`h`，保留缺口前足以覆盖最大控制延迟的近期
    State–Action历史、`S_u`及`A_u...A_{u+h-1}`，Mask`S_{u+1}...S_{u+h}`；正式forward gate

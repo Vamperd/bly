@@ -313,6 +313,31 @@ def _masked_rmse(
     return float(torch.sqrt(torch.square(prediction - target).masked_select(mask).mean()).cpu())
 
 
+def _score_gate(
+    *,
+    worst_state: float,
+    worst_action: float,
+    worst_max: float,
+    contact_accuracy: float,
+    zero_ratio: float,
+    thresholds: dict[str, float],
+) -> dict[str, Any]:
+    ratios = {
+        "state_rmse": worst_state / thresholds["state_rmse"],
+        "action_rmse": worst_action / thresholds["action_rmse"],
+        "continuous_max_abs": worst_max / thresholds["continuous_max_abs"],
+        "contact_accuracy": 2.0 - contact_accuracy,
+        "zero_latent_dependence": thresholds["latent_ratio"] / max(zero_ratio, 1e-12),
+    }
+    score = max(ratios.values())
+    return {
+        "passed": bool(math.isfinite(score) and score <= 1.0),
+        "score": score,
+        "thresholds": dict(thresholds),
+        "threshold_ratios": ratios,
+    }
+
+
 @torch.no_grad()
 def evaluate_exact(
     model: torch.nn.Module,
@@ -321,7 +346,11 @@ def evaluate_exact(
     seed: int,
     held_out: bool,
     thresholds: dict[str, float],
+    progression_thresholds: dict[str, float] | None = None,
+    acceptance_gate: str = "exact",
 ) -> dict[str, Any]:
+    if acceptance_gate not in {"exact", "progression"}:
+        raise ValueError("acceptance_gate must be exact or progression")
     model.eval()
     cases: dict[str, dict[str, float]] = defaultdict(
         lambda: {
@@ -415,18 +444,30 @@ def evaluate_exact(
     zero_ratio = zero_rmse / max(correct_rmse, 1e-12)
     swapped_ratio = swapped_rmse / max(correct_rmse, 1e-12)
     contact_accuracy = contact_correct / contact_count if contact_count else 1.0
-    ratios = {
-        "state_rmse": worst_state / thresholds["state_rmse"],
-        "action_rmse": worst_action / thresholds["action_rmse"],
-        "continuous_max_abs": worst_max / thresholds["continuous_max_abs"],
-        "contact_accuracy": 2.0 - contact_accuracy,
-        "zero_latent_dependence": thresholds["latent_ratio"] / max(zero_ratio, 1e-12),
-    }
-    score = max(ratios.values())
+    exact_gate = _score_gate(
+        worst_state=worst_state,
+        worst_action=worst_action,
+        worst_max=worst_max,
+        contact_accuracy=contact_accuracy,
+        zero_ratio=zero_ratio,
+        thresholds=thresholds,
+    )
+    progression_gate = _score_gate(
+        worst_state=worst_state,
+        worst_action=worst_action,
+        worst_max=worst_max,
+        contact_accuracy=contact_accuracy,
+        zero_ratio=zero_ratio,
+        thresholds=progression_thresholds or thresholds,
+    )
+    active_gate = exact_gate if acceptance_gate == "exact" else progression_gate
     return {
-        "passed": bool(math.isfinite(score) and score <= 1.0),
-        "score": score,
-        "threshold_ratios": ratios,
+        "acceptance_gate": acceptance_gate,
+        "passed": active_gate["passed"],
+        "score": active_gate["score"],
+        "threshold_ratios": active_gate["threshold_ratios"],
+        "exact_gate": exact_gate,
+        "progression_gate": progression_gate,
         "worst_state_rmse": worst_state,
         "worst_action_rmse": worst_action,
         "continuous_max_abs": worst_max,
@@ -450,11 +491,13 @@ def _checkpoint(
     step: int,
     score: float,
     dataset_hash: str,
+    acceptance_gate: str,
 ) -> dict[str, Any]:
     return {
         "format_version": "sonic_posterior_capacity_checkpoint_v1",
         "step": step,
         "best_score": score,
+        "acceptance_gate": acceptance_gate,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
@@ -495,6 +538,9 @@ def run_experiment(
     phase = str(training.get("mask_phase", "fixed"))
     if phase not in {"fixed", "generalization"}:
         raise ValueError("mask_phase must be fixed or generalization")
+    acceptance_gate = str(training.get("acceptance_gate", "exact"))
+    if acceptance_gate not in {"exact", "progression"}:
+        raise ValueError("training.acceptance_gate must be exact or progression")
     base = StateActionWindowDataset(
         dataset_run,
         "train",
@@ -514,7 +560,7 @@ def run_experiment(
         raise ValueError(f"posterior capacity parameter count {count} is outside [{lower}, {upper}]")
     dataset_hash = file_sha256(dataset_run / "manifests/dataset_manifest.json")
     if phase == "generalization" and init_checkpoint is None:
-        raise ValueError("generalization phase requires a fixed-mask best_exact checkpoint")
+        raise ValueError("generalization phase requires a fixed-mask capacity checkpoint")
     if phase == "fixed" and init_checkpoint is not None:
         raise ValueError("fixed posterior capacity must start from random initialization")
     if init_checkpoint is not None:
@@ -526,6 +572,11 @@ def run_experiment(
         checkpoint_config = checkpoint.get("config", {})
         if checkpoint_config.get("training", {}).get("mask_phase") != "fixed":
             raise ValueError("generalization must initialize from a fixed-mask checkpoint")
+        checkpoint_gate = str(
+            checkpoint_config.get("training", {}).get("acceptance_gate", "exact")
+        )
+        if checkpoint_gate != acceptance_gate:
+            raise ValueError("generalization must use the checkpoint acceptance gate")
         checkpoint_data = checkpoint_config.get("data", {})
         checkpoint_max_windows = checkpoint_data.get("max_windows")
         checkpoint_max_windows = (
@@ -581,6 +632,10 @@ def run_experiment(
     accumulation = int(training["gradient_accumulation"])
     validation_interval = 1 if smoke else int(training["validation_interval"])
     thresholds = {key: float(value) for key, value in training["thresholds"].items()}
+    progression_thresholds = {
+        key: float(value)
+        for key, value in training.get("progression_thresholds", thresholds).items()
+    }
     validation_seed = validation_fixture_seed(seed, phase)
     stream = _infinite(train_loader)
     metrics_path = output_run / "logs/metrics.jsonl"
@@ -623,6 +678,8 @@ def run_experiment(
         metrics = evaluate_exact(
             model, validation_loader, device, validation_seed,
             held_out=phase == "generalization", thresholds=thresholds,
+            progression_thresholds=progression_thresholds,
+            acceptance_gate=acceptance_gate,
         )
         metrics["optimizer_step"] = optimizer_step
         with metrics_path.open("a", encoding="utf-8") as stream_file:
@@ -632,12 +689,18 @@ def run_experiment(
             best_score = score
             best_metrics = metrics
             atomic_torch_save(
-                output_run / "checkpoints/best_exact.pt",
-                _checkpoint(model, optimizer, scheduler, config, optimizer_step, score, dataset_hash),
+                output_run / f"checkpoints/best_{acceptance_gate}.pt",
+                _checkpoint(
+                    model, optimizer, scheduler, config, optimizer_step, score,
+                    dataset_hash, acceptance_gate,
+                ),
             )
         atomic_torch_save(
             output_run / "checkpoints/last.pt",
-            _checkpoint(model, optimizer, scheduler, config, optimizer_step, best_score, dataset_hash),
+            _checkpoint(
+                model, optimizer, scheduler, config, optimizer_step, best_score,
+                dataset_hash, acceptance_gate,
+            ),
         )
         pass_streak = pass_streak + 1 if metrics["passed"] else 0
         if not smoke and pass_streak >= int(training.get("required_pass_streak", 3)):
@@ -647,9 +710,12 @@ def run_experiment(
         training.get("required_pass_streak", 3)
     ))
     summary = {
-        "format_version": "sonic_posterior_capacity_summary_v1",
+        "format_version": "sonic_posterior_capacity_summary_v2",
         "scope": "posterior memorization only; no conditional-direction claim",
         "mask_phase": phase,
+        "acceptance_gate": acceptance_gate,
+        "exact_thresholds": thresholds,
+        "progression_thresholds": progression_thresholds,
         "training_mask_seed": seed,
         "validation_mask_seed": validation_seed,
         "fixed_fixture_identity_match": phase == "fixed" and validation_seed == seed,
@@ -669,20 +735,28 @@ def run_experiment(
         "parameter_count": count,
         "best_score": best_score,
         "best_metrics": best_metrics,
-        "checkpoint": str(output_run / "checkpoints/best_exact.pt"),
+        "checkpoint": str(output_run / f"checkpoints/best_{acceptance_gate}.pt"),
     }
     atomic_write_json(output_run / "manifests/posterior_capacity_summary.json", summary)
     if smoke:
         atomic_write_text(output_run / "markers/cvae_posterior_capacity_smoke.ok", "PASS\n")
     elif passed:
-        marker = (
-            "cvae_posterior_capacity.ok" if phase == "fixed"
-            else "cvae_posterior_mask_generalization.ok"
-        )
+        if acceptance_gate == "exact":
+            marker = (
+                "cvae_posterior_capacity.ok" if phase == "fixed"
+                else "cvae_posterior_mask_generalization.ok"
+            )
+        else:
+            marker = (
+                "cvae_posterior_capacity_progression.ok" if phase == "fixed"
+                else "cvae_posterior_mask_generalization_progression.ok"
+            )
         atomic_write_text(output_run / "markers" / marker, "PASS\n")
     base.close()
     if not smoke and not passed:
-        raise RuntimeError("posterior capacity experiment did not satisfy every exact gate")
+        raise RuntimeError(
+            f"posterior capacity experiment did not satisfy the {acceptance_gate} gate"
+        )
     return summary
 
 
@@ -699,6 +773,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-transitions", type=int)
     parser.add_argument("--max-windows", type=int)
     parser.add_argument("--max-optimizer-steps", type=int)
+    parser.add_argument("--acceptance-gate", choices=("exact", "progression"))
     parser.add_argument("--mask-phase", choices=("fixed", "generalization"))
     parser.add_argument("--init-checkpoint", type=Path)
     parser.add_argument("--seed", type=int)
@@ -717,6 +792,8 @@ def main() -> int:
         config["data"]["max_windows"] = args.max_windows
     if args.max_optimizer_steps is not None:
         config["training"]["max_optimizer_steps"] = args.max_optimizer_steps
+    if args.acceptance_gate is not None:
+        config["training"]["acceptance_gate"] = args.acceptance_gate
     if args.mask_phase is not None:
         config["training"]["mask_phase"] = args.mask_phase
     if args.seed is not None:

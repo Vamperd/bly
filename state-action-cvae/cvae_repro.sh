@@ -260,8 +260,9 @@ posterior_capacity() {
   local window="${CVAE_POSTERIOR_WINDOW:-16}" checkpoint="${CVAE_INIT_CHECKPOINT:-}"
   local max_windows="${CVAE_POSTERIOR_MAX_WINDOWS:-}"
   local max_steps="${CVAE_POSTERIOR_MAX_STEPS:-}"
+  local acceptance_gate="${CVAE_POSTERIOR_GATE:-exact}"
   local config="${CVAE_CONFIG:-$SCRIPT_DIR/configs/posterior_capacity_minimal.json}"
-  local prefix marker run_dir seed="${CVAE_SEED:-20260830}"
+  local prefix marker run_dir latest_key seed="${CVAE_SEED:-20260830}"
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
   [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
     || die "dedicated overfit subset marker is missing: $dataset_run"
@@ -271,17 +272,25 @@ posterior_capacity() {
     || die "CVAE_POSTERIOR_MAX_WINDOWS must be a positive integer"
   [[ -z "$max_steps" || "$max_steps" =~ ^[1-9][0-9]*$ ]] \
     || die "CVAE_POSTERIOR_MAX_STEPS must be a positive integer"
+  [[ "$acceptance_gate" == "exact" || "$acceptance_gate" == "progression" ]] \
+    || die "CVAE_POSTERIOR_GATE must be exact or progression"
   if [[ "$phase" == "generalization" ]]; then
     [[ -n "$checkpoint" && -f "$checkpoint" ]] \
-      || die "generalization requires CVAE_INIT_CHECKPOINT=.../best_exact.pt"
+      || die "generalization requires CVAE_INIT_CHECKPOINT=.../best_<gate>.pt"
   elif [[ -n "$checkpoint" ]]; then
     die "fixed posterior capacity must start from random initialization"
   fi
   prefix="cvae_posterior_capacity_${phase}_m${motions}_t${window}"
   [[ -n "$max_windows" ]] && prefix="${prefix}_w${max_windows}"
   [[ -n "$max_steps" ]] && prefix="${prefix}_s${max_steps}"
+  [[ "$acceptance_gate" == "progression" ]] && prefix="${prefix}_gprogression"
   marker="cvae_posterior_capacity.ok"
   [[ "$phase" == "generalization" ]] && marker="cvae_posterior_mask_generalization.ok"
+  if [[ "$acceptance_gate" == "progression" ]]; then
+    marker="cvae_posterior_capacity_progression.ok"
+    [[ "$phase" == "generalization" ]] \
+      && marker="cvae_posterior_mask_generalization_progression.ok"
+  fi
   [[ "$smoke" == "true" ]] && marker="cvae_posterior_capacity_smoke.ok"
   run_dir="$(new_run_dir "$prefix")"
   capture_environment "$run_dir"
@@ -298,10 +307,14 @@ posterior_capacity() {
       --motions "$motions" \
       --window-transitions "$window" \
       --mask-phase "$phase" \
+      --acceptance-gate "$acceptance_gate" \
       --seed "$seed" \
       "${extra_args[@]}"
   [[ -f "$run_dir/markers/$marker" ]] || die "posterior capacity marker is missing: $marker"
-  update_latest "posterior_capacity_${phase}" "$run_dir"
+  latest_key="posterior_capacity_${phase}"
+  [[ "$acceptance_gate" == "progression" ]] \
+    && latest_key="posterior_capacity_${phase}_progression"
+  update_latest "$latest_key" "$run_dir"
   printf '%s\n' "$run_dir"
 }
 

@@ -254,14 +254,14 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 最简 posterior Transformer capacity：D1通过，F1R/W4失败，W4-E80待运行
+### 6.4 最简 posterior Transformer capacity：新增progression门禁，P1待运行
 
 新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
 使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
 relation/rollout/auxiliary head。固定10类 Mask fixture 包括全 State、全 Action、全序列与部分
-element/time/feature/semantic Mask；训练使用 posterior mean、`KL beta=0`，按 exact score 保存
-`best_exact.pt`。代码、Windows 轻量测试和 Ubuntu S0 工程 smoke 已完成，但尚无正式容量
-阶梯结果，不得写成已经实现完美拟合。入口为：
+element/time/feature/semantic Mask；训练使用 posterior mean、`KL beta=0`。exact与progression
+两套门禁的语义及完整台账见`plan.md`。Ubuntu S0、D1、F1R和W4事实如下；不得把progression
+通过写成完美拟合，也不得据此声称prior或条件方向能力。
 
 ```bash
 bash ./cvae_repro.sh posterior-capacity-smoke
@@ -297,11 +297,6 @@ feature/semantic Mask显著更差，尤其`element_both_50`达到0.05842/0.02495
 使用`seed+700001`：三个full Mask保持相同，七类partial Mask的具体坐标不同。因此旧F1只能作为
 Mask坐标迁移诊断，不能证明训练fixture记忆失败，也不能据此确认统一decoder融合存在缺陷。
 
-D1入口已在Windows实现：设置`CVAE_POSTERIOR_MAX_WINDOWS=1`后，代码仍先校验1个motion的8个
-variant完整性，再按固定索引顺序只选择第一个window供训练和exact验收。summary会记录可用/实际
-窗口数及所选window的motion、variant、episode和start；默认不设置该变量时保持原协议。当前只完成
-轻量测试，尚未收到Ubuntu D1 smoke或formal结果，不得推断单窗口能够过拟合。
-
 fixed协议现已修复为训练与exact validation复用同一Mask seed；summary显式记录train/validation
 seed及`fixed_fixture_identity_match`，generalization才使用独立seed。旧F1 run必须保留，但不得
 作为fixed capacity gate。
@@ -320,16 +315,28 @@ F1R随后在正确fixed协议下失败：run
 39000、score 36.4095，State/Action RMSE 0.003641/0.002903、max abs 0.017851、contact 100%、
 zero ratio 331.97。最后1k step平台化；full与partial Mask均约`3e-3`，因此不是单一Mask融合故障。
 D1每fixture至最佳点约重复136k次，而F1R每fixture约1778次，尚不能区分参数容量与训练暴露不足。
-下一步只做W4：`CVAE_POSTERIOR_MAX_WINDOWS=4`，其余变量不变、随机初始化；通过后才做W16。
 
 W4随后在40k step下接近但未通过：源码仍为`b3aa63d9514cd8dd284e7f6091fc26877f57f021`，
 4 windows、40 fixtures，最佳step39750、score1.6103，State/Action RMSE 1.610e-4/1.194e-4、
 max abs 6.158e-4、contact 100%、zero ratio8425.42。element/feature/semantic多数已通过，主要由
 `full_state/full_both/state_time_50/action_time_50`卡住；最后1k step在1.61–1.67波动。40k时
-每fixture约64k次暴露，仅为D1至通过点约136k次的一半。下一步只做W4-E80：同seed重新随机
-初始化，除max step及对应cosine长度改为80k外其余不变；不得放宽门禁或进入W16/G0。
-Windows已为该单变量对照新增`CVAE_POSTERIOR_MAX_STEPS`/`--max-optimizer-steps`覆盖；默认仍为
-40k，smoke仍固定2 step，summary新增配置/实际完成step。Ubuntu W4-E80尚未运行，不得预判结果。
+每fixture约64k次暴露，仅为D1至通过点约136k次的一半。它在exact门禁下仍是FAIL，但其最后5次
+validation均同时满足新progression门禁，因运行时尚无该协议而没有progression marker。
+
+2026-09-01 Windows新增独立规模推进门禁：`CVAE_POSTERIOR_GATE=progression`固定要求worst
+State/Action normalized RMSE、continuous max abs均不超过`1e-2`，contact 100%，zero-latent
+ratio至少10。每次validation仍同时记录原exact门禁；活动门禁分别控制连续3次PASS、
+`best_exact.pt`/`best_progression.pt`、独立marker和退出码，默认exact保持历史兼容。progression
+fixed/generalization marker分别为`cvae_posterior_capacity_progression.ok`和
+`cvae_posterior_mask_generalization_progression.ok`。
+Windows已通过posterior/model/isolation组合32项测试、Python compile、全部config JSON、Shell语法、
+CLI help与diff check；全发现测试另有3个模块因既有Windows环境缺`h5py`无法导入，真实HDF5/CUDA
+仍必须在Ubuntu验证。
+
+为更快进入CVAE，W4-E80、W16、W64不再预先执行。唯一下一步P1直接用1 motion全部144 windows、
+window16、seed20260830、random init、progression gate训练，max80k但连续3次通过即停；P1失败时才
+回退窗口边界诊断。P1通过后P2从`best_progression.pt`训练动态随机Mask并在每窗口16个held-out
+Mask上验收；P2通过即可实现C0最小CVAE prior/KL管线，不要求先扩到32 motion或T=128。
 
 ### 6.5 已完成 parent 训练
 
@@ -464,23 +471,25 @@ bash ./cvae_repro.sh validate-state-mask-video
 | 只读数据分析 | `cvae_overfit_analysis.ok` |
 | 单任务训练 | `cvae_overfit_single_task.ok`（只有严格 gate 通过才生成；当前五个 run 均未生成） |
 | Exact fixture只读诊断 | `cvae_overfit_fixture_diagnostic.ok`（仅表示执行完整） |
+| Posterior exact fixed/generalization | `cvae_posterior_capacity.ok` / `cvae_posterior_mask_generalization.ok` |
+| Posterior progression fixed/generalization | `cvae_posterior_capacity_progression.ok` / `cvae_posterior_mask_generalization_progression.ok` |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. 只执行W4-E80：`CVAE_POSTERIOR_MAX_WINDOWS=4`、1 motion、window16、fixed、seed20260830，
-   从随机初始化开始，仅将max step与对应cosine长度从40k改为80k，使每fixture约暴露128k次。
-2. 若W4-E80失败，停止规模扩展并检查dense fixture目标/结构；不得增加motion、latent维度、层数、
-   放宽阈值或恢复KL。若通过，才按W16、W64定位规模边界。
-3. 在fixed窗口规模边界明确前不启动G0；后续新随机Mask仍只作已见序列的posterior检索测试。
-4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
+1. 只执行P1：1 motion全部144 windows、window16、fixed、seed20260830、random init，设置
+   `CVAE_POSTERIOR_GATE=progression`和max80k；连续3次通过即可提前停止。
+2. P1通过后只执行P2：保持motion/window/门禁，使用P1`best_progression.pt`训练动态随机Mask并验收
+   16-slot held-out Mask；失败时不增加motion，先诊断Mask迁移。
+3. P2通过后实现C0最小CVAE：只使用物理结构Mask，接通posterior采样、conditional prior与KL，
+   posterior与不读取目标真值的prior必须分开报告；空条件的full-both不作确定性prior门禁。
+4. C0 smoke后先做4-motion、window16的C1，再直接做32-motion的C2；只有C2可工作后才扩展T=64/128。
+5. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
-5. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
+6. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
    LeanSplit v1；inverse 使用 reference-conditioned deterministic 指标和概率覆盖率双报告。
-6. 只有确定性 capacity 连续两次 exact 通过后，才恢复联合多任务与 Full CVAE prior gate；
-   在此之前不要启动额外 compact seed、Full CVAE 或把 prior 失败解释成部署结论。
 7. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
    motion ID、package/outcome、未来真实 State、真实随机 delay draw 和 oracle dynamics context
    不得进入部署模型；oracle 结果只能明确标注为上限实验。

@@ -12,6 +12,7 @@ from cvae_sa.posterior_capacity import (
     evaluate_exact,
     make_fixture_masks,
     optimizer_step_limit,
+    _score_gate,
     reconstruction_loss,
     selected_window_identities,
     validation_fixture_seed,
@@ -126,6 +127,42 @@ class PosteriorCapacityTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive"):
             optimizer_step_limit({"max_optimizer_steps": 0}, False)
 
+    def test_progression_gate_is_independent_from_exact_gate(self) -> None:
+        values = {
+            "worst_state": 0.003641,
+            "worst_action": 0.002903,
+            "worst_max": 0.017851,
+            "contact_accuracy": 1.0,
+            "zero_ratio": 331.97,
+        }
+        exact = _score_gate(
+            **values,
+            thresholds={
+                "state_rmse": 1e-4, "action_rmse": 1e-4,
+                "continuous_max_abs": 1e-3, "latent_ratio": 10.0,
+            },
+        )
+        progression = _score_gate(
+            **values,
+            thresholds={
+                "state_rmse": 1e-2, "action_rmse": 1e-2,
+                "continuous_max_abs": 1e-2, "latent_ratio": 10.0,
+            },
+        )
+        self.assertFalse(exact["passed"])
+        self.assertFalse(progression["passed"])
+        self.assertAlmostEqual(progression["score"], 1.7851)
+
+        values["worst_max"] = 0.006158
+        progression = _score_gate(
+            **values,
+            thresholds={
+                "state_rmse": 1e-2, "action_rmse": 1e-2,
+                "continuous_max_abs": 1e-2, "latent_ratio": 10.0,
+            },
+        )
+        self.assertTrue(progression["passed"])
+
     def test_mask_bank_repeats_every_window_by_slot(self) -> None:
         base = _ListDataset([{"value": 0}, {"value": 1}])
         bank = MaskBankDataset(base, 3)
@@ -213,6 +250,9 @@ class PosteriorCapacityTest(unittest.TestCase):
         )
         self.assertEqual(set(metrics["cases"]), set(FIXED_MASK_NAMES))
         self.assertIn("zero_ratio", metrics["latent_dependence"])
+        self.assertEqual(metrics["acceptance_gate"], "exact")
+        self.assertEqual(metrics["score"], metrics["exact_gate"]["score"])
+        self.assertIn("progression_gate", metrics)
         self.assertFalse(metrics["passed"])
 
     def test_two_short_sequences_can_reduce_posterior_reconstruction_loss(self) -> None:

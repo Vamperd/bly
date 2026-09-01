@@ -19,6 +19,7 @@
   },
   "training": {
     "mask_phase": "fixed",
+    "acceptance_gate": "exact",
     "micro_batch": 16,
     "gradient_accumulation": 4,
     "max_optimizer_steps": 40000,
@@ -34,6 +35,12 @@
       "state_rmse": 0.0001,
       "action_rmse": 0.0001,
       "continuous_max_abs": 0.001,
+      "latent_ratio": 10.0
+    },
+    "progression_thresholds": {
+      "state_rmse": 0.01,
+      "action_rmse": 0.01,
+      "continuous_max_abs": 0.01,
       "latent_ratio": 10.0
     }
   }

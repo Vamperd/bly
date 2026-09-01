@@ -302,23 +302,31 @@ CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=8 \
 CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=16 \
   bash ./cvae_repro.sh posterior-capacity
 
+# 规模推进门禁：RMSE/max abs均1e-2，严格exact指标仍会同时记录
+CVAE_POSTERIOR_GATE=progression \
+CVAE_POSTERIOR_MAX_STEPS=80000 \
+CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=16 \
+  bash ./cvae_repro.sh posterior-capacity
+
 # 单窗口诊断：仍校验1个motion的8个variant，但只训练/验收索引中的第一个固定窗口
 CVAE_POSTERIOR_MAX_WINDOWS=1 \
 CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=16 \
   bash ./cvae_repro.sh posterior-capacity
 
 CVAE_POSTERIOR_PHASE=generalization \
-CVAE_INIT_CHECKPOINT=/run/fixed/checkpoints/best_exact.pt \
-CVAE_POSTERIOR_MOTIONS=32 CVAE_POSTERIOR_WINDOW=16 \
+CVAE_POSTERIOR_GATE=progression \
+CVAE_INIT_CHECKPOINT=/run/fixed/checkpoints/best_progression.pt \
+CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=16 \
   bash ./cvae_repro.sh posterior-capacity
 ```
 
-固定阶段使用10类 deterministic Mask bank，并按 exact score 保存 `best_exact.pt`；只有全部窗口
-连续3次满足 State/Action RMSE、max error、contact 和 zero-latent 门禁才写
-`cvae_posterior_capacity.ok`。设置 `CVAE_POSTERIOR_MAX_WINDOWS=N` 会按既有固定索引顺序只取
+固定阶段使用10类 deterministic Mask bank。默认exact门禁按`1e-4/1e-4/1e-3`保存
+`best_exact.pt`和`cvae_posterior_capacity.ok`；显式设置progression门禁则按State/Action RMSE及
+max abs均`1e-2`保存`best_progression.pt`和`cvae_posterior_capacity_progression.ok`。两套指标始终
+同时写入summary，且活动门禁必须连续3次通过。设置 `CVAE_POSTERIOR_MAX_WINDOWS=N` 会按既有固定索引顺序只取
 前N个窗口，并在 summary 的 `selected_windows` 中记录身份。泛化阶段必须保持 checkpoint 的
-motion 数、窗口长度与窗口子集一致，在每个已见窗口16个 held-out Mask 上通过后才写
-`cvae_posterior_mask_generalization.ok`。
+motion 数、窗口长度、窗口子集与活动门禁一致；progression泛化marker为
+`cvae_posterior_mask_generalization_progression.ok`，exact仍使用原marker。
 
 fixed 阶段的训练和 exact validation 必须复用同一 Mask seed，保证 element/time/feature/semantic
 的具体坐标完全相同；summary 会记录 `training_mask_seed`、`validation_mask_seed` 和
