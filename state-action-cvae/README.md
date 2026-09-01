@@ -294,6 +294,10 @@ Action、逐特征 Mask 和位置/类型；共享双向 encoder 输出单个256�
 decoder 负责全部 reconstruction。它不包含 RobotInfo、reference 或 relation/rollout head，
 `KL beta=0`，因此通过只证明 posterior capacity，不证明部署时条件推理。
 
+25.45M快速阶梯使用`configs/posterior_capacity_reference_25m.json`（384维、6层encoder、8层decoder、
+FFN 1536），参数量严格为25,453,411。专用入口默认使用progression门禁；为避免遗留环境变量误换
+模型，执行前必须`unset CVAE_CONFIG`。
+
 ```bash
 export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
 CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=8 \
@@ -319,6 +323,30 @@ CVAE_INIT_CHECKPOINT=/run/fixed/checkpoints/best_progression.pt \
 CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=16 \
   bash ./cvae_repro.sh posterior-capacity
 ```
+
+25.45M入口及model-only规模warm-start示例：
+
+```bash
+unset CVAE_CONFIG CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
+unset CVAE_POSTERIOR_MAX_STEPS CVAE_POSTERIOR_VALIDATION_INTERVAL
+bash ./cvae_repro.sh posterior-capacity-25m-smoke  # 默认1 motion、T=8、2 step
+
+CVAE_POSTERIOR_MOTIONS=1 CVAE_POSTERIOR_WINDOW=128 \
+CVAE_POSTERIOR_MAX_STEPS=100000 CVAE_POSTERIOR_VALIDATION_INTERVAL=250 \
+  bash ./cvae_repro.sh posterior-capacity-25m
+
+CVAE_POSTERIOR_WARM_START=/run/source/checkpoints/last.pt \
+CVAE_POSTERIOR_MOTIONS=32 CVAE_POSTERIOR_WINDOW=128 \
+CVAE_POSTERIOR_MAX_STEPS=200000 CVAE_POSTERIOR_VALIDATION_INTERVAL=2500 \
+  bash ./cvae_repro.sh posterior-capacity-25m
+
+CVAE_RUN_DIR=/run/to/redraw bash ./cvae_repro.sh posterior-capacity-plot
+```
+
+warm-start只加载模型权重并重置optimizer、scheduler和RNG；dataset hash、模型结构、活动门禁及
+规模只能扩展不能缩减。每次完整评测记录全fixture State MSE、Action MSE、contact BCE和等权总loss，
+并刷新`plots/training_curves.svg`、`gate_curves.svg`与`mask_breakdown.svg`。对数轴显示明确的
+`10^n`刻度；fixed重评和已见序列上的held-out Mask评测使用不同图例，不能视作独立数据集验证。
 
 固定阶段使用10类 deterministic Mask bank。默认exact门禁按`1e-4/1e-4/1e-3`保存
 `best_exact.pt`和`cvae_posterior_capacity.ok`；显式设置progression门禁则按State/Action RMSE及

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
+import json
 import unittest
+from pathlib import Path
 
 import torch
 
-from cvae_sa.models import PosteriorCapacityTransformerCVAE
+from cvae_sa.models import PosteriorCapacityTransformerCVAE, build_model, parameter_count
 from cvae_sa.posterior_capacity import (
     DeterministicWindowSubset,
     FIXED_MASK_NAMES,
@@ -15,6 +18,7 @@ from cvae_sa.posterior_capacity import (
     _score_gate,
     reconstruction_loss,
     selected_window_identities,
+    validate_initial_checkpoint,
     validation_fixture_seed,
     validate_motion_prefix,
 )
@@ -61,6 +65,12 @@ class _ListDataset(torch.utils.data.Dataset[dict[str, object]]):
 
 
 class PosteriorCapacityTest(unittest.TestCase):
+    def test_reference_25m_configuration_has_exact_parameter_count(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs/posterior_capacity_reference_25m.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["model"]["state_dim"] = 70
+        self.assertEqual(parameter_count(build_model(config["model"])), 25_453_411)
+
     def test_global_latent_and_full_mask_shapes(self) -> None:
         torch.manual_seed(1)
         value = batch()
@@ -163,6 +173,62 @@ class PosteriorCapacityTest(unittest.TestCase):
         )
         self.assertTrue(progression["passed"])
 
+    def test_scale_warm_start_allows_only_compatible_expansion(self) -> None:
+        source_config = {
+            "model": {"kind": "physics_posterior_transformer", **model_config()},
+            "data": {"motion_count": 1, "window_transitions": 128, "max_windows": None},
+            "training": {"mask_phase": "fixed", "acceptance_gate": "progression"},
+        }
+        checkpoint = {
+            "format_version": "sonic_posterior_capacity_checkpoint_v1",
+            "step": 123,
+            "dataset_manifest_sha256": "dataset-hash",
+            "config": source_config,
+        }
+        target = copy.deepcopy(source_config)
+        target["data"]["motion_count"] = 32
+        metadata = validate_initial_checkpoint(
+            checkpoint,
+            dataset_hash="dataset-hash",
+            target_config=target,
+            target_phase="fixed",
+            acceptance_gate="progression",
+            allow_scale_expansion=True,
+        )
+        self.assertEqual(metadata["source_step"], 123)
+        self.assertTrue(metadata["model_only"])
+        self.assertFalse(metadata["optimizer_scheduler_rng_restored"])
+        generalization = copy.deepcopy(source_config)
+        generalization["training"]["mask_phase"] = "generalization"
+        validate_initial_checkpoint(
+            checkpoint,
+            dataset_hash="dataset-hash",
+            target_config=generalization,
+            target_phase="generalization",
+            acceptance_gate="progression",
+            allow_scale_expansion=False,
+        )
+        generalization["data"]["motion_count"] = 2
+        with self.assertRaisesRegex(ValueError, "must keep"):
+            validate_initial_checkpoint(
+                checkpoint,
+                dataset_hash="dataset-hash",
+                target_config=generalization,
+                target_phase="generalization",
+                acceptance_gate="progression",
+                allow_scale_expansion=False,
+            )
+        target["data"]["window_transitions"] = 64
+        with self.assertRaisesRegex(ValueError, "only expand"):
+            validate_initial_checkpoint(
+                checkpoint,
+                dataset_hash="dataset-hash",
+                target_config=target,
+                target_phase="fixed",
+                acceptance_gate="progression",
+                allow_scale_expansion=True,
+            )
+
     def test_mask_bank_repeats_every_window_by_slot(self) -> None:
         base = _ListDataset([{"value": 0}, {"value": 1}])
         bank = MaskBankDataset(base, 3)
@@ -230,13 +296,15 @@ class PosteriorCapacityTest(unittest.TestCase):
                 "variant_id": index,
                 "window_start": 0,
             })
+        fixture_dataset = MaskBankDataset(_ListDataset(items), len(FIXED_MASK_NAMES))
         loader = torch.utils.data.DataLoader(
-            MaskBankDataset(_ListDataset(items), len(FIXED_MASK_NAMES)),
+            fixture_dataset,
             batch_size=20,
             shuffle=False,
         )
+        model = PosteriorCapacityTransformerCVAE(model_config()).eval()
         metrics = evaluate_exact(
-            PosteriorCapacityTransformerCVAE(model_config()).eval(),
+            model,
             loader,
             torch.device("cpu"),
             seed=123,
@@ -253,6 +321,29 @@ class PosteriorCapacityTest(unittest.TestCase):
         self.assertEqual(metrics["acceptance_gate"], "exact")
         self.assertEqual(metrics["score"], metrics["exact_gate"]["score"])
         self.assertIn("progression_gate", metrics)
+        reconstruction = metrics["reconstruction_loss"]
+        self.assertGreater(reconstruction["counts"]["state"], 0)
+        self.assertGreater(reconstruction["counts"]["action"], 0)
+        self.assertGreater(reconstruction["counts"]["contact"], 0)
+        self.assertAlmostEqual(
+            reconstruction["total"],
+            (reconstruction["state"] + reconstruction["action"] + reconstruction["contact"]) / 3,
+        )
+        differently_batched = evaluate_exact(
+            model,
+            torch.utils.data.DataLoader(fixture_dataset, batch_size=3, shuffle=False),
+            torch.device("cpu"),
+            seed=123,
+            held_out=False,
+            thresholds={
+                "state_rmse": 1e-4,
+                "action_rmse": 1e-4,
+                "continuous_max_abs": 1e-3,
+                "latent_ratio": 10.0,
+            },
+        )["reconstruction_loss"]
+        for key in ("total", "state", "action", "contact"):
+            self.assertAlmostEqual(reconstruction[key], differently_batched[key], places=6)
         self.assertFalse(metrics["passed"])
 
     def test_two_short_sequences_can_reduce_posterior_reconstruction_loss(self) -> None:

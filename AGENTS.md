@@ -254,7 +254,7 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 最简 posterior Transformer capacity：新增progression门禁，P1待运行
+### 6.4 最简 posterior Transformer capacity：历史P1通过，25M快速阶梯待运行
 
 新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
 使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
@@ -333,10 +333,27 @@ Windows已通过posterior/model/isolation组合32项测试、Python compile、�
 CLI help与diff check；全发现测试另有3个模块因既有Windows环境缺`h5py`无法导入，真实HDF5/CUDA
 仍必须在Ubuntu验证。
 
-为更快进入CVAE，W4-E80、W16、W64不再预先执行。唯一下一步P1直接用1 motion全部144 windows、
-window16、seed20260830、random init、progression gate训练，max80k但连续3次通过即停；P1失败时才
-回退窗口边界诊断。P1通过后P2从`best_progression.pt`训练动态随机Mask并在每窗口16个held-out
-Mask上验收；P2通过即可实现C0最小CVAE prior/KL管线，不要求先扩到32 motion或T=128。
+P1已通过：run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_s100000_gprogression_20260901_105145`，
+使用1 motion全部144 windows、window16、1,440 fixed fixtures、seed20260830和100k上限，在96,250
+step提前停止；`best_progression.pt`位于step93,750。最佳State/Action RMSE为
+0.00224268/0.00145998、max abs 0.00993767、contact 100%、zero/swapped latent ratio
+610.99/586.61，10类Mask均通过progression。exact score仍为22.4268，因此不能称为完美拟合。
+源码HEAD尚未从run的`source_commit.txt`回传。
+
+上述P2决策已被后续25M快速规模计划替代，旧P2不再单独执行。当前实现基于Windows外层
+`tiny-model@fa50f444d9a481b0f431edc1b1f974f0998f623a`的未提交工作树，现已新增独立
+`posterior_capacity_reference_25m.json`与`posterior-capacity-25m[-smoke]`入口：`d_model=384`、
+encoder 6层、decoder 8层、FFN 1536、latent 256，实际参数量25,453,411。固定阶段允许通过
+`CVAE_POSTERIOR_WARM_START`做model-only规模扩展，严格校验dataset hash、结构、门禁和只扩不缩，
+且不恢复optimizer/scheduler/RNG；历史6.7M入口与generalization checkpoint接口保持兼容。
+
+posterior evaluator现额外按全体masked元素聚合State MSE、Action MSE与contact BCE，避免validation
+batch均值偏置。每次完整验收会原子刷新`plots/training_curves.svg`、`gate_curves.svg`和
+`mask_breakdown.svg`；对数纵轴显示明确`10^n`刻度，fixed同fixture重评与已见序列held-out Mask
+使用不同图例。Ubuntu真实HDF5/CUDA尚未执行，因此当前唯一下一步为S25 smoke；通过后按L128
+（1 motion、T128、100k）→F128（32 motion、T128、200k）→R128（动态Mask、50k）推进，任一级
+失败即停止，T256不在本轮关键路径。
 
 ### 6.5 已完成 parent 训练
 
@@ -451,6 +468,7 @@ bash ./cvae_repro.sh validate-state-mask-video
 ├── data/
 ├── logs/
 ├── checkpoints/
+├── plots/
 ├── videos/
 ├── manifests/
 └── markers/
@@ -478,19 +496,18 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. 只执行P1：1 motion全部144 windows、window16、fixed、seed20260830、random init，设置
-   `CVAE_POSTERIOR_GATE=progression`和max80k；连续3次通过即可提前停止。
-2. P1通过后只执行P2：保持motion/window/门禁，使用P1`best_progression.pt`训练动态随机Mask并验收
-   16-slot held-out Mask；失败时不增加motion，先诊断Mask迁移。
-3. P2通过后实现C0最小CVAE：只使用物理结构Mask，接通posterior采样、conditional prior与KL，
+1. 只执行S25：25,453,411参数、1 motion、T8、2 step，验证真实HDF5/CUDA、loss、SVG、checkpoint
+   和marker工程链路；执行前`unset CVAE_CONFIG`。
+2. S25通过后执行L128；通过后用其`last.pt` model-only warm-start直接执行32 motion、T128的F128，
+   再执行动态随机Mask与16-slot held-out验收的R128。任一级失败即停止，不插入中间规模。
+3. R128通过后实现C0最小CVAE：只使用物理结构Mask，接通posterior采样、conditional prior与KL，
    posterior与不读取目标真值的prior必须分开报告；空条件的full-both不作确定性prior门禁。
-4. C0 smoke后先做4-motion、window16的C1，再直接做32-motion的C2；只有C2可工作后才扩展T=64/128。
-5. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
+4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
-6. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
+5. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
    LeanSplit v1；inverse 使用 reference-conditioned deterministic 指标和概率覆盖率双报告。
-7. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
+6. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
    motion ID、package/outcome、未来真实 State、真实随机 delay draw 和 oracle dynamics context
    不得进入部署模型；oracle 结果只能明确标注为上限实验。
 
@@ -535,7 +552,7 @@ df -h /home/helloworld/bly/runs
 | 模型与损失 | `models.py`、`losses.py`、`masking.py` |
 | 常规/fine-tune 训练 | `trainer.py`、`configs/physics_v3*.json`、`cvae_repro.sh` |
 | Exact fixture诊断 | `overfit_fixture_eval.py`、`cvae_repro.sh` |
-| 最简 posterior capacity | `posterior_capacity.py`、`models.py`、`configs/posterior_capacity_minimal.json` |
+| 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

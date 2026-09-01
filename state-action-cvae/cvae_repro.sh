@@ -255,13 +255,25 @@ overfit_model() {
 }
 
 posterior_capacity() {
-  local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
+  local smoke="$1" default_config="${2:-$SCRIPT_DIR/configs/posterior_capacity_minimal.json}"
+  local profile_tag="${3:-}" dataset_run="${CVAE_DATASET_RUN:-}"
+  local default_window=16 default_gate=exact
+  if [[ "$profile_tag" == "25m" ]]; then
+    default_window=128
+    default_gate=progression
+    [[ "$smoke" == "true" ]] && default_window=8
+  fi
   local phase="${CVAE_POSTERIOR_PHASE:-fixed}" motions="${CVAE_POSTERIOR_MOTIONS:-1}"
-  local window="${CVAE_POSTERIOR_WINDOW:-16}" checkpoint="${CVAE_INIT_CHECKPOINT:-}"
+  local window="${CVAE_POSTERIOR_WINDOW:-$default_window}" checkpoint="${CVAE_INIT_CHECKPOINT:-}"
+  local warm_start="${CVAE_POSTERIOR_WARM_START:-}"
   local max_windows="${CVAE_POSTERIOR_MAX_WINDOWS:-}"
   local max_steps="${CVAE_POSTERIOR_MAX_STEPS:-}"
-  local acceptance_gate="${CVAE_POSTERIOR_GATE:-exact}"
-  local config="${CVAE_CONFIG:-$SCRIPT_DIR/configs/posterior_capacity_minimal.json}"
+  local validation_interval="${CVAE_POSTERIOR_VALIDATION_INTERVAL:-}"
+  local acceptance_gate="${CVAE_POSTERIOR_GATE:-$default_gate}"
+  local config="${CVAE_CONFIG:-$default_config}"
+  if [[ "$profile_tag" == "25m" && -n "${CVAE_CONFIG:-}" ]]; then
+    die "posterior-capacity-25m uses its fixed reference config; unset CVAE_CONFIG"
+  fi
   local prefix marker run_dir latest_key seed="${CVAE_SEED:-20260830}"
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
   [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
@@ -272,15 +284,22 @@ posterior_capacity() {
     || die "CVAE_POSTERIOR_MAX_WINDOWS must be a positive integer"
   [[ -z "$max_steps" || "$max_steps" =~ ^[1-9][0-9]*$ ]] \
     || die "CVAE_POSTERIOR_MAX_STEPS must be a positive integer"
+  [[ -z "$validation_interval" || "$validation_interval" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_VALIDATION_INTERVAL must be a positive integer"
   [[ "$acceptance_gate" == "exact" || "$acceptance_gate" == "progression" ]] \
     || die "CVAE_POSTERIOR_GATE must be exact or progression"
   if [[ "$phase" == "generalization" ]]; then
-    [[ -n "$checkpoint" && -f "$checkpoint" ]] \
-      || die "generalization requires CVAE_INIT_CHECKPOINT=.../best_<gate>.pt"
+    [[ -n "$checkpoint" || -n "$warm_start" ]] \
+      || die "generalization requires CVAE_INIT_CHECKPOINT or CVAE_POSTERIOR_WARM_START"
   elif [[ -n "$checkpoint" ]]; then
     die "fixed posterior capacity must start from random initialization"
   fi
+  [[ -z "$checkpoint" || -z "$warm_start" ]] \
+    || die "choose only one of CVAE_INIT_CHECKPOINT and CVAE_POSTERIOR_WARM_START"
+  [[ -z "$checkpoint" || -f "$checkpoint" ]] || die "initial checkpoint is missing: $checkpoint"
+  [[ -z "$warm_start" || -f "$warm_start" ]] || die "warm-start checkpoint is missing: $warm_start"
   prefix="cvae_posterior_capacity_${phase}_m${motions}_t${window}"
+  [[ -n "$profile_tag" ]] && prefix="${prefix}_${profile_tag}"
   [[ -n "$max_windows" ]] && prefix="${prefix}_w${max_windows}"
   [[ -n "$max_steps" ]] && prefix="${prefix}_s${max_steps}"
   [[ "$acceptance_gate" == "progression" ]] && prefix="${prefix}_gprogression"
@@ -295,10 +314,12 @@ posterior_capacity() {
   run_dir="$(new_run_dir "$prefix")"
   capture_environment "$run_dir"
   local extra_args=()
-  [[ "$phase" == "generalization" ]] && extra_args+=(--init-checkpoint "$checkpoint")
+  [[ -n "$checkpoint" ]] && extra_args+=(--init-checkpoint "$checkpoint")
+  [[ -n "$warm_start" ]] && extra_args+=(--warm-start-checkpoint "$warm_start")
   [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
   [[ -n "$max_windows" ]] && extra_args+=(--max-windows "$max_windows")
   [[ -n "$max_steps" ]] && extra_args+=(--max-optimizer-steps "$max_steps")
+  [[ -n "$validation_interval" ]] && extra_args+=(--validation-interval "$validation_interval")
   run_logged "$run_dir" posterior_capacity.log \
     "$PYTHON" -m cvae_sa.posterior_capacity \
       --dataset-run "$dataset_run" \
@@ -316,6 +337,14 @@ posterior_capacity() {
     && latest_key="posterior_capacity_${phase}_progression"
   update_latest "$latest_key" "$run_dir"
   printf '%s\n' "$run_dir"
+}
+
+posterior_capacity_plot() {
+  local run_dir="${CVAE_RUN_DIR:-}"
+  [[ -n "$run_dir" ]] || die "CVAE_RUN_DIR is required"
+  [[ -f "$run_dir/logs/metrics.jsonl" ]] \
+    || die "posterior metrics are missing: $run_dir/logs/metrics.jsonl"
+  "$PYTHON" -m cvae_sa.posterior_capacity_plot --run-dir "$run_dir"
 }
 
 overfit_single_task() {
@@ -691,6 +720,9 @@ case "${1:-}" in
   overfit-single-task) overfit_single_task ;;
   posterior-capacity-smoke) posterior_capacity true ;;
   posterior-capacity) posterior_capacity false ;;
+  posterior-capacity-25m-smoke) posterior_capacity true "$SCRIPT_DIR/configs/posterior_capacity_reference_25m.json" 25m ;;
+  posterior-capacity-25m) posterior_capacity false "$SCRIPT_DIR/configs/posterior_capacity_reference_25m.json" 25m ;;
+  posterior-capacity-plot) posterior_capacity_plot ;;
   analyze-overfit) analyze_overfit ;;
   diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
@@ -701,5 +733,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

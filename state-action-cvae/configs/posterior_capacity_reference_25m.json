@@ -1,0 +1,47 @@
+{
+  "seed": 20260830,
+  "data": {
+    "motion_count": 1,
+    "window_transitions": 128,
+    "max_windows": null,
+    "num_workers": 4
+  },
+  "model": {
+    "kind": "physics_posterior_transformer",
+    "d_model": 384,
+    "encoder_layers": 6,
+    "decoder_layers": 8,
+    "heads": 8,
+    "ffn_dim": 1536,
+    "latent_dim": 256,
+    "dropout": 0.0,
+    "parameter_count_range": [25453411, 25453411]
+  },
+  "training": {
+    "mask_phase": "fixed",
+    "acceptance_gate": "progression",
+    "micro_batch": 4,
+    "gradient_accumulation": 16,
+    "max_optimizer_steps": 100000,
+    "learning_rate": 0.0003,
+    "warmup_steps": 500,
+    "min_lr_ratio": 0.0033333333333333335,
+    "gradient_clip": 1.0,
+    "validation_interval": 250,
+    "required_pass_streak": 3,
+    "kl_beta": 0.0,
+    "free_bits": 0.0,
+    "thresholds": {
+      "state_rmse": 0.0001,
+      "action_rmse": 0.0001,
+      "continuous_max_abs": 0.001,
+      "latent_ratio": 10.0
+    },
+    "progression_thresholds": {
+      "state_rmse": 0.01,
+      "action_rmse": 0.01,
+      "continuous_max_abs": 0.01,
+      "latent_ratio": 10.0
+    }
+  }
+}

@@ -108,6 +108,19 @@ class ReconstructionLoss:
     contact: torch.Tensor
 
 
+POSTERIOR_MODEL_SIGNATURE_KEYS = (
+    "kind",
+    "d_model",
+    "encoder_layers",
+    "decoder_layers",
+    "heads",
+    "ffn_dim",
+    "latent_dim",
+    "dropout",
+    "state_dim",
+)
+
+
 def _stable_seed(*values: object) -> int:
     payload = "\x1f".join(str(value) for value in values).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little") % (2**63 - 1)
@@ -259,6 +272,79 @@ def optimizer_step_limit(training: dict[str, Any], smoke: bool) -> int:
     return 2 if smoke else configured
 
 
+def _model_signature(config: dict[str, Any]) -> dict[str, Any]:
+    model = config.get("model", {})
+    return {key: model.get(key) for key in POSTERIOR_MODEL_SIGNATURE_KEYS}
+
+
+def validate_initial_checkpoint(
+    checkpoint: dict[str, Any],
+    *,
+    dataset_hash: str,
+    target_config: dict[str, Any],
+    target_phase: str,
+    acceptance_gate: str,
+    allow_scale_expansion: bool,
+) -> dict[str, Any]:
+    """Validate model-only initialization without restoring training state."""
+    if checkpoint.get("format_version") != "sonic_posterior_capacity_checkpoint_v1":
+        raise ValueError("unsupported posterior capacity initialization checkpoint")
+    if checkpoint.get("dataset_manifest_sha256") != dataset_hash:
+        raise ValueError("posterior checkpoint dataset manifest hash mismatch")
+    source_config = checkpoint.get("config", {})
+    if _model_signature(source_config) != _model_signature(target_config):
+        raise ValueError("posterior checkpoint model architecture mismatch")
+    source_training = source_config.get("training", {})
+    source_phase = str(source_training.get("mask_phase", "fixed"))
+    if source_phase != "fixed":
+        raise ValueError("posterior initialization must come from a fixed-mask checkpoint")
+    source_gate = str(source_training.get("acceptance_gate", "exact"))
+    if source_gate != acceptance_gate:
+        raise ValueError("posterior initialization must use the target acceptance gate")
+    source_data = source_config.get("data", {})
+    target_data = target_config.get("data", {})
+    source_motion = int(source_data.get("motion_count", -1))
+    target_motion = int(target_data.get("motion_count", -1))
+    source_window = int(source_data.get("window_transitions", -1))
+    target_window = int(target_data.get("window_transitions", -1))
+    source_max_windows = source_data.get("max_windows")
+    target_max_windows = target_data.get("max_windows")
+    source_max_windows = None if source_max_windows is None else int(source_max_windows)
+    target_max_windows = None if target_max_windows is None else int(target_max_windows)
+    if target_phase == "generalization":
+        if (
+            source_motion != target_motion
+            or source_window != target_window
+            or source_max_windows != target_max_windows
+        ):
+            raise ValueError(
+                "generalization must keep the checkpoint motion count, window length, "
+                "and deterministic window subset"
+            )
+    elif target_phase == "fixed" and allow_scale_expansion:
+        subset_not_narrower = (
+            target_max_windows is None
+            if source_max_windows is None
+            else target_max_windows is None or target_max_windows >= source_max_windows
+        )
+        if (
+            target_motion < source_motion
+            or target_window < source_window
+            or not subset_not_narrower
+        ):
+            raise ValueError("fixed warm-start may only expand motions, window length, or windows")
+    else:
+        raise ValueError("fixed initialization requires an explicit scale warm-start")
+    return {
+        "source_step": int(checkpoint.get("step", -1)),
+        "source_phase": source_phase,
+        "source_motion_count": source_motion,
+        "source_window_transitions": source_window,
+        "model_only": True,
+        "optimizer_scheduler_rng_restored": False,
+    }
+
+
 def reconstruction_loss(
     output: PosteriorCapacityOutput,
     batch: dict[str, torch.Tensor],
@@ -362,12 +448,32 @@ def evaluate_exact(
     contact_correct = contact_count = 0
     latent_sse = {"correct": 0.0, "zero": 0.0, "swapped": 0.0}
     latent_count = 0
+    reconstruction_sums = {"state": 0.0, "action": 0.0, "contact": 0.0}
+    reconstruction_counts = {"state": 0, "action": 0, "contact": 0}
     for cpu_batch in loader:
         state_mask, action_mask, names = make_fixture_masks(cpu_batch, seed, held_out=held_out)
         batch = _device_batch(cpu_batch, device)
         state_mask = state_mask.to(device)
         action_mask = action_mask.to(device)
         output = model(batch, state_mask, action_mask)
+        state_loss_values = torch.square(
+            output.physical_state[..., :68] - batch["physical_state"][..., :68]
+        ).masked_select(state_mask[..., :68])
+        action_loss_values = torch.square(
+            output.action - batch["action"]
+        ).masked_select(action_mask)
+        contact_loss_values = F.binary_cross_entropy_with_logits(
+            output.state_contact_logits,
+            batch["physical_state"][..., 68:70],
+            reduction="none",
+        ).masked_select(state_mask[..., 68:70])
+        for name, values in (
+            ("state", state_loss_values),
+            ("action", action_loss_values),
+            ("contact", contact_loss_values),
+        ):
+            reconstruction_sums[name] += float(values.sum().cpu())
+            reconstruction_counts[name] += int(values.numel())
         full_both = torch.tensor([name == "full_both" for name in names], device=device)
         zero_output = swapped_output = None
         if bool(full_both.any()):
@@ -444,6 +550,21 @@ def evaluate_exact(
     zero_ratio = zero_rmse / max(correct_rmse, 1e-12)
     swapped_ratio = swapped_rmse / max(correct_rmse, 1e-12)
     contact_accuracy = contact_correct / contact_count if contact_count else 1.0
+    reconstruction_components = {
+        name: reconstruction_sums[name] / reconstruction_counts[name]
+        for name in reconstruction_sums
+        if reconstruction_counts[name]
+    }
+    if not reconstruction_components:
+        raise ValueError("posterior evaluation contains no reconstruction targets")
+    reconstruction = {
+        "total": sum(reconstruction_components.values()) / len(reconstruction_components),
+        "state": reconstruction_components.get("state", 0.0),
+        "action": reconstruction_components.get("action", 0.0),
+        "contact": reconstruction_components.get("contact", 0.0),
+        "counts": dict(reconstruction_counts),
+        "aggregation": "global masked-element means; equal mean of present components",
+    }
     exact_gate = _score_gate(
         worst_state=worst_state,
         worst_action=worst_action,
@@ -472,6 +593,7 @@ def evaluate_exact(
         "worst_action_rmse": worst_action,
         "continuous_max_abs": worst_max,
         "contact_accuracy": contact_accuracy,
+        "reconstruction_loss": reconstruction,
         "latent_dependence": {
             "correct_rmse": correct_rmse,
             "zero_rmse": zero_rmse,
@@ -513,13 +635,14 @@ def run_experiment(
     config: dict[str, Any],
     *,
     init_checkpoint: Path | None = None,
+    warm_start_checkpoint: Path | None = None,
     smoke: bool = False,
 ) -> dict[str, Any]:
     from .dataset import StateActionWindowDataset
 
     dataset_run = dataset_run.expanduser().resolve()
     output_run = output_run.expanduser().resolve()
-    for child in ("data", "manifests", "markers", "logs", "checkpoints", "videos"):
+    for child in ("data", "manifests", "markers", "logs", "checkpoints", "plots", "videos"):
         (output_run / child).mkdir(parents=True, exist_ok=True)
     if not (dataset_run / "markers/cvae_overfit_subset.ok").is_file():
         raise FileNotFoundError("posterior capacity requires the dedicated overfit subset marker")
@@ -559,39 +682,33 @@ def run_experiment(
     if not int(lower) <= count <= int(upper):
         raise ValueError(f"posterior capacity parameter count {count} is outside [{lower}, {upper}]")
     dataset_hash = file_sha256(dataset_run / "manifests/dataset_manifest.json")
-    if phase == "generalization" and init_checkpoint is None:
+    if init_checkpoint is not None and warm_start_checkpoint is not None:
+        raise ValueError("choose only one posterior initialization checkpoint")
+    if phase == "generalization" and init_checkpoint is None and warm_start_checkpoint is None:
         raise ValueError("generalization phase requires a fixed-mask capacity checkpoint")
     if phase == "fixed" and init_checkpoint is not None:
         raise ValueError("fixed posterior capacity must start from random initialization")
-    if init_checkpoint is not None:
-        checkpoint = torch.load(init_checkpoint.expanduser().resolve(), map_location="cpu", weights_only=False)
-        if checkpoint.get("format_version") != "sonic_posterior_capacity_checkpoint_v1":
-            raise ValueError("unsupported posterior capacity initialization checkpoint")
-        if checkpoint.get("dataset_manifest_sha256") != dataset_hash:
-            raise ValueError("posterior checkpoint dataset manifest hash mismatch")
-        checkpoint_config = checkpoint.get("config", {})
-        if checkpoint_config.get("training", {}).get("mask_phase") != "fixed":
-            raise ValueError("generalization must initialize from a fixed-mask checkpoint")
-        checkpoint_gate = str(
-            checkpoint_config.get("training", {}).get("acceptance_gate", "exact")
+    initialization_path = warm_start_checkpoint or init_checkpoint
+    initialization: dict[str, Any] | None = None
+    if initialization_path is not None:
+        resolved_initialization = initialization_path.expanduser().resolve()
+        checkpoint = torch.load(resolved_initialization, map_location="cpu", weights_only=False)
+        initialization = validate_initial_checkpoint(
+            checkpoint,
+            dataset_hash=dataset_hash,
+            target_config=config,
+            target_phase=phase,
+            acceptance_gate=acceptance_gate,
+            allow_scale_expansion=warm_start_checkpoint is not None,
         )
-        if checkpoint_gate != acceptance_gate:
-            raise ValueError("generalization must use the checkpoint acceptance gate")
-        checkpoint_data = checkpoint_config.get("data", {})
-        checkpoint_max_windows = checkpoint_data.get("max_windows")
-        checkpoint_max_windows = (
-            None if checkpoint_max_windows is None else int(checkpoint_max_windows)
-        )
-        if (
-            int(checkpoint_data.get("motion_count", -1)) != motion_count
-            or int(checkpoint_data.get("window_transitions", -1)) != window
-            or checkpoint_max_windows != max_windows
-        ):
-            raise ValueError(
-                "generalization must keep the checkpoint motion count, window length, "
-                "and deterministic window subset"
-            )
         model.load_state_dict(checkpoint["model"], strict=True)
+        initialization.update({
+            "mode": "scale_warm_start" if warm_start_checkpoint is not None else "generalization_init",
+            "checkpoint": str(resolved_initialization),
+            "checkpoint_sha256": file_sha256(resolved_initialization),
+        })
+        # Weight loading must not carry source-run RNG state into the new experiment.
+        seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     fixed_slots = len(FIXED_MASK_NAMES)
@@ -631,12 +748,19 @@ def run_experiment(
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_multiplier)
     accumulation = int(training["gradient_accumulation"])
     validation_interval = 1 if smoke else int(training["validation_interval"])
+    if validation_interval <= 0:
+        raise ValueError("training.validation_interval must be positive")
     thresholds = {key: float(value) for key, value in training["thresholds"].items()}
     progression_thresholds = {
         key: float(value)
         for key, value in training.get("progression_thresholds", thresholds).items()
     }
     validation_seed = validation_fixture_seed(seed, phase)
+    validation_scope = (
+        "full fixed-fixture evaluation on the same training windows and masks"
+        if phase == "fixed"
+        else "held-out-mask evaluation on seen training windows"
+    )
     stream = _infinite(train_loader)
     metrics_path = output_run / "logs/metrics.jsonl"
     best_score = math.inf
@@ -682,8 +806,11 @@ def run_experiment(
             acceptance_gate=acceptance_gate,
         )
         metrics["optimizer_step"] = optimizer_step
+        metrics["evaluation_scope"] = validation_scope
         with metrics_path.open("a", encoding="utf-8") as stream_file:
             stream_file.write(json.dumps({"phase": "validation", **metrics}, ensure_ascii=False) + "\n")
+        from .posterior_capacity_plot import render_posterior_capacity_plots
+        render_posterior_capacity_plots(output_run)
         score = float(metrics["score"])
         if score < best_score:
             best_score = score
@@ -719,6 +846,12 @@ def run_experiment(
         "training_mask_seed": seed,
         "validation_mask_seed": validation_seed,
         "fixed_fixture_identity_match": phase == "fixed" and validation_seed == seed,
+        "validation_scope": validation_scope,
+        "initialization": initialization or {
+            "mode": "random",
+            "model_only": False,
+            "optimizer_scheduler_rng_restored": False,
+        },
         "smoke": smoke,
         "passed": passed if not smoke else True,
         "motion_count": motion_count,
@@ -736,6 +869,11 @@ def run_experiment(
         "best_score": best_score,
         "best_metrics": best_metrics,
         "checkpoint": str(output_run / f"checkpoints/best_{acceptance_gate}.pt"),
+        "plots": {
+            "training_curves": str(output_run / "plots/training_curves.svg"),
+            "gate_curves": str(output_run / "plots/gate_curves.svg"),
+            "mask_breakdown": str(output_run / "plots/mask_breakdown.svg"),
+        },
     }
     atomic_write_json(output_run / "manifests/posterior_capacity_summary.json", summary)
     if smoke:
@@ -773,9 +911,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-transitions", type=int)
     parser.add_argument("--max-windows", type=int)
     parser.add_argument("--max-optimizer-steps", type=int)
+    parser.add_argument("--validation-interval", type=int)
     parser.add_argument("--acceptance-gate", choices=("exact", "progression"))
     parser.add_argument("--mask-phase", choices=("fixed", "generalization"))
     parser.add_argument("--init-checkpoint", type=Path)
+    parser.add_argument("--warm-start-checkpoint", type=Path)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args()
@@ -792,6 +932,10 @@ def main() -> int:
         config["data"]["max_windows"] = args.max_windows
     if args.max_optimizer_steps is not None:
         config["training"]["max_optimizer_steps"] = args.max_optimizer_steps
+    if args.validation_interval is not None:
+        if args.validation_interval <= 0:
+            raise ValueError("validation interval must be positive")
+        config["training"]["validation_interval"] = args.validation_interval
     if args.acceptance_gate is not None:
         config["training"]["acceptance_gate"] = args.acceptance_gate
     if args.mask_phase is not None:
@@ -809,7 +953,9 @@ def main() -> int:
     config["training"]["gradient_accumulation"] = accumulation
     summary = run_experiment(
         args.dataset_run, args.output_run, config,
-        init_checkpoint=args.init_checkpoint, smoke=args.smoke,
+        init_checkpoint=args.init_checkpoint,
+        warm_start_checkpoint=args.warm_start_checkpoint,
+        smoke=args.smoke,
     )
     print("Posterior capacity experiment: PASS")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
