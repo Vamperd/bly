@@ -11,6 +11,7 @@ from cvae_sa.posterior_capacity import (
     MaskBankDataset,
     evaluate_exact,
     make_fixture_masks,
+    optimizer_step_limit,
     reconstruction_loss,
     selected_window_identities,
     validation_fixture_seed,
@@ -118,6 +119,12 @@ class PosteriorCapacityTest(unittest.TestCase):
         self.assertTrue(torch.equal(training_state, validation_state))
         self.assertTrue(torch.equal(training_action, validation_action))
         self.assertEqual(validation_fixture_seed(123, "generalization"), 700_124)
+
+    def test_optimizer_step_override_is_positive_and_smoke_stays_short(self) -> None:
+        self.assertEqual(optimizer_step_limit({"max_optimizer_steps": 80_000}, False), 80_000)
+        self.assertEqual(optimizer_step_limit({"max_optimizer_steps": 80_000}, True), 2)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            optimizer_step_limit({"max_optimizer_steps": 0}, False)
 
     def test_mask_bank_repeats_every_window_by_slot(self) -> None:
         base = _ListDataset([{"value": 0}, {"value": 1}])

@@ -252,6 +252,13 @@ def validation_fixture_seed(seed: int, phase: str) -> int:
     raise ValueError("mask_phase must be fixed or generalization")
 
 
+def optimizer_step_limit(training: dict[str, Any], smoke: bool) -> int:
+    configured = int(training["max_optimizer_steps"])
+    if configured <= 0:
+        raise ValueError("training.max_optimizer_steps must be positive")
+    return 2 if smoke else configured
+
+
 def reconstruction_loss(
     output: PosteriorCapacityOutput,
     batch: dict[str, torch.Tensor],
@@ -560,7 +567,7 @@ def run_experiment(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=float(training["learning_rate"]), weight_decay=0.0
     )
-    max_steps = 2 if smoke else int(training["max_optimizer_steps"])
+    max_steps = optimizer_step_limit(training, smoke)
     warmup = int(training["warmup_steps"])
     minimum_ratio = float(training.get("min_lr_ratio", 1.0 / 300.0))
 
@@ -657,6 +664,8 @@ def run_experiment(
         "selected_windows": selected_windows,
         "window_transitions": window,
         "mask_fixture_count": len(validation_data),
+        "max_optimizer_steps": max_steps,
+        "completed_optimizer_steps": optimizer_step,
         "parameter_count": count,
         "best_score": best_score,
         "best_metrics": best_metrics,
@@ -689,6 +698,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--motions", type=int)
     parser.add_argument("--window-transitions", type=int)
     parser.add_argument("--max-windows", type=int)
+    parser.add_argument("--max-optimizer-steps", type=int)
     parser.add_argument("--mask-phase", choices=("fixed", "generalization"))
     parser.add_argument("--init-checkpoint", type=Path)
     parser.add_argument("--seed", type=int)
@@ -705,6 +715,8 @@ def main() -> int:
         config["data"]["window_transitions"] = args.window_transitions
     if args.max_windows is not None:
         config["data"]["max_windows"] = args.max_windows
+    if args.max_optimizer_steps is not None:
+        config["training"]["max_optimizer_steps"] = args.max_optimizer_steps
     if args.mask_phase is not None:
         config["training"]["mask_phase"] = args.mask_phase
     if args.seed is not None:

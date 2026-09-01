@@ -259,6 +259,7 @@ posterior_capacity() {
   local phase="${CVAE_POSTERIOR_PHASE:-fixed}" motions="${CVAE_POSTERIOR_MOTIONS:-1}"
   local window="${CVAE_POSTERIOR_WINDOW:-16}" checkpoint="${CVAE_INIT_CHECKPOINT:-}"
   local max_windows="${CVAE_POSTERIOR_MAX_WINDOWS:-}"
+  local max_steps="${CVAE_POSTERIOR_MAX_STEPS:-}"
   local config="${CVAE_CONFIG:-$SCRIPT_DIR/configs/posterior_capacity_minimal.json}"
   local prefix marker run_dir seed="${CVAE_SEED:-20260830}"
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
@@ -268,6 +269,8 @@ posterior_capacity() {
     || die "CVAE_POSTERIOR_PHASE must be fixed or generalization"
   [[ -z "$max_windows" || "$max_windows" =~ ^[1-9][0-9]*$ ]] \
     || die "CVAE_POSTERIOR_MAX_WINDOWS must be a positive integer"
+  [[ -z "$max_steps" || "$max_steps" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_MAX_STEPS must be a positive integer"
   if [[ "$phase" == "generalization" ]]; then
     [[ -n "$checkpoint" && -f "$checkpoint" ]] \
       || die "generalization requires CVAE_INIT_CHECKPOINT=.../best_exact.pt"
@@ -276,6 +279,7 @@ posterior_capacity() {
   fi
   prefix="cvae_posterior_capacity_${phase}_m${motions}_t${window}"
   [[ -n "$max_windows" ]] && prefix="${prefix}_w${max_windows}"
+  [[ -n "$max_steps" ]] && prefix="${prefix}_s${max_steps}"
   marker="cvae_posterior_capacity.ok"
   [[ "$phase" == "generalization" ]] && marker="cvae_posterior_mask_generalization.ok"
   [[ "$smoke" == "true" ]] && marker="cvae_posterior_capacity_smoke.ok"
@@ -285,6 +289,7 @@ posterior_capacity() {
   [[ "$phase" == "generalization" ]] && extra_args+=(--init-checkpoint "$checkpoint")
   [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
   [[ -n "$max_windows" ]] && extra_args+=(--max-windows "$max_windows")
+  [[ -n "$max_steps" ]] && extra_args+=(--max-optimizer-steps "$max_steps")
   run_logged "$run_dir" posterior_capacity.log \
     "$PYTHON" -m cvae_sa.posterior_capacity \
       --dataset-run "$dataset_run" \

@@ -254,7 +254,7 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 最简 posterior Transformer capacity：S0已通过、F1已失败、D1待运行
+### 6.4 最简 posterior Transformer capacity：D1通过，F1R/W4失败，W4-E80待运行
 
 新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
 使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
@@ -272,6 +272,13 @@ bash ./cvae_repro.sh posterior-capacity
 部署时 `State→Action`、`Action→State` 或 conditional prior 能力。完整执行阶梯与结果台账位于
 根目录 `plan.md`；每个 run 完成后必须用实际 summary/metrics/marker 更新该文件的状态、结论和
 唯一下一步，再启动后续实验。
+
+用户进一步明确：当前容量实验允许完全随机、逐元素或任意组合Mask，它们不需要满足物理可辨识性，
+因为这里只测posterior对完整序列的无损记忆/查询能力。容量通过后的独立阶段才使用物理结构Mask：
+State gap必须保留覆盖控制延迟的近期历史、起始State和对应Action以做前向递推；Action gap必须
+保留缺口前Action历史和相邻State转移；State与Action同时缺失时只Mask内部短片段并保留前后
+context/边界，明确标注为双向inpainting而非因果rollout。三类任务必须分开验收，conditional
+能力必须走不读取目标真值的prior/条件路径。
 
 2026-08-31 已回传 S0 smoke run
 `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t8_20260831_114746`：1 motion、window 8、
@@ -296,9 +303,33 @@ variant完整性，再按固定索引顺序只选择第一个window供训练和e
 轻量测试，尚未收到Ubuntu D1 smoke或formal结果，不得推断单窗口能够过拟合。
 
 fixed协议现已修复为训练与exact validation复用同一Mask seed；summary显式记录train/validation
-seed及`fixed_fixture_identity_match`，generalization才使用独立seed。下一步只运行corrected D1；
-若D1通过，再从随机初始化重跑F1R（1 motion、144 windows）；若D1失败则停止扩展，不能运行F1R、
-G0或F2。旧F1 run必须保留，但不得作为fixed capacity gate。
+seed及`fixed_fixture_identity_match`，generalization才使用独立seed。旧F1 run必须保留，但不得
+作为fixed capacity gate。
+
+corrected D1 formal 已通过：run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_w1_20260831_150654`，从144个可用
+window中确定性选择variant 0、`demo_217`、start 0的单个window，10类Mask全部exact。最佳step
+34000，score 1.0，State/Action RMSE为4.719e-5/8.075e-5、max abs 2.255e-4、contact 100%、
+zero/swapped latent ratio为10342.86/54.62，正式marker为`cvae_posterior_capacity.ok`。这证明
+单窗口posterior无损记忆，不证明新Mask、多窗口、prior或条件推理。下一步只执行F1R：取消
+`CVAE_POSTERIOR_MAX_WINDOWS`，从随机初始化训练同一motion的全部144窗口。
+
+F1R随后在正确fixed协议下失败：run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_202012`，源码
+`b3aa63d9514cd8dd284e7f6091fc26877f57f021`，144 windows、1,440 fixtures跑满40k；最佳step
+39000、score 36.4095，State/Action RMSE 0.003641/0.002903、max abs 0.017851、contact 100%、
+zero ratio 331.97。最后1k step平台化；full与partial Mask均约`3e-3`，因此不是单一Mask融合故障。
+D1每fixture至最佳点约重复136k次，而F1R每fixture约1778次，尚不能区分参数容量与训练暴露不足。
+下一步只做W4：`CVAE_POSTERIOR_MAX_WINDOWS=4`，其余变量不变、随机初始化；通过后才做W16。
+
+W4随后在40k step下接近但未通过：源码仍为`b3aa63d9514cd8dd284e7f6091fc26877f57f021`，
+4 windows、40 fixtures，最佳step39750、score1.6103，State/Action RMSE 1.610e-4/1.194e-4、
+max abs 6.158e-4、contact 100%、zero ratio8425.42。element/feature/semantic多数已通过，主要由
+`full_state/full_both/state_time_50/action_time_50`卡住；最后1k step在1.61–1.67波动。40k时
+每fixture约64k次暴露，仅为D1至通过点约136k次的一半。下一步只做W4-E80：同seed重新随机
+初始化，除max step及对应cosine长度改为80k外其余不变；不得放宽门禁或进入W16/G0。
+Windows已为该单变量对照新增`CVAE_POSTERIOR_MAX_STEPS`/`--max-optimizer-steps`覆盖；默认仍为
+40k，smoke仍固定2 step，summary新增配置/实际完成step。Ubuntu W4-E80尚未运行，不得预判结果。
 
 ### 6.5 已完成 parent 训练
 
@@ -438,12 +469,11 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. 只执行D1：`CVAE_POSTERIOR_MAX_WINDOWS=1`、1 motion、window 16，先smoke再formal；两次都
-   从随机初始化开始，记录summary中的唯一`selected_windows`身份。在D1结论前禁止G0/F2。
-2. 若D1通过，先从随机初始化重跑修复协议后的F1R（全部144窗口）；在F1R前不插入其他结构、
-   Mask、阈值、学习率或模型改动。F1R通过后才进入G0。
-3. 若D1仍呈现full mask好而partial mask差，优先做decoder融合单变量对照；不得直接增加motion、
-   latent维度、Transformer层数或恢复KL/relation/rollout等复杂路径。
+1. 只执行W4-E80：`CVAE_POSTERIOR_MAX_WINDOWS=4`、1 motion、window16、fixed、seed20260830，
+   从随机初始化开始，仅将max step与对应cosine长度从40k改为80k，使每fixture约暴露128k次。
+2. 若W4-E80失败，停止规模扩展并检查dense fixture目标/结构；不得增加motion、latent维度、层数、
+   放宽阈值或恢复KL。若通过，才按W16、W64定位规模边界。
+3. 在fixed窗口规模边界明确前不启动G0；后续新随机Mask仍只作已见序列的posterior检索测试。
 4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。

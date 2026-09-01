@@ -324,6 +324,10 @@ fixed 阶段的训练和 exact validation 必须复用同一 Mask seed，保证 
 的具体坐标完全相同；summary 会记录 `training_mask_seed`、`validation_mask_seed` 和
 `fixed_fixture_identity_match`。只有 generalization 阶段使用独立 validation seed。
 
+诊断训练可用 `CVAE_POSTERIOR_MAX_STEPS=N` 覆盖默认40k上限；它会同步延长cosine schedule并在
+run目录名加入 `_sN`。summary记录`max_optimizer_steps`与`completed_optimizer_steps`。未设置时
+历史协议保持不变，smoke无论该值为何仍只执行2 step。
+
 `LeanSplit v1` 将确定性因果动力学、reference-conditioned Action 和双向 CVAE completion
 拆开，生产配置为 6,204,665 参数。forward 只读取最近
 `H=max(10, observed_max_delay+1)` 的 State/已知 Action，不读取 reference 或 CVAE latent；
