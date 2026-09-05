@@ -351,9 +351,30 @@ encoder 6层、decoder 8层、FFN 1536、latent 256，实际参数量25,453,411�
 posterior evaluator现额外按全体masked元素聚合State MSE、Action MSE与contact BCE，避免validation
 batch均值偏置。每次完整验收会原子刷新`plots/training_curves.svg`、`gate_curves.svg`和
 `mask_breakdown.svg`；对数纵轴显示明确`10^n`刻度，fixed同fixture重评与已见序列held-out Mask
-使用不同图例。Ubuntu真实HDF5/CUDA尚未执行，因此当前唯一下一步为S25 smoke；通过后按L128
-（1 motion、T128、100k）→F128（32 motion、T128、200k）→R128（动态Mask、50k）推进，任一级
-失败即停止，T256不在本轮关键路径。
+使用不同图例。S25已在Ubuntu通过：run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t8_25m_gprogression_20260901_172054`，
+1 motion、T8、2 step；它只证明真实HDF5/CUDA与工程链路，不代表质量收敛。
+
+L128已通过：run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t128_25m_s100000_gprogression_20260901_173153`，
+1 motion、T128、24 windows、240 fixtures，最佳step 93,500；State/Action RMSE为
+0.002302/0.001533、max abs 0.009942、contact 100%、zero-latent ratio 469.56。F128随后失败：run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m32_t128_25m_s200000_gprogression_20260902_235140`，
+32 motion、816 windows、8,160 fixtures跑满200k，最佳State/Action RMSE为0.261443/0.273665、
+max abs 9.644091、contact 99.9958%、zero/swapped ratio 12.059/7.905，末段平台化。
+
+为定位1→32直接扩展失败，F4D从L128 `last.pt` model-only warm-start训练4 motion、T128。run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m4_t128_25m_s100000_gprogression_20260904_190425`，
+80 windows、800 fixtures跑满100k且FAIL；最佳点在最后一步，worst State/Action RMSE为
+0.023021/0.015263、max abs 0.215620、contact 100%、zero/swapped ratio 110.24/38.59。全体masked
+元素聚合的State/Action RMSE约为0.00915/0.00812，表明平均训练目标已低于`1e-2`，但worst-window
+与max-element尾部仍失败，不能据此直接认定global latent失效。
+
+F4A只读尾部诊断现已在Windows实现：`posterior_capacity_tail.py`与Shell命令
+`posterior-capacity-tail-diagnostic`严格读取F4D `best_progression.pt`和相同80×10 fixtures，输出
+逐fixture、97个continuous feature、contact、最差20项、分位数/超阈值集中度及log10 SVG，并复现
+F4D summary后才生成execution-only marker `cvae_posterior_capacity_tail_diagnostic.ok`。它不训练、
+不写源run/checkpoint，也不表示质量PASS。当前唯一下一步是在Ubuntu执行F4A；R128与KL接口继续冻结。
 
 ### 6.5 已完成 parent 训练
 
@@ -491,17 +512,18 @@ bash ./cvae_repro.sh validate-state-mask-video
 | Exact fixture只读诊断 | `cvae_overfit_fixture_diagnostic.ok`（仅表示执行完整） |
 | Posterior exact fixed/generalization | `cvae_posterior_capacity.ok` / `cvae_posterior_mask_generalization.ok` |
 | Posterior progression fixed/generalization | `cvae_posterior_capacity_progression.ok` / `cvae_posterior_mask_generalization_progression.ok` |
+| F4A posterior尾部诊断 | `cvae_posterior_capacity_tail_diagnostic.ok`（仅表示只读诊断完整且复现源指标） |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. 只执行S25：25,453,411参数、1 motion、T8、2 step，验证真实HDF5/CUDA、loss、SVG、checkpoint
-   和marker工程链路；执行前`unset CVAE_CONFIG`。
-2. S25通过后执行L128；通过后用其`last.pt` model-only warm-start直接执行32 motion、T128的F128，
-   再执行动态随机Mask与16-slot held-out验收的R128。任一级失败即停止，不插入中间规模。
-3. R128通过后实现C0最小CVAE：只使用物理结构Mask，接通posterior采样、conditional prior与KL，
-   posterior与不读取目标真值的prior必须分开报告；空条件的full-both不作确定性prior门禁。
+1. 只执行F4A：在Ubuntu固定环境只读加载F4D `best_progression.pt`，复现相同80个window×10类fixed
+   Mask并回传tail manifest；不得续训、改门禁、改loss或修改源run。
+2. 根据F4A自动分类只选择一个后续实验：尾部集中则比较per-window均衡/尾部惩罚；分布性失败则
+   审计优化与表示容量；`full_both`显著独立恶化时才进一步检验single-global-latent瓶颈。
+3. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
+   才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
@@ -552,7 +574,7 @@ df -h /home/helloworld/bly/runs
 | 模型与损失 | `models.py`、`losses.py`、`masking.py` |
 | 常规/fine-tune 训练 | `trainer.py`、`configs/physics_v3*.json`、`cvae_repro.sh` |
 | Exact fixture诊断 | `overfit_fixture_eval.py`、`cvae_repro.sh` |
-| 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
+| 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`posterior_capacity_tail.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
-最后更新：2026-09-01
-当前阶段：25,453,411参数posterior容量入口、model-only规模warm-start、完整fixture loss和三类SVG训练图已在Windows实现并通过轻量测试；Ubuntu真实HDF5/CUDA尚未运行。唯一下一步是S25 smoke，随后按L128→F128→R128直接推进到32 motion、T=128。
+最后更新：2026-09-05
+当前阶段：F4D已在Ubuntu跑满100,000 step并未通过progression门禁。4 motion、T=128共有80个窗口和800个fixed fixtures；最佳点位于最后一步，worst State/Action RMSE为0.0230/0.0153、max abs为0.2156。与此同时，全体masked元素聚合的State/Action RMSE约为0.00915/0.00812，说明平均精度已过`1e-2`而少数window/feature尾部仍失败。F4A只读尾部诊断入口现已在Windows实现并通过轻量测试，唯一下一步是在Ubuntu固定环境读取F4D `best_progression.pt`执行该诊断；它不训练、不改checkpoint，完成前R128和全部KL代码继续冻结。
 本文是本轮 posterior-only 研究的执行计划、实验结果与后续决策的唯一台账。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -30,6 +30,11 @@ $$
 全State、全Action或联合随机Mask。目标只是检验posterior读取完整序列后，global latent与decoder
 能否无损记忆并按任意Mask查询缺失值；不能用这些Mask的物理不适定性解释capacity失败。
 
+容量阶段通过后的KL实验回答另一个问题：在decoder始终接收同一masked condition时，posterior
+均值、posterior重参数采样与只读取masked序列的conditional prior采样之间有多大质量差距，进而
+判断当前KL权重是否在“保留重建能力”和“对齐posterior/prior”之间取得可用平衡。该阶段仍只在
+已见32 motion上评测，不把结果表述为未见motion泛化。
+
 ## 2. 固定实验合同
 
 ### 2.1 数据与代码
@@ -52,7 +57,7 @@ $$
 
 每个正式 run 前必须记录 Windows/Ubuntu 外层、SONIC、IsaacLab 的实际分支、HEAD 和状态。不得为了匹配本文自动 checkout、reset 或恢复历史 IsaacLab 修改。Ubuntu 只同步和执行，不手工修改源码。
 
-### 2.2 模型与优化
+### 2.2 KL=0容量阶段模型与优化
 
 | 项目 | 固定值 |
 |---|---:|
@@ -72,7 +77,7 @@ $$
 
 effective batch固定为64：窗口不超过32时为`16×4`，窗口64时为`8×8`，窗口128时为`4×16`。L128从随机初始化开始；F128与R128通过`CVAE_POSTERIOR_WARM_START`只加载前一级`last.pt`的模型权重，严格校验dataset manifest hash、模型结构、门禁与规模扩展方向，并重置optimizer、scheduler和RNG。历史`CVAE_INIT_CHECKPOINT` generalization接口保持兼容。
 
-### 2.3 Mask、loss 与验收
+### 2.3 KL=0容量阶段的Mask、loss 与验收
 
 固定 Mask bank 对每个窗口生成10个 fixture：`full_state`、`full_action`、`full_both`、10%和50% element Both、50%连续 State 时间块、50%连续 Action 时间块、50% State feature、50% Action feature、一个 State+Action joint semantic group。每个 fixture 必须至少有一个有效 target，padding 永远不作为 target。
 
@@ -111,11 +116,125 @@ fixed图例必须写`Full fixed-fixture evaluation`，明确它是同一训练wi
 | S25 | 25M工程smoke | 1 motion、T=8、random init | 2 step | L128 |
 | L128 | 单motion长窗口fixed | 1 motion、T=128、random init | 100k，每250 step验收 | F128 |
 | F128 | 32-motion fixed规模门禁 | 32 motion、T=128，从L128 `last.pt` model-only warm-start | 200k，每2,500 step验收 | R128 |
-| R128 | 动态随机Mask与16-slot held-out验收 | 32 motion、T=128，从F128 `last.pt` model-only warm-start | 50k，每2,500 step验收 | 最小CVAE prior/KL |
+| F4D | F128失败后的唯一规模边界诊断 | 4 motion、T=128，从L128 `last.pt` model-only warm-start；其余合同不变 | 100k，每1,000 step验收 | 已FAIL；执行F4A |
+| F4A | F4D checkpoint只读尾部诊断 | 固定读取F4D `best_progression.pt`与同一80窗口×10 Mask | 不训练；Windows入口READY | 根据误差分布决定目标对齐或latent诊断 |
+| R128 | 动态随机Mask与16-slot held-out验收 | 32 motion、T=128，从F128 `last.pt` model-only warm-start | 50k，每2,500 step验收 | 冻结KL=0结果并开始K0代码实现 |
+| K0 | KL三路径工程smoke | 仅在L128/F128/R128全部PASS后新增入口；从R128 `last.pt` model-only初始化 | 2 step、单个确定性窗口 | K1 |
+| K1 | 32-motion KL三路径正式实验 | 32 motion、T=128，从R128 `last.pt` model-only初始化 | 50k，每2,500 step三路径验收 | 按KL判断表确定唯一下一步 |
 
-每一级质量失败即停止，不插入额外motion/window阶梯；T=256不在本轮关键路径。R128通过后才接通posterior采样、conditional prior和KL；不读取目标真值的prior必须独立验收，全State+Action同时遮挡不作为条件prior的确定性RMSE任务。
+初始快速链中任一级质量失败即停止，不直接启动后一级；T=256不在本轮关键路径。F128已经失败，
+因此只新增F4D这一项最小边界诊断，不恢复完整的4→8→16→32繁琐阶梯。F4D已经失败，但全局
+聚合RMSE已过`1e-2`且最佳点仍在最后一步，因此不直接续训，也不直接归因于global latent容量；
+先执行F4A只读诊断，审计逐window/feature尾部误差与平均训练目标的错位。F4A完成前不增加step、
+模型参数或新训练loss。L128、F128、R128
+三个`KL=0`正式阶段未全部获得对应PASS marker前，禁止新增或启用K0/K1模型接口、配置、训练器、
+评测器、测试或Shell入口；只能继续更新本文的实际结果台账。R128通过并冻结其`last.pt`与基线指标
+后，才接通posterior采样、conditional prior和KL。不读取目标真值的prior必须独立验收，
+全State+Action同时遮挡只用于posterior latent依赖诊断，不作为conditional prior质量门禁。
 
 marker保持可区分：exact fixed/generalization沿用`cvae_posterior_capacity.ok`与`cvae_posterior_mask_generalization.ok`；progression使用`cvae_posterior_capacity_progression.ok`与`cvae_posterior_mask_generalization_progression.ok`。progression PASS只允许声明“精度足以推进规模/机制实验”，不能称为完美拟合或物理单位无损。
+
+### 3.1 F4A只读尾部诊断合同
+
+F4A固定读取
+`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m4_t128_25m_s100000_gprogression_20260904_190425/checkpoints/best_progression.pt`，
+重建与F4D逐位相同的80个window×10类fixed Mask。不得训练、更新checkpoint、改变Mask seed或
+使用held-out Mask。输出必须位于新的`/home/helloworld/bly/runs/<f4a_run_id>/`，源HDF5与F4D
+目录保持只读。
+
+诊断必须记录每个fixture的motion、variant、window start、Mask名、State/Action RMSE、max abs，
+并为最大误差记录State/Action类别、time index、feature index、target、prediction、absolute error及
+对应normalization scale。聚合输出每类Mask的p50/p90/p95/p99/max、达到`1e-2` RMSE的fixture比例、
+达到`1e-2` max abs的masked元素与fixture比例，以及最差20个window和最差20个feature。contact错误
+单独列出，不与continuous尾部混合。
+
+F4A结论按以下顺序确定：若partial Mask的p95 RMSE均`<=1e-2`且超阈值误差集中在不超过1%的
+masked元素或5%的fixture，判定为`tail_objective_mismatch`，下一步只设计per-window均衡与尾部
+惩罚对照；若partial Mask的p50或p90仍超过`1e-2`，判定为`broad_reconstruction_failure`，下一步
+审计优化与表示容量；若`full_both`的p95 RMSE超过partial Mask宏平均p95的3倍，额外标记
+`global_latent_bottleneck_suspected`。这些判断可以同时出现，但不得在F4A前预先修改loss或门禁。
+
+### 3.2 K1 KL训练合同（R128通过后才实现）
+
+K1固定从R128的`last.pt`只加载模型参数，重新初始化optimizer、scheduler和RNG。训练数据为
+32 motion、T=128；decoder只接收masked values、Mask和选定global latent。训练始终使用
+posterior重参数采样：
+
+$$
+z_q=\mu_q+\exp(0.5\log\sigma_q^2)\epsilon,\quad \epsilon\sim\mathcal N(0,I)
+$$
+
+$$
+L=L_{reconstruction}+\beta D_{KL}\left(q(z\mid X_{full})\Vert
+p(z\mid X_{visible},M)\right)
+$$
+
+`L_reconstruction`继续使用masked State MSE、Action MSE和contact BCE等权平均。`free_bits=0`；
+`beta`在前10,000 optimizer step从0线性升至`1e-3`，之后保持；最多50,000 step，每2,500
+step完整评测。保存`best_posterior_mean.pt`、`best_prior_sample.pt`和`last.pt`，三者不得互相覆盖。
+
+K1只使用物理结构合理的Mask。State gap保留缺口前边界State、对应Action与覆盖控制延迟的近期
+历史；Action gap保留缺口前Action历史及相邻State转移；State–Action联合gap只遮挡内部短片段，
+保留前后边界并明确标注为双向inpainting。训练动态生成这些Mask；评测使用独立seed生成后固定的
+held-out physical Mask bank。K1训练前先用未修改的R128 checkpoint在同一评测bank上运行一次，
+作为`KL=0`基线。
+
+### 3.3 三种latent注入路径与公平对照
+
+只比较下列三种路径，不加入prior mean，也不把独立`N(0,I)`直接作为decoder latent：
+
+| 路径 | latent | 可读取信息 | 解释 |
+|---|---|---|---|
+| `posterior_mean` | $z=\mu_q$ | 完整序列encoder + masked condition | encoder给出的确定性重建上限 |
+| `posterior_sample` | $z=\mu_q+\sigma_q\epsilon$ | 完整序列encoder + masked condition | 检验posterior方差和采样噪声 |
+| `conditional_prior_sample` | $z=\mu_p+\sigma_p\epsilon$ | 仅masked序列prior + masked condition | 不读取被Mask真值的实际CVAE生成路径 |
+
+每个固定窗口/Mask上，`posterior_mean`运行1次，两个随机路径各运行8次。同一窗口、Mask和sample
+index的posterior/prior采样必须复用同一个标准正态`epsilon`；seed由evaluation seed、motion、
+variant、window start、Mask slot和sample index稳定派生。这样两条随机路径的差异主要来自
+`q/p`分布而不是偶然噪声。任何使用posterior的结果都只能作为有真值上限，只有
+`conditional_prior_sample`代表部署时不读取目标真值的路径。
+
+三条路径分别记录masked State/Action normalized RMSE、continuous max abs和contact accuracy。
+随机路径额外记录8次采样的mean、std、p50、p95、worst和best-of-8。定义同一评测bank上的宏观
+连续误差$E$为State RMSE与Action RMSE的等权平均，并记录：
+
+$$
+R_{sample}=E_{posterior\_sample}/E_{posterior\_mean},\qquad
+R_{prior}=E_{conditional\_prior\_sample}/E_{posterior\_sample}
+$$
+
+同时记录raw/weighted KL、当前beta、posterior/prior平均标准差、logvar范围，以及full-both
+posterior mean的zero/swapped latent依赖。best-of-8只作oracle诊断，不参与checkpoint选择或质量
+PASS；`best_prior_sample.pt`按8次采样均值对应的progression score选择。
+
+### 3.4 KL权重判断与停止规则
+
+以下判断是当前benchmark上的工程筛选，不声明`beta`在理论上最优。判断按表格从上到下执行；
+若同时触发，posterior能力退化或latent collapse拥有最高优先级。
+
+| 观测 | `kl_assessment` | 唯一下一步 |
+|---|---|---|
+| posterior mean保持progression；$R_{sample}\le1.25$；$R_{prior}\le1.50$；full-both zero-latent ratio仍`>=10` | `acceptable_beta_1e-3` | 进入conditional prior物理任务评测 |
+| posterior mean相对同bank的R128基线恶化超过25%，或full-both zero-latent ratio低于10 | `kl_too_strong_or_collapse` | 从R128重新初始化，单独把beta改为`1e-4` |
+| posterior保持progression且$R_{sample}\le1.25$，但$R_{prior}>2.0$ | `kl_too_weak` | 从R128重新初始化，单独把beta改为`1e-2` |
+| $R_{sample}>1.25$但$R_{prior}\le1.50$ | `posterior_variance_unstable` | beta不变，先只读检查logvar、平均方差和逐sample误差 |
+| 未落入以上区间，例如$1.50<R_{prior}\le2.0$ | `inconclusive` | 不自动改beta；先完成同checkpoint的方差与逐Mask诊断 |
+
+progression绝对门禁仍要求worst per-window State/Action RMSE、continuous max abs均不超过`1e-2`，
+contact为100%。`cvae_kl_latent_comparison.ok`只表示三路径评测完整、无真值泄漏且可复现；
+KL是否可接受必须读取manifest中的`kl_assessment`，不得由marker名称推断。
+
+K0/K1实现时必须生成`manifests/kl_latent_comparison.json`、
+`plots/kl_training_curves.svg`与`plots/latent_three_path_comparison.svg`。训练图记录reconstruction、
+raw KL、weighted KL、beta、learning rate与gradient norm；对照图分开显示三条路径及8次采样区间，
+所有log轴继续使用明确的`10^n`刻度。manifest必须保存R128同bank基线、三路径完整统计、
+`R_sample`、`R_prior`、latent依赖、`kl_assessment`和由判断表导出的唯一下一步。
+
+延后实现时的测试范围固定为：三种latent公式；posterior可读完整真值而prior严格只能读取masked
+序列；共享epsilon与稳定seed复现；8次采样聚合；beta线性预热与free-bits为0；三个checkpoint
+互不覆盖；失败run仍保留manifest和SVG；comparison marker只表示执行完整。先通过CPU短合成测试，
+再在Ubuntu执行K0；K0不承担任何质量结论。
 
 ## 4. Ubuntu 执行命令
 
@@ -159,15 +278,29 @@ CVAE_POSTERIOR_MOTIONS=1 \
 CVAE_POSTERIOR_WINDOW=128 \
 bash ./cvae_repro.sh posterior-capacity-25m
 
-# F128：仅在L128 PASS后执行；SOURCE必须取L128的last.pt
+# F128：已于2026-09-04跑满200k并FAIL；以下命令仅保留历史复现，不立即重跑
 unset CVAE_CONFIG CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_MAX_WINDOWS
+test -f /home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t128_25m_s100000_gprogression_20260901_173153/checkpoints/last.pt
 CVAE_SEED=20260830 \
 CVAE_POSTERIOR_PHASE=fixed \
 CVAE_POSTERIOR_GATE=progression \
-CVAE_POSTERIOR_WARM_START=<L128_RUN>/checkpoints/last.pt \
+CVAE_POSTERIOR_WARM_START=/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t128_25m_s100000_gprogression_20260901_173153/checkpoints/last.pt \
 CVAE_POSTERIOR_MAX_STEPS=200000 \
 CVAE_POSTERIOR_VALIDATION_INTERVAL=2500 \
 CVAE_POSTERIOR_MOTIONS=32 \
+CVAE_POSTERIOR_WINDOW=128 \
+bash ./cvae_repro.sh posterior-capacity-25m
+
+# F4D：已于2026-09-05跑满100k并FAIL；以下命令仅保留历史复现
+unset CVAE_CONFIG CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_MAX_WINDOWS
+test -f /home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t128_25m_s100000_gprogression_20260901_173153/checkpoints/last.pt
+CVAE_SEED=20260830 \
+CVAE_POSTERIOR_PHASE=fixed \
+CVAE_POSTERIOR_GATE=progression \
+CVAE_POSTERIOR_WARM_START=/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t128_25m_s100000_gprogression_20260901_173153/checkpoints/last.pt \
+CVAE_POSTERIOR_MAX_STEPS=100000 \
+CVAE_POSTERIOR_VALIDATION_INTERVAL=1000 \
+CVAE_POSTERIOR_MOTIONS=4 \
 CVAE_POSTERIOR_WINDOW=128 \
 bash ./cvae_repro.sh posterior-capacity-25m
 
@@ -187,7 +320,25 @@ bash ./cvae_repro.sh posterior-capacity-25m
 CVAE_RUN_DIR=<RUN> bash ./cvae_repro.sh posterior-capacity-plot
 ```
 
-四个训练命令都必须创建新run，不得设置到已存在的`CVAE_RUN_DIR`或覆盖checkpoint；只有`posterior-capacity-plot`例外，它只读取指定run的JSONL并原子改写该run的三个SVG。运行中的目录使用`ls -dt /home/helloworld/bly/runs/cvae_posterior_capacity_* | head -n1`定位，不能依赖latest文件。
+上述训练命令都必须创建新run，不得设置到已存在的`CVAE_RUN_DIR`或覆盖checkpoint；只有`posterior-capacity-plot`例外，它只读取指定run的JSONL并原子改写该run的三个SVG。运行中的目录使用`ls -dt /home/helloworld/bly/runs/cvae_posterior_capacity_* | head -n1`定位，不能依赖latest文件。
+
+```bash
+# F4A：当前唯一下一项；只读重评F4D的同一80窗口×10 fixed Mask
+export CVAE_POSTERIOR_DIAGNOSTIC_CHECKPOINT=/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m4_t128_25m_s100000_gprogression_20260904_190425/checkpoints/best_progression.pt
+unset CVAE_POSTERIOR_DIAGNOSTIC_BATCH_SIZE CVAE_POSTERIOR_DIAGNOSTIC_NUM_WORKERS
+test -f "$CVAE_DATASET_RUN/markers/cvae_overfit_subset.ok"
+test -f "$CVAE_POSTERIOR_DIAGNOSTIC_CHECKPOINT"
+bash ./cvae_repro.sh posterior-capacity-tail-diagnostic
+```
+
+F4A必须创建新的`cvae_posterior_capacity_tail_diagnostic_f4a_*` run；源F4D目录、checkpoint和数据集
+保持只读。`cvae_posterior_capacity_tail_diagnostic.ok`只表示800个fixture的诊断完整、source指标复现
+一致且产物写全，不表示模型通过progression门禁。完成后读取
+`manifests/posterior_tail_diagnostic.json`中的`tail_assessment`再选择唯一下一项。
+
+K0/K1当前没有执行命令。只有L128、F128、R128全部通过并完成本文结果回填后，才允许在Windows
+设计和实现新的KL配置、Python入口、Shell命令及测试；实现完成且Windows轻量验证通过后，再把
+经实际代码确认的Ubuntu命令补入本节。不得提前用现有posterior-capacity入口伪装成KL实验。
 
 ### 4.3 完成后的结果采集
 
@@ -217,15 +368,17 @@ ls -lh "$RUN/checkpoints"
 | W4 | FAIL | `<latest>/cvae_posterior_capacity_fixed_m1_t16_w4_*` | `b3aa63d9514cd8dd284e7f6091fc26877f57f021` | step 39750 / exact 1.6103；progression 1.0 | 1.610e-4 | 1.194e-4 | 6.158e-4 | 100% | 8425.42 | `cvae.failed`（旧exact协议） | exact失败；最近5次均满足新progression gate，不重跑，直接P1 |
 | P1 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_s100000_gprogression_20260901_105145` | 待读取`source_commit.txt` | step 93750 / progression 1.0；exact 22.4268 | 0.002243 | 0.001460 | 0.009938 | 100% | 610.99 | `cvae_posterior_capacity_progression.ok` | 历史6.7M证据；后续由25M快速阶梯接管 |
 | P2 | SUPERSEDED | — | — | — | — | — | — | — | — | — | 由R128在32 motion、T=128上统一完成动态Mask验收 |
-| I25 Windows实现 | READY | N/A | `tiny-model@fa50f444d9a481b0f431edc1b1f974f0998f623a`+工作树 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 25M入口、warm-start、validation loss与SVG已实现；执行S25 |
-| S25 | PENDING | — | — | — | — | — | — | — | — | — | 25M真实HDF5/CUDA工程smoke |
-| L128 | PENDING | — | — | — | — | — | — | — | — | — | 仅S25 PASS后执行 |
-| F128 | PENDING | — | — | — | — | — | — | — | — | — | 仅L128 PASS后扩到32 motion |
-| R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask |
-| C0 | PENDING | — | 尚未实现CVAE最小训练协议 | — | — | — | — | — | — | — | R128通过后实现并smoke |
-| C1 | PENDING | — | — | — | — | — | — | — | — | — | R128后再确定小规模物理Mask CVAE协议 |
-| C2 | PENDING | — | — | — | — | — | — | — | — | — | conditional prior的32-motion扩展 |
-| C3 | PENDING | — | — | — | — | — | — | — | — | — | 长序列扩展 |
+| I25 Windows实现 | PASS | N/A | `tiny-model@fa50f444d9a481b0f431edc1b1f974f0998f623a`+工作树 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | Windows轻量验证及Ubuntu S25工程链路均通过 |
+| S25 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t8_25m_gprogression_20260901_172054` | 待读取`source_commit.txt` | step 2，仅smoke诊断 | 未回传 | 未回传 | 未回传 | 未回传 | 未回传 | `cvae_posterior_capacity_smoke.ok`（由Shell成功返回确认） | 真实HDF5/CUDA、25M参数断言、checkpoint与三张SVG通过；执行L128 |
+| L128 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t128_25m_s100000_gprogression_20260901_173153` | 待读取`source_commit.txt` | step 93500 / progression 1.0；exact 23.0210 | 0.002302 | 0.001533 | 0.009942 | 100% | 469.56 | `cvae_posterior_capacity_progression.ok`（由Shell成功返回确认） | 24窗口、240 fixed fixtures达到推进精度；执行F128 |
+| F128 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m32_t128_25m_s200000_gprogression_20260902_235140` | `6463b2ec960cda22c7ed70814a46a44e6804d4c0` | step 175000 / progression 964.4091 | 0.261443 | 0.273665 | 9.644091 | 99.9958% | 12.059 | `cvae.failed` | 200k末段平台化，直接1→32扩展大幅失败；执行F4D |
+| F4D | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m4_t128_25m_s100000_gprogression_20260904_190425` | `6463b2ec960cda22c7ed70814a46a44e6804d4c0` | step 100000 / progression 21.5620 | 0.023021 | 0.015263 | 0.215620 | 100% | 110.239 | `cvae.failed` | 平均RMSE已过1e-2但worst尾部失败；执行F4A |
+| I-F4A Windows实现 | PASS | N/A | `tiny-model@6463b2ec960cda22c7ed70814a46a44e6804d4c0`+工作树 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 独立只读入口、严格F4D合同、逐fixture/feature/contact产物、SVG及execution-only marker已实现；执行F4A |
+| F4A | READY | — | 读取F4D `best_progression.pt`，不写源run | — | — | — | — | — | — | 执行后才生成诊断marker | 唯一下一项：在Ubuntu定位逐window/feature尾部并自动分类 |
+| R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
+| K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
+| K1 | PENDING | — | 尚未实现；从R128 `last.pt` model-only初始化 | — | — | — | — | — | — | — | 32 motion、T128、beta线性预热与三路径正式对照 |
+| K2 | PENDING | — | 不预先实现 | — | — | — | — | — | — | — | 仅当K1的`kl_assessment`要求调整beta或进入prior物理评测时确定 |
 
 ## 6. 每次实验完成后的强制总结
 
@@ -246,6 +399,17 @@ ls -lh "$RUN/checkpoints"
 - 后续计划：只写一个下一实验 ID；若改变模型/优化，只允许改变一个变量并写明理由
 ```
 
+K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
+
+```markdown
+- R128同bank基线：posterior-mean State/Action RMSE、max abs、contact、zero/swapped ratio
+- Posterior mean：State/Action RMSE、max abs、contact、相对R128退化比例
+- Posterior sample（8次）：mean/std/p50/p95/worst/best-of-8、`R_sample`
+- Conditional prior sample（8次）：mean/std/p50/p95/worst/best-of-8、`R_prior`
+- 分布诊断：raw/weighted KL、beta、posterior/prior平均std、logvar范围、latent依赖
+- KL判断：`kl_assessment`、触发的明确判据和唯一下一步
+```
+
 结果更新规则：
 
 1. `RUNNING` 时只记录 run_dir、PID/进程状态和最后 step，不提前写质量结论。
@@ -253,6 +417,47 @@ ls -lh "$RUN/checkpoints"
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-05 — I-F4A Windows实现 PASS
+
+- 范围：只新增F4A只读诊断，不修改`PhysicsPosteriorTransformer`、训练损失、Mask生成、checkpoint内容、R128或KL接口。
+- 合同：入口只接受4 motion、T=128、25,453,411参数、fixed/progression、KL=0、seed 20260830且源run失败的`best_progression.pt`；同时严格校验dataset hash、80个window身份、800个fixture、10类Mask和F4D summary。
+- 产物：逐fixture JSONL、逐window聚合JSONL、97个continuous feature聚合JSONL、contact错误JSONL、最差20个fixture/window/feature、分位数与超阈值集中度、`posterior_tail_diagnostic.svg`以及总manifest；新run的`checkpoints/`保持为空。
+- 复现门禁：诊断所得worst State/Action RMSE、max abs、contact、全局State/Action MSE必须与F4D summary匹配，否则失败且不生成marker；marker仅表示诊断执行完整，不代表模型质量PASS。
+- 轻量验证：F4A与posterior相关组合测试19项全部通过；完整Windows discovery共72项，其中69项通过，3项仅因既有Windows Python缺少`h5py`而导入失败；Python compile、CLI help、Shell语法均通过，未安装或修改依赖。
+- 后续计划：唯一下一项是在Ubuntu执行F4A并回传`posterior_tail_diagnostic.json`；根据`tail_objective_mismatch`、`broad_reconstruction_failure`与`global_latent_bottleneck_suspected`的实际分类，再决定下一次只改变一个因素的实验。
+
+### 2026-09-05 — F4D FAIL
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m4_t128_25m_s100000_gprogression_20260904_190425`；source HEAD为`6463b2ec960cda22c7ed70814a46a44e6804d4c0`，exit code 1，marker为`cvae.failed`。
+- 初始化：严格从L128 step 94,000的`last.pt` model-only warm-start；source为1 motion、T=128 fixed，checkpoint SHA256为`35830ba06097b0f85c40b36c63c8b6287369c839ab688d05a96410c2c9d0d673`；optimizer、scheduler和RNG均未恢复。
+- 配置与执行：4 motion、T=128、80个window、800个fixed fixtures、25,453,411参数、KL为0；跑满100,000 step，约见到6,400,000个fixture samples和8,000个fixture epoch。最佳点就是step 100,000；保存291MB `best_progression.pt`与291MB `last.pt`。
+- 最佳结果：progression score 21.5620；worst State/Action RMSE为0.023021/0.015263，max abs为0.215620，contact 100%；zero/swapped latent ratio为110.24/38.59。全局masked-element State/Action MSE为8.370e-5/6.590e-5，对应聚合RMSE约0.00915/0.00812，二者已经低于`1e-2`。
+- 分层结果：`full_both`最差，State/Action RMSE为0.02302/0.01526、max abs 0.21562；`full_state` State RMSE为0.01134；其余8类Mask的worst RMSE均不高于`1e-2`或仅接近阈值，但所有Mask的worst max abs仍高于`1e-2`。这说明RMSE失败集中于稠密遮挡，而max-abs失败遍布稀少尾部。
+- 趋势与结论：step 91,000至100,000的score由24.03单调降至21.56，State/Action RMSE由0.02563/0.01615降至0.02302/0.01526；尚在缓慢改善，但距离max-abs门禁仍有21.6倍。latent依赖强，不能仅凭本run认定global latent失效；训练的全局平均MSE与验收的worst-window/max-element指标明显错位，直接续训或扩模型都不是信息量最高的动作。
+- 后续计划：唯一下一项为F4A只读尾部诊断。固定读取F4D `best_progression.pt`，输出逐fixture/feature分位数、最大误差身份和超阈值集中度；完成前不启动新训练、不修改门禁、不执行R128或KL。
+
+### 2026-09-04 — F128 FAIL
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m32_t128_25m_s200000_gprogression_20260902_235140`；source HEAD为`6463b2ec960cda22c7ed70814a46a44e6804d4c0`，exit code 1，只有`cvae.failed`。
+- 配置：32 motion、256 episodes、T=128、816个固定window、8,160个fixed fixtures、25,453,411参数、KL为0；summary摘录未包含`initialization`字段，启动F4D前仍须从完整summary确认本run确由L128 `last.pt` model-only初始化。
+- 执行：跑满200,000 optimizer step，按effective batch 64共见到12,800,000个fixture samples，约1,568.6个fixture epoch；保存291MB `best_progression.pt`与291MB `last.pt`。最佳活动score在step 175,000，训练没有提前停止。
+- 最佳结果：progression score 964.4091；worst State/Action RMSE为0.261443/0.273665，max abs为9.644091，contact为99.9958%；correct/zero/swapped latent RMSE的比值为1/12.059/7.905。全局masked-element reconstruction total/state/action/contact为0.003114/0.006388/0.002829/0.0001267。
+- 分层结果：`full_both`最差，State/Action RMSE为0.2614/0.2737、max abs 9.6441；`full_state`与`state_time_50`的max abs仍为1.9893/1.8989；即使较容易的`action_time_50`，Action RMSE与max abs也为0.04278/0.2790。失败不是单一Mask或单个contact项造成。
+- 趋势：177,500至200,000 step的State/Action RMSE约稳定在0.239–0.260，max abs约9.72–11.52；最后step score 981.97。末段没有向门禁数量级收敛，不能用直接延长同一cosine schedule解释为“差一点”。
+- 事实结论：当前25M模型、平均masked reconstruction目标和直接1→32 motion warm-start，在200k预算下不能完成32-motion fixed记忆；zero-latent ratio刚通过说明latent被使用，但swapped ratio仅7.91且full-both灾难性失败，提示global latent区分/解码多窗口是核心嫌疑。部分Mask也明显失败，因此尚不能把问题仅归因于无可见条件的full-both；本run也不能单独证明25M参数容量在理论上不足。
+- 后续计划：唯一下一项为F4D——保持代码、25M模型、T=128、10类fixed Mask、seed和progression门禁不变，从L128 `last.pt`扩到4 motion，100k上限、每1,000 step验收。F4D PASS才允许用其`last.pt`重跑F128；FAIL则停止训练并审计目标聚合与latent通道。R128和KL继续冻结。
+
+### 2026-09-02 — L128 PASS
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t128_25m_s100000_gprogression_20260901_173153`。
+- 代码：run的`source_commit.txt`与`source_status.txt`尚未回传，本记录不从Windows工作树反推Ubuntu HEAD。
+- 配置：1 motion、8 variants、T=128、全部24个固定window、240个fixed fixtures、seed 20260830、25,453,411参数；random init、posterior mean、KL/dropout为0。
+- 执行：上限100,000 step，实际在94,000 step因连续3次progression PASS提前停止；按effective batch 64计约见到6,016,000个fixture samples，约25,067个fixture epoch。`best_progression.pt`选择step 93,500；Shell打印PASS与run路径并返回提示符，因此按入口合同确认progression marker检查通过。
+- 最佳结果：progression score 1.0；worst State/Action RMSE为0.00230210/0.00153279，max abs 0.009941995，contact 100%；correct/zero/swapped latent RMSE为0.00182971/0.859160/0.152794，zero/swapped ratio为469.56/83.51。完整评测reconstruction total/state/action/contact为1.339e-6/2.758e-6/1.199e-6/5.906e-8。
+- 分层结果：`full_both`同时给出最差State RMSE、Action RMSE和max abs；`element_both_50`次之。其余element/time/feature/semantic Mask均处于同一可推进量级，10类fixture全部通过progression。
+- 事实结论：25M模型能够在单motion、128-transition长窗口上记忆全部训练window和10类固定Mask，并强依赖posterior latent；exact score仍为23.0210，不能称为完美或数值无损，也没有验证新Mask、conditional prior或未见motion泛化。
+- 后续计划：唯一下一项为F128。只加载本run的step 94,000 `last.pt`模型参数，重置optimizer、scheduler和RNG，直接扩到32 motion、T=128；R128通过前继续保持KL接口未实现。
 
 ### 2026-09-01 — I25 Windows入口 READY
 
@@ -264,6 +469,16 @@ ls -lh "$RUN/checkpoints"
 - Windows验证：35项posterior/model/isolation关键组合测试通过；全发现共65项通过，另3个既有模块仅因Windows缺`h5py`导入失败；32份config JSON、Python compile、Shell语法和`git diff --check`通过。
 - 事实边界：只证明代码入口和轻量逻辑一致，尚未证明真实HDF5、CUDA显存、训练速度、loss收敛或任何质量门禁。
 - 后续计划：唯一下一项为S25；只有其工程marker与25,453,411参数断言、三张SVG都存在后才执行L128。
+
+### 2026-09-01 17:20 — S25 PASS
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t8_25m_gprogression_20260901_172054`。
+- 代码：run的`source_commit.txt`与`source_status.txt`尚未回传；不得从Windows工作树反推Ubuntu HEAD。
+- 配置：1 motion、T=8、25,453,411参数、fixed、progression、posterior mean、KL/dropout为0；smoke固定2 optimizer step。
+- 执行：Python打印完整summary及run路径后返回Shell提示符；依据Shell合同，这同时确认`cvae_posterior_capacity_smoke.ok`存在。`best_progression.pt`与三张SVG路径均已写入summary。
+- 结果：本次未回传State/Action RMSE、max abs、contact及latent ratio；smoke无论质量指标如何都只作工程诊断，不补写或猜测数值。
+- 事实结论：Ubuntu真实HDF5/CUDA、25M参数范围断言、forward/backward、完整fixture evaluator、checkpoint、summary和SVG链路可执行；不证明任何拟合或门禁质量。
+- 后续计划：唯一下一项为L128，从随机初始化训练1 motion、T=128，100k上限、每250 step完整progression验收。
 
 ### 2026-09-01 — Progression gate Windows入口 READY
 

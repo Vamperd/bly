@@ -347,6 +347,38 @@ posterior_capacity_plot() {
   "$PYTHON" -m cvae_sa.posterior_capacity_plot --run-dir "$run_dir"
 }
 
+posterior_capacity_tail_diagnostic() {
+  local dataset_run="${CVAE_DATASET_RUN:-}"
+  local checkpoint="${CVAE_POSTERIOR_DIAGNOSTIC_CHECKPOINT:-}"
+  local batch_size="${CVAE_POSTERIOR_DIAGNOSTIC_BATCH_SIZE:-4}"
+  local num_workers="${CVAE_POSTERIOR_DIAGNOSTIC_NUM_WORKERS:-4}"
+  local run_dir marker="cvae_posterior_capacity_tail_diagnostic.ok"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  [[ -n "$checkpoint" ]] || die "CVAE_POSTERIOR_DIAGNOSTIC_CHECKPOINT is required"
+  [[ -f "$checkpoint" ]] || die "F4A checkpoint is missing: $checkpoint"
+  [[ "$(basename -- "$checkpoint")" == "best_progression.pt" ]] \
+    || die "F4A requires the failed F4D best_progression.pt"
+  [[ "$batch_size" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_DIAGNOSTIC_BATCH_SIZE must be a positive integer"
+  [[ "$num_workers" =~ ^[0-9]+$ ]] \
+    || die "CVAE_POSTERIOR_DIAGNOSTIC_NUM_WORKERS must be a non-negative integer"
+  run_dir="$(new_run_dir cvae_posterior_capacity_tail_diagnostic_f4a)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" posterior_capacity_tail_diagnostic.log \
+    "$PYTHON" -m cvae_sa.posterior_capacity_tail \
+      --dataset-run "$dataset_run" \
+      --checkpoint "$checkpoint" \
+      --output-run "$run_dir" \
+      --batch-size "$batch_size" \
+      --num-workers "$num_workers"
+  [[ -f "$run_dir/markers/$marker" ]] \
+    || die "F4A execution marker is missing: $marker"
+  update_latest posterior_capacity_tail_diagnostic "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 overfit_single_task() {
   local dataset_run="${CVAE_DATASET_RUN:-}" task="${CVAE_OVERFIT_TASK:-}"
   local seed="${CVAE_SEED:-20260828}" profile="${CVAE_OVERFIT_MODEL:-compact}"
@@ -723,6 +755,7 @@ case "${1:-}" in
   posterior-capacity-25m-smoke) posterior_capacity true "$SCRIPT_DIR/configs/posterior_capacity_reference_25m.json" 25m ;;
   posterior-capacity-25m) posterior_capacity false "$SCRIPT_DIR/configs/posterior_capacity_reference_25m.json" 25m ;;
   posterior-capacity-plot) posterior_capacity_plot ;;
+  posterior-capacity-tail-diagnostic) posterior_capacity_tail_diagnostic ;;
   analyze-overfit) analyze_overfit ;;
   diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
@@ -733,5 +766,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac
