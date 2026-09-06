@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：F4B-v2正式比较run已execution PASS并输出`IMPLEMENT_F4C`；A/B全部配对检查成立，`R_p=1.11982`、`R_a=0.95902`，B不值得复核。F4C现已按触发合同在Windows实现：只增加8×384个零初始化decoder逐层latent gate，总参数25,456,483，C使用A原损失；旧权重只允许缺失这8个gate。相关42项测试通过，真实Ubuntu尚未运行。当前唯一下一步是提交/同步本次Windows修改后，仅执行C的2-step smoke；smoke回填前不得启动C正式10k、第二seed、R128或KL。
+当前阶段：F4B-v2正式比较run已execution PASS并输出`IMPLEMENT_F4C`；A/B全部配对检查成立，`R_p=1.11982`、`R_a=0.95902`，B不值得复核。F4C现已按触发合同在Windows实现并提交为`c965487a5291ada3919db74b017900a3a04eb6ab`：只增加8×384个零初始化decoder逐层latent gate，总参数25,456,483，C使用A原损失；旧权重只允许缺失这8个gate。相关42项测试通过，真实Ubuntu尚未运行。当前唯一下一步是同步该实现后，仅执行C的2-step smoke；smoke回填前不得启动C正式10k、第二seed、R128或KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -538,8 +538,8 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4B-v2 A正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | step 10000 / progression score 13.7220 | 0.015999 worst / 0.008425 global | 0.014238 worst / 0.007545 global | 0.137220 | 100% | 122.437 | `cvae_posterior_ab_execution.ok` + `cvae.failed` | 8k/9k/10k均FAIL；18.456%元素及800/800 fixtures仍超阈值；执行B正式10k |
 | F4B-v2 B正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_20260906_203844` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | step 10000 / progression score 13.0564 | 0.016398 worst / 0.008444 global | 0.014550 worst / 0.007629 global | 0.130564 | 100% | 120.443 | `cvae_posterior_ab_execution.ok` + `cvae.failed` | 8k/9k/10k均FAIL；20.718%元素仍超阈值；身份完全配对，运行比较器 |
 | F4B-v2 A/B比较 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | `IMPLEMENT_F4C` | — | — | `R_p=1.11982` / `R_a=0.95902` | guards PASS | — | `cvae_posterior_ab_comparison.ok` | 13项配对检查全PASS；B不满足progression/50%规则，授权实现C |
-| I-F4C Windows实现 | READY | N/A | `tiny-model@c1ae5f79111bf61ddace32073df8122dbbefec95`+工作树 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 8层零初始化gate、触发授权、严格迁移、诊断与比较兼容已实现；执行C smoke |
-| F4C smoke | PENDING | — | 等待同步Windows实现 | — | — | — | — | — | — | — | 2-step只验证真实工程链路、step0等价及gate更新 |
+| I-F4C Windows实现 | READY | N/A | `c965487a5291ada3919db74b017900a3a04eb6ab` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 8层零初始化gate、触发授权、严格迁移、诊断与比较兼容已实现并提交；执行C smoke |
+| F4C smoke | PENDING | — | 等待同步`c965487a5291ada3919db74b017900a3a04eb6ab`或后续仅含台账的提交 | — | — | — | — | — | — | — | 2-step只验证真实工程链路、step0等价及gate更新 |
 | F4C正式 | PENDING | — | 仅C smoke回填通过后运行 | — | — | — | — | — | — | — | A原损失与逐层latent门控，10k；随后A/B/C比较 |
 | F4R | PENDING | — | 等待A/B及可选C结论 | — | — | — | — | — | — | — | fixture seed不变，优化seed改20260831；A单独10k或配对20k |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
@@ -592,7 +592,8 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 - 迁移与训练：C继续使用A原始MSE/BCE，从F4D `best_progression.pt` model-only初始化；加载仅允许缺失精确的8个gate key且验证全零，任何其他missing/unexpected key失败。每步记录逐层gate范数、max abs、裁剪前梯度和更新后非零数；评测、summary与checkpoint记录结构及触发来源。
 - 防护：C只接受optimizer seed 20260830和有效的`IMPLEMENT_F4C`初始比较；触发参数传给A/B会拒绝。保存checkpoint回读验证8个gate key、shape、有限性、结构开关和25,456,483参数；A/C比较额外验证C结构与触发记录。
 - Windows验证：posterior/model/tail/plot/AB组合42项通过，涵盖零gate输出逐位一致、有效token限定、真值隔离、gate梯度/更新、严格迁移、checkpoint gate读回、触发哈希及比较分支；参数断言A/B 25,453,411、C 25,456,483，compile、CLI、Shell语法和diff check通过。完整发现运行95项，只有3个既有模块因Windows缺`h5py`导入失败。
-- 边界与唯一下一步：尚未在真实HDF5/CUDA运行C，不能声称step0复现或结构有效。先提交/同步Windows修改，再只执行C 2-step smoke并回填；不得直接启动正式C。
+- 实现提交：`c965487a5291ada3919db74b017900a3a04eb6ab`。
+- 边界与唯一下一步：尚未在真实HDF5/CUDA运行C，不能声称step0复现或结构有效。同步该实现后只执行C 2-step smoke并回填；不得直接启动正式C。
 
 ### 2026-09-07 — F4B-v2 A/B正式比较 PASS（execution）
 

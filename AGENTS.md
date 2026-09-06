@@ -582,7 +582,7 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. A/B比较已触发`IMPLEMENT_F4C`，F4C Windows实现已READY；按[Next.md](Next.md)提交/同步后只运行
+1. A/B比较已触发`IMPLEMENT_F4C`，F4C Windows实现已提交为`c965487a5291ada3919db74b017900a3a04eb6ab`；按[Next.md](Next.md)同步后只运行
    C 2-step smoke，回填通过后才执行C正式10k及A/B/C比较，随后按规则决定是否做优化seed复核；
    不直接续训或扩大模型，不提前实现C。fixture seed必须独立于优化seed，旧F4B提案不再执行。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后

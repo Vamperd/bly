@@ -2,7 +2,7 @@
 
 最后更新：2026-09-07
 
-状态：F4B-v2 A/B入口、Ubuntu工程smoke、两支正式10k及比较均已完成；比较manifest已输出`IMPLEMENT_F4C`。F4C现已在Windows实现并通过轻量验证，Ubuntu C smoke仍PENDING。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账；本文件定义当前下一步的详细合同。实施前同时阅读[AGENTS.md](AGENTS.md)。
+状态：F4B-v2 A/B入口、Ubuntu工程smoke、两支正式10k及比较均已完成；比较manifest已输出`IMPLEMENT_F4C`。F4C已在Windows实现、通过轻量验证并提交为`c965487a5291ada3919db74b017900a3a04eb6ab`，Ubuntu C smoke仍PENDING。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账；本文件定义当前下一步的详细合同。实施前同时阅读[AGENTS.md](AGENTS.md)。
 
 ## 1. 目标、证据边界与固定输入
 
