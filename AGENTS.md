@@ -254,7 +254,7 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 最简 posterior Transformer capacity：历史P1通过，25M快速阶梯待运行
+### 6.4 最简 posterior Transformer capacity：F4B-v2 A/B已实现、待Ubuntu执行
 
 新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
 使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
@@ -370,11 +370,41 @@ max abs 9.644091、contact 99.9958%、zero/swapped ratio 12.059/7.905，末段�
 元素聚合的State/Action RMSE约为0.00915/0.00812，表明平均训练目标已低于`1e-2`，但worst-window
 与max-element尾部仍失败，不能据此直接认定global latent失效。
 
-F4A只读尾部诊断现已在Windows实现：`posterior_capacity_tail.py`与Shell命令
-`posterior-capacity-tail-diagnostic`严格读取F4D `best_progression.pt`和相同80×10 fixtures，输出
-逐fixture、97个continuous feature、contact、最差20项、分位数/超阈值集中度及log10 SVG，并复现
-F4D summary后才生成execution-only marker `cvae_posterior_capacity_tail_diagnostic.ok`。它不训练、
-不写源run/checkpoint，也不表示质量PASS。当前唯一下一步是在Ubuntu执行F4A；R128与KL接口继续冻结。
+F4A只读尾部诊断已在Ubuntu独立run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_tail_diagnostic_f4a_20260905_200807`完整执行，源码为
+`2ff1ec95db72fed9db80d3b040cccc32b3f9703f`，正式execution-only marker为
+`cvae_posterior_capacity_tail_diagnostic.ok`。manifest `execution_pass=true`且F4D的step、800 fixtures、worst State/Action RMSE、max abs、contact和
+global RMSE全部精确复现。全局State/Action/combined RMSE为0.009149/0.008118/0.008854，但
+3,775,101个continuous targets中有795,690个（21.077%）超过`1e-2`，且800/800 fixtures均有max
+超阈值。分类为`mixed_tail_and_reconstruction_failure`：partial p95通过、p50/p90无broad failure，
+但尾部不集中；`full_both`与partial p95比为1.851，未触发3倍global-latent瓶颈判据。
+
+最差5个window中4个来自`big_heavy_one_hand_front_low_to_front_medium_R_001__A526`的variants 4/6/7；
+最差5个feature全部是joint velocity，元素超阈值比例约26.6%–30.0%。这支持下一轮检查速度峰值衰减
+和时间偏移，尚不能直接确认系统性平滑机制；`full_both/partial<3`也不能排除global latent问题。
+
+2026-09-05源码审计发现，posterior evaluator的swapped-latent直接翻转验证micro-batch。T128的
+batch=4、每窗口连续10类Mask时，full-both donor实际来自同窗口另一种Mask（slot 1或5）。全部
+历史swapped数值保留，但不能据此判断跨窗口区分能力；zero-latent门禁不变。下一轮新增全体80窗口
+在相同full-both Mask下的真正跨窗口/跨motion置换，记录donor身份；不覆盖旧诊断。
+
+F4B-v2 A/B已在Windows独立模块`posterior_capacity_ab.py`实现，固定配置为
+`posterior_capacity_ab.json`，Shell入口为`posterior-capacity-ab-smoke`、`posterior-capacity-ab`和
+`posterior-capacity-ab-compare`。旧F4B加法CVaR/各25k提案保持SUPERSEDED、未运行。A/B均从F4D同一
+`best_progression.pt`起点各10k：A调用原损失；B连续域使用归一化的
+`0.5×MSE+0.5×top-20% squared-error mean`，保留原masked元素数聚合及contact外层等权。
+
+fixture seed固定20260830，优化seed首轮20260830、复核20260831；每支更新前严格复现F4D的80窗口、
+800 fixtures与源指标，并记录逐step采样SHA256、原/实际loss、97连续feature、contact、5个固定速度
+曲线及真正的cross-window/cross-motion latent donor。正式run的execution marker与progression质量
+marker分离；质量失败仍保留execution marker和`QUALITY_FAIL`。比较器只用8k/9k/10k配对结果及
+逐点保护条件输出唯一下一步。Windows相关组合37项测试通过；全发现中除3个既有模块仅因Windows
+未安装`h5py`导入失败外，其余均通过。25,453,411参数检查、compile、CLI help、Shell语法及diff check
+已通过；真实HDF5/CUDA仍待Ubuntu smoke，不得写成实验PASS。
+
+F4C结构仍未实现，A/B训练入口会明确拒绝C；只有比较manifest输出`IMPLEMENT_F4C`时才允许新增3072个
+零初始化逐层latent gate。完整命令和回填合同见[Next.md](Next.md)与[plan.md](plan.md)。当前唯一
+下一步为串行执行A smoke、B smoke并回填工程结果；R128与KL继续冻结。
 
 ### 6.5 已完成 parent 训练
 
@@ -513,23 +543,25 @@ bash ./cvae_repro.sh validate-state-mask-video
 | Posterior exact fixed/generalization | `cvae_posterior_capacity.ok` / `cvae_posterior_mask_generalization.ok` |
 | Posterior progression fixed/generalization | `cvae_posterior_capacity_progression.ok` / `cvae_posterior_mask_generalization_progression.ok` |
 | F4A posterior尾部诊断 | `cvae_posterior_capacity_tail_diagnostic.ok`（仅表示只读诊断完整且复现源指标） |
+| F4B-v2工程smoke | `cvae_posterior_ab_smoke.ok`（仅表示step0、2步训练、评测与checkpoint读回完整） |
+| F4B-v2正式执行 | `cvae_posterior_ab_execution.ok`（仅表示10k与全部诊断完整；不表示质量通过） |
+| F4B-v2配对比较 | `cvae_posterior_ab_comparison.ok`（仅表示身份一致且决策完整） |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. 只执行F4A：在Ubuntu固定环境只读加载F4D `best_progression.pt`，复现相同80个window×10类fixed
-   Mask并回传tail manifest；不得续训、改门禁、改loss或修改源run。
-2. 根据F4A自动分类只选择一个后续实验：尾部集中则比较per-window均衡/尾部惩罚；分布性失败则
-   审计优化与表示容量；`full_both`显著独立恶化时才进一步检验single-global-latent瓶颈。
-3. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
+1. 按[Next.md](Next.md)串行执行F4B-v2 A smoke、B smoke并先回填工程结果，再执行正式A/B各10k和
+   显式路径比较。收益不足才实现F4C小结构对照，最后按规则做优化seed复核，正式预算总计不超过50k；
+   不直接续训或扩大模型，不提前实现C。fixture seed必须独立于优化seed，旧F4B提案不再执行。
+2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
-4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
+3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
-5. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
+4. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
    LeanSplit v1；inverse 使用 reference-conditioned deterministic 指标和概率覆盖率双报告。
-6. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
+5. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
    motion ID、package/outcome、未来真实 State、真实随机 delay draw 和 oracle dynamics context
    不得进入部署模型；oracle 结果只能明确标注为上限实验。
 

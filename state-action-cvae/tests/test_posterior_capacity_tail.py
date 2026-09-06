@@ -20,6 +20,7 @@ from cvae_sa.posterior_capacity_tail import (
     evaluate_tail,
     state_feature_labels,
     validate_f4a_checkpoint,
+    validate_output_isolation,
     validate_source_reproduction,
     write_tail_artifacts,
 )
@@ -111,6 +112,20 @@ class PosteriorCapacityTailTest(unittest.TestCase):
             validate_f4a_checkpoint(altered, "dataset-hash")
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
             validate_f4a_checkpoint(checkpoint, "other-hash")
+
+    def test_output_run_cannot_modify_dataset_or_source_run(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as directory:
+            root = Path(directory).resolve()
+            dataset = root / "dataset"
+            source = root / "source"
+            checkpoint = source / "checkpoints/best_progression.pt"
+            isolated = root / "new-f4a-run"
+            self.assertEqual(
+                validate_output_isolation(dataset, checkpoint, isolated), source
+            )
+            for forbidden in (dataset, dataset / "child", source, source / "child"):
+                with self.assertRaisesRegex(ValueError, "isolated"):
+                    validate_output_isolation(dataset, checkpoint, forbidden)
 
     def test_tail_classifier_distinguishes_tail_from_broad_failure(self) -> None:
         summaries = {name: _mask_summary(0.005) for name in FIXED_MASK_NAMES}

@@ -819,6 +819,22 @@ def write_tail_artifacts(result: dict[str, Any], output_run: Path) -> dict[str, 
     return result["artifacts"]
 
 
+def validate_output_isolation(
+    dataset_run: Path, checkpoint_path: Path, output_run: Path
+) -> Path:
+    dataset_run = dataset_run.expanduser().resolve()
+    checkpoint_path = checkpoint_path.expanduser().resolve()
+    output_run = output_run.expanduser().resolve()
+    source_run = checkpoint_path.parent.parent
+    protected_roots = {dataset_run, source_run}
+    for protected in protected_roots:
+        if output_run == protected or output_run.is_relative_to(protected):
+            raise ValueError(
+                f"F4A output run must be isolated from protected source: {protected}"
+            )
+    return source_run
+
+
 def run_tail_diagnostic(
     dataset_run: Path,
     checkpoint_path: Path,
@@ -832,13 +848,13 @@ def run_tail_diagnostic(
     dataset_run = dataset_run.expanduser().resolve()
     checkpoint_path = checkpoint_path.expanduser().resolve()
     output_run = output_run.expanduser().resolve()
+    source_run = validate_output_isolation(dataset_run, checkpoint_path, output_run)
     if not (dataset_run / "markers/cvae_overfit_subset.ok").is_file():
         raise FileNotFoundError("F4A requires the dedicated overfit subset marker")
     if checkpoint_path.name != "best_progression.pt":
         raise ValueError("F4A must read the F4D best_progression.pt checkpoint")
     if not checkpoint_path.is_file():
         raise FileNotFoundError(checkpoint_path)
-    source_run = checkpoint_path.parent.parent
     source_summary_path = source_run / "manifests/posterior_capacity_summary.json"
     if not source_summary_path.is_file():
         raise FileNotFoundError("F4A source posterior-capacity summary is missing")

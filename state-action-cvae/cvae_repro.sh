@@ -379,6 +379,89 @@ posterior_capacity_tail_diagnostic() {
   printf '%s\n' "$run_dir"
 }
 
+posterior_capacity_ab() {
+  local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
+  local source_checkpoint="${CVAE_POSTERIOR_AB_SOURCE_CHECKPOINT:-}"
+  local f4a_run="${CVAE_POSTERIOR_F4A_RUN:-}"
+  local arm="${CVAE_POSTERIOR_AB_ARM:-}" optimizer_seed="${CVAE_POSTERIOR_OPTIMIZER_SEED:-20260830}"
+  local config="$SCRIPT_DIR/configs/posterior_capacity_ab.json" prefix run_dir marker
+  [[ -z "${CVAE_CONFIG:-}" ]] \
+    || die "posterior-capacity-ab uses its fixed config; unset CVAE_CONFIG"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  [[ "$arm" == "A" || "$arm" == "B" ]] \
+    || die "CVAE_POSTERIOR_AB_ARM must be A or B; C is disabled until the comparison manifest triggers F4C"
+  [[ "$optimizer_seed" =~ ^[0-9]+$ ]] \
+    || die "CVAE_POSTERIOR_OPTIMIZER_SEED must be a non-negative integer"
+  [[ -n "$source_checkpoint" ]] \
+    || die "CVAE_POSTERIOR_AB_SOURCE_CHECKPOINT is required"
+  [[ -f "$source_checkpoint" ]] || die "F4D source checkpoint is missing: $source_checkpoint"
+  [[ "$(basename -- "$source_checkpoint")" == "best_progression.pt" ]] \
+    || die "F4B-v2 requires the F4D best_progression.pt"
+  [[ -n "$f4a_run" ]] || die "CVAE_POSTERIOR_F4A_RUN is required"
+  [[ -f "$f4a_run/markers/cvae_posterior_capacity_tail_diagnostic.ok" ]] \
+    || die "formal F4A execution marker is missing: $f4a_run"
+  SEED="$optimizer_seed"
+  prefix="cvae_posterior_capacity_ab_${arm,,}_seed${optimizer_seed}"
+  [[ "$smoke" == "true" ]] && prefix="${prefix}_smoke"
+  run_dir="$(new_run_dir "$prefix")"
+  capture_environment "$run_dir"
+  local extra_args=()
+  [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
+  run_logged "$run_dir" posterior_capacity_ab.log \
+    "$PYTHON" -m cvae_sa.posterior_capacity_ab train \
+      --dataset-run "$dataset_run" \
+      --source-checkpoint "$source_checkpoint" \
+      --f4a-run "$f4a_run" \
+      --output-run "$run_dir" \
+      --config "$config" \
+      --arm "$arm" \
+      --optimizer-seed "$optimizer_seed" \
+      "${extra_args[@]}"
+  marker="cvae_posterior_ab_execution.ok"
+  [[ "$smoke" == "true" ]] && marker="cvae_posterior_ab_smoke.ok"
+  [[ -f "$run_dir/markers/$marker" ]] \
+    || die "F4B-v2 execution marker is missing: $marker"
+  local latest_key="posterior_ab_${arm,,}_seed${optimizer_seed}"
+  [[ "$smoke" == "true" ]] && latest_key="${latest_key}_smoke"
+  update_latest "$latest_key" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+posterior_capacity_ab_compare() {
+  local run_a="${CVAE_POSTERIOR_AB_RUN_A:-}" run_b="${CVAE_POSTERIOR_AB_RUN_B:-}"
+  local run_c="${CVAE_POSTERIOR_AB_RUN_C:-}"
+  local initial_comparison="${CVAE_POSTERIOR_AB_INITIAL_COMPARISON:-}" run_dir
+  [[ -n "$run_a" ]] || die "CVAE_POSTERIOR_AB_RUN_A is required"
+  [[ -f "$run_a/manifests/posterior_ab_summary.json" ]] \
+    || die "arm A summary is missing: $run_a"
+  [[ -n "$initial_comparison" || -n "$run_b" ]] \
+    || die "initial comparison requires CVAE_POSTERIOR_AB_RUN_B"
+  [[ -z "$run_b" || -f "$run_b/manifests/posterior_ab_summary.json" ]] \
+    || die "arm B summary is missing: $run_b"
+  [[ -z "$run_c" || -f "$run_c/manifests/posterior_ab_summary.json" ]] \
+    || die "arm C summary is missing: $run_c"
+  [[ -z "$initial_comparison" || -f "$initial_comparison/markers/cvae_posterior_ab_comparison.ok" ]] \
+    || die "initial comparison marker is missing: $initial_comparison"
+  run_dir="$(new_run_dir cvae_posterior_capacity_ab_comparison)"
+  capture_environment "$run_dir"
+  local extra_args=()
+  [[ -n "$run_b" ]] && extra_args+=(--run-b "$run_b")
+  [[ -n "$run_c" ]] && extra_args+=(--run-c "$run_c")
+  [[ -n "$initial_comparison" ]] \
+    && extra_args+=(--initial-comparison-run "$initial_comparison")
+  run_logged "$run_dir" posterior_capacity_ab_compare.log \
+    "$PYTHON" -m cvae_sa.posterior_capacity_ab compare \
+      --output-run "$run_dir" \
+      --run-a "$run_a" \
+      "${extra_args[@]}"
+  [[ -f "$run_dir/markers/cvae_posterior_ab_comparison.ok" ]] \
+    || die "F4B-v2 comparison marker is missing"
+  update_latest posterior_ab_comparison "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 overfit_single_task() {
   local dataset_run="${CVAE_DATASET_RUN:-}" task="${CVAE_OVERFIT_TASK:-}"
   local seed="${CVAE_SEED:-20260828}" profile="${CVAE_OVERFIT_MODEL:-compact}"
@@ -756,6 +839,9 @@ case "${1:-}" in
   posterior-capacity-25m) posterior_capacity false "$SCRIPT_DIR/configs/posterior_capacity_reference_25m.json" 25m ;;
   posterior-capacity-plot) posterior_capacity_plot ;;
   posterior-capacity-tail-diagnostic) posterior_capacity_tail_diagnostic ;;
+  posterior-capacity-ab-smoke) posterior_capacity_ab true ;;
+  posterior-capacity-ab) posterior_capacity_ab false ;;
+  posterior-capacity-ab-compare) posterior_capacity_ab_compare ;;
   analyze-overfit) analyze_overfit ;;
   diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
@@ -766,5 +852,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac
