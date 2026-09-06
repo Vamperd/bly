@@ -2,7 +2,7 @@
 
 最后更新：2026-09-07
 
-状态：F4B-v2 A/B入口、Ubuntu工程smoke、两支正式10k及比较均已完成；比较manifest已输出`IMPLEMENT_F4C`。F4C已在Windows实现、通过轻量验证并提交为`c965487a5291ada3919db74b017900a3a04eb6ab`，Ubuntu C smoke仍PENDING。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账；本文件定义当前下一步的详细合同。实施前同时阅读[AGENTS.md](AGENTS.md)。
+状态：F4B-v2 A/B、正式比较及F4C Ubuntu smoke均已完成；C的触发重验、step0等价、3,072个gate梯度/更新和checkpoint读回全部通过。当前唯一下一步是从原F4D源独立运行C正式10k。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账；本文件定义当前下一步的详细合同。实施前同时阅读[AGENTS.md](AGENTS.md)。
 
 ## 1. 目标、证据边界与固定输入
 
@@ -259,15 +259,15 @@ bash ./cvae_repro.sh posterior-capacity-ab-compare
 
 比较器只接受相同optimizer seed的正式run。若decision为`REPLICATE_A_ONLY`或`REPLICATE_A_AND_B`，把optimizer seed改为20260831并只运行`replication_arms`列出的分支；完成后将首次比较run设为`CVAE_POSTERIOR_AB_INITIAL_COMPARISON`，把第二seed run重新设为`RUN_A/RUN_B`后再次调用同一比较入口。A-only复核必须unset B/C；A/B复核必须提供两支。复核比较器只在所选分支最后三次通过正式门禁时输出`NEW_32_MOTION_FIXED_RUN`。若首次decision为`IMPLEMENT_F4C`，停止Ubuntu训练并回到Windows实现C；若为`STOP_LOSS_LATENT_SEED_SEARCH`，停止本路线。不能人工跳过manifest决策。
 
-比较run `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429`已合法输出`IMPLEMENT_F4C`并回填plan.md。同步Windows实现后，当前只运行C smoke：
+比较run `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429`已合法输出`IMPLEMENT_F4C`。C smoke run `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_smoke_20260907_003414`也已通过全部execution gate。当前从原F4D源重新初始化运行正式C：
 
 ```bash
 export CVAE_POSTERIOR_AB_TRIGGER_COMPARISON=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429
 export CVAE_POSTERIOR_OPTIMIZER_SEED=20260830
 unset CVAE_CONFIG CVAE_RUN_DIR CVAE_POSTERIOR_AB_INITIAL_COMPARISON
-CVAE_POSTERIOR_AB_ARM=C bash ./cvae_repro.sh posterior-capacity-ab-smoke
+CVAE_POSTERIOR_AB_ARM=C bash ./cvae_repro.sh posterior-capacity-ab
 ```
 
-结束后回传summary中的source migration/trigger、step0 reproduction、gate training check、参数量、checkpoint readback、source状态和marker。更新plan.md后才运行正式C；不复制HDF5、大checkpoint或视频用于文档验收。
+不得设置`CVAE_INIT_CHECKPOINT`或改写`CVAE_POSTERIOR_AB_SOURCE_CHECKPOINT`为smoke checkpoint。结束后回传summary、8k/9k/10k、gate training check、checkpoint readback、source状态和marker；更新plan.md后才运行A/B/C比较器。不复制HDF5、大checkpoint或视频用于文档验收。
 
-当前Windows验收为posterior相关组合42项通过；全发现95项中仅3个既有模块因缺`h5py`导入失败。A/B和C参数量分别为25,453,411与25,456,483，compile、CLI help、Shell语法和diff check通过。C的真实HDF5/CUDA、step0复现、gate更新与checkpoint roundtrip仍必须由Ubuntu smoke验证，不能因Windows READY写成工程或模型质量PASS。
+Windows验收为posterior相关组合42项通过；全发现95项中仅3个既有模块因缺`h5py`导入失败。Ubuntu smoke进一步验证C参数25,456,483、真实HDF5/CUDA、step0复现、gate更新和checkpoint roundtrip。该结果仍不包含正式质量结论。

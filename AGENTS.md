@@ -254,7 +254,7 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 最简 posterior Transformer capacity：F4C已实现、待Ubuntu smoke
+### 6.4 最简 posterior Transformer capacity：F4C smoke已通过、待正式10k
 
 新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
 使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
@@ -434,8 +434,15 @@ A/B比较器；该比较现已完成并正式输出`IMPLEMENT_F4C`。
 每层decoder前只对有效数据token注入同一`latent_projection(z)`，C使用A原损失，总参数25,456,483。
 通用TransformerStack及A/B state dict不变；旧权重迁移只允许缺失8个gate。C必须显式提供触发比较run并
 重验manifest、A/B哈希、配对和决定；记录逐层gate范数、梯度与非零更新。相关42项测试、compile、CLI、
-Shell及diff check通过；完整发现95项仍只有3个既有`h5py`导入失败。真实Ubuntu C尚未运行，当前唯一
-下一步为同步后执行C 2-step smoke，不能直接执行正式C或第二seed。
+Shell及diff check通过；完整发现95项仍只有3个既有`h5py`导入失败。
+
+F4C smoke已在Ubuntu run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_smoke_20260907_003414`通过，源码
+`443f4782c823fc7adaa8730e7513cd7671b630e6`。它使用25,456,483参数，step0完整复现F4D；8个gate
+初始严格全零、全部获得梯度，step2后3,072个参数全部非零；trigger comparison重验和checkpoint
+readback全部通过，marker为`cvae_posterior_ab_smoke.ok`。step2 score 21.560766、State/Action worst
+RMSE 0.0230198/0.0152627、max abs 0.215608；`quality_pass=false`是2-step smoke固定语义。当前唯一
+下一步是从原F4D `best_progression.pt`独立执行C正式10k，不得从smoke checkpoint续训。
 
 ### 6.5 已完成 parent 训练
 
@@ -582,9 +589,9 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. A/B比较已触发`IMPLEMENT_F4C`，F4C Windows实现已提交为`c965487a5291ada3919db74b017900a3a04eb6ab`；按[Next.md](Next.md)同步后只运行
-   C 2-step smoke，回填通过后才执行C正式10k及A/B/C比较，随后按规则决定是否做优化seed复核；
-   不直接续训或扩大模型，不提前实现C。fixture seed必须独立于优化seed，旧F4B提案不再执行。
+1. F4C smoke已通过；按[Next.md](Next.md)从原F4D源只运行C正式10k，回填后才执行A/B/C比较并按规则
+   决定是否做优化seed复核。不得从smoke checkpoint续训或扩大模型；fixture seed必须独立于优化seed，
+   旧F4B提案不再执行。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
