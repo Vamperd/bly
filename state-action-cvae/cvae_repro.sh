@@ -383,6 +383,7 @@ posterior_capacity_ab() {
   local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
   local source_checkpoint="${CVAE_POSTERIOR_AB_SOURCE_CHECKPOINT:-}"
   local f4a_run="${CVAE_POSTERIOR_F4A_RUN:-}"
+  local trigger_comparison="${CVAE_POSTERIOR_AB_TRIGGER_COMPARISON:-}"
   local arm="${CVAE_POSTERIOR_AB_ARM:-}" optimizer_seed="${CVAE_POSTERIOR_OPTIMIZER_SEED:-20260830}"
   local config="$SCRIPT_DIR/configs/posterior_capacity_ab.json" prefix run_dir marker
   [[ -z "${CVAE_CONFIG:-}" ]] \
@@ -390,8 +391,17 @@ posterior_capacity_ab() {
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
   [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
     || die "dedicated overfit subset marker is missing: $dataset_run"
-  [[ "$arm" == "A" || "$arm" == "B" ]] \
-    || die "CVAE_POSTERIOR_AB_ARM must be A or B; C is disabled until the comparison manifest triggers F4C"
+  [[ "$arm" == "A" || "$arm" == "B" || "$arm" == "C" ]] \
+    || die "CVAE_POSTERIOR_AB_ARM must be A, B, or C"
+  if [[ "$arm" == "C" ]]; then
+    [[ -n "$trigger_comparison" ]] \
+      || die "arm C requires CVAE_POSTERIOR_AB_TRIGGER_COMPARISON"
+    [[ -f "$trigger_comparison/markers/cvae_posterior_ab_comparison.ok" ]] \
+      || die "arm C triggering comparison marker is missing: $trigger_comparison"
+  else
+    [[ -z "$trigger_comparison" ]] \
+      || die "CVAE_POSTERIOR_AB_TRIGGER_COMPARISON is valid only for arm C"
+  fi
   [[ "$optimizer_seed" =~ ^[0-9]+$ ]] \
     || die "CVAE_POSTERIOR_OPTIMIZER_SEED must be a non-negative integer"
   [[ -n "$source_checkpoint" ]] \
@@ -409,6 +419,8 @@ posterior_capacity_ab() {
   capture_environment "$run_dir"
   local extra_args=()
   [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
+  [[ -n "$trigger_comparison" ]] \
+    && extra_args+=(--trigger-comparison-run "$trigger_comparison")
   run_logged "$run_dir" posterior_capacity_ab.log \
     "$PYTHON" -m cvae_sa.posterior_capacity_ab train \
       --dataset-run "$dataset_run" \
@@ -422,7 +434,7 @@ posterior_capacity_ab() {
   marker="cvae_posterior_ab_execution.ok"
   [[ "$smoke" == "true" ]] && marker="cvae_posterior_ab_smoke.ok"
   [[ -f "$run_dir/markers/$marker" ]] \
-    || die "F4B-v2 execution marker is missing: $marker"
+    || die "F4B-v2/F4C execution marker is missing: $marker"
   local latest_key="posterior_ab_${arm,,}_seed${optimizer_seed}"
   [[ "$smoke" == "true" ]] && latest_key="${latest_key}_smoke"
   update_latest "$latest_key" "$run_dir"

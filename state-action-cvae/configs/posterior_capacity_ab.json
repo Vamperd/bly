@@ -16,6 +16,7 @@
     "ffn_dim": 1536,
     "latent_dim": 256,
     "dropout": 0.0,
+    "decoder_layer_latent_gates": false,
     "parameter_count_range": [25453411, 25453411]
   },
   "training": {

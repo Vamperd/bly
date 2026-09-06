@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -10,9 +11,12 @@ from types import SimpleNamespace
 import torch
 from torch.utils.data import DataLoader
 
-from cvae_sa.models import build_model, parameter_count
+from cvae_sa.models import PosteriorCapacityTransformerCVAE, build_model, parameter_count
 from cvae_sa.posterior_capacity_ab import (
+    CHECKPOINT_FORMAT,
+    COMPARISON_FORMAT,
     COMPARISON_MARKER,
+    EXPECTED_C_PARAMETERS,
     EXECUTION_MARKER,
     FORMAT_VERSION,
     PROGRESSION_MARKER,
@@ -26,10 +30,14 @@ from cvae_sa.posterior_capacity_ab import (
     evaluate_full_objective,
     identity_sha256,
     initial_decision,
+    latent_gate_diagnostics,
+    load_source_model_weights,
     replication_decision,
     render_training_plots,
     run_ab_comparison,
     tail_mixed_domain_loss,
+    validate_f4c_trigger,
+    validate_saved_checkpoint,
     validate_step0,
 )
 
@@ -42,6 +50,12 @@ class _ZeroModel(torch.nn.Module):
             action=torch.zeros_like(batch["action"]),
             state_contact_logits=torch.zeros_like(batch["physical_state"][..., 68:70]),
         )
+
+
+class _IdentityDecoderLayer(torch.nn.Module):
+    def forward(self, value, valid_tokens, times, causal):
+        del valid_tokens, times, causal
+        return value
 
 
 def _output(batch: dict[str, torch.Tensor]) -> SimpleNamespace:
@@ -61,6 +75,32 @@ def _batch() -> dict[str, torch.Tensor]:
     return {
         "physical_state": state,
         "action": torch.ones(2, 1, 29),
+    }
+
+
+def _posterior_model_config(*, gates: bool, decoder_layers: int = 2) -> dict[str, object]:
+    return {
+        "kind": "physics_posterior_transformer",
+        "d_model": 32,
+        "encoder_layers": 1,
+        "decoder_layers": decoder_layers,
+        "heads": 4,
+        "ffn_dim": 64,
+        "latent_dim": 16,
+        "dropout": 0.0,
+        "state_dim": 70,
+        "decoder_layer_latent_gates": gates,
+    }
+
+
+def _posterior_batch(batch_size: int = 2, transitions: int = 3) -> dict[str, object]:
+    state = torch.randn(batch_size, transitions + 1, 70)
+    state[..., 68:70] = torch.randint(0, 2, state[..., 68:70].shape).float()
+    return {
+        "physical_state": state,
+        "action": torch.randn(batch_size, transitions, 29),
+        "valid_state": torch.ones(batch_size, transitions + 1, dtype=torch.bool),
+        "valid_action": torch.ones(batch_size, transitions, dtype=torch.bool),
     }
 
 
@@ -111,6 +151,16 @@ def _summary(
             for step in (8000, 9000, 10000)
         ],
     ]
+    is_c = arm == "C"
+    source = {
+        "checkpoint_sha256": "checkpoint",
+        "f4a_manifest_sha256": "f4a",
+    }
+    if is_c:
+        source["f4c_trigger_comparison"] = {
+            "decision": "IMPLEMENT_F4C",
+            "checks": {"authorized": True},
+        }
     return {
         "execution_pass": True,
         "smoke": False,
@@ -118,10 +168,7 @@ def _summary(
         "fixture_seed": 20260830,
         "optimizer_seed": 20260830,
         "dataset_manifest_sha256": "dataset",
-        "source": {
-            "checkpoint_sha256": "checkpoint",
-            "f4a_manifest_sha256": "f4a",
-        },
+        "source": source,
         "data_contract": {
             "fixture_bitmap_sha256": "fixture",
             "selected_windows_sha256": "windows",
@@ -130,7 +177,11 @@ def _summary(
             "window_count": 80,
             "fixture_count": 800,
         },
-        "model_contract": {"parameter_count": 25_453_411},
+        "model_contract": {
+            "parameter_count": EXPECTED_C_PARAMETERS if is_c else 25_453_411,
+            "f4c_layer_gates_enabled": is_c,
+            "f4c_layer_gate_parameter_count": 3072 if is_c else 0,
+        },
         "training_contract": {
             "training_identity_sha256_by_step": {
                 str(step): f"sample-{step}" for step in range(1, 10001)
@@ -146,10 +197,192 @@ class PosteriorCapacityABTest(unittest.TestCase):
         config = json.loads(path.read_text(encoding="utf-8"))
         config["model"]["state_dim"] = 70
         self.assertEqual(parameter_count(build_model(config["model"])), 25_453_411)
+        gated = copy.deepcopy(config["model"])
+        gated["decoder_layer_latent_gates"] = True
+        self.assertEqual(parameter_count(build_model(gated)), EXPECTED_C_PARAMETERS)
         self.assertEqual(config["training"]["max_optimizer_steps"], 10_000)
         self.assertEqual(config["training"]["posterior_path"], "mean")
         self.assertEqual(config["training"]["kl_beta"], 0.0)
         self.assertEqual(config["training"]["weight_decay"], 0.0)
+
+    def test_f4c_zero_gate_migration_is_exact_and_rejects_other_missing_keys(self) -> None:
+        torch.manual_seed(17)
+        baseline = PosteriorCapacityTransformerCVAE(
+            _posterior_model_config(gates=False)
+        ).eval()
+        gated = PosteriorCapacityTransformerCVAE(
+            _posterior_model_config(gates=True)
+        ).eval()
+        migration = load_source_model_weights(gated, baseline.state_dict(), "C")
+        self.assertEqual(len(migration["missing_keys"]), 2)
+        self.assertEqual(migration["unexpected_keys"], [])
+        self.assertEqual(
+            latent_gate_diagnostics(gated)["nonzero_parameter_count"], 0
+        )
+
+        value = _posterior_batch()
+        state_mask = torch.ones_like(value["physical_state"], dtype=torch.bool)
+        action_mask = torch.ones_like(value["action"], dtype=torch.bool)
+        baseline_output = baseline(value, state_mask, action_mask)
+        gated_output = gated(value, state_mask, action_mask)
+        self.assertTrue(torch.equal(baseline_output.physical_state, gated_output.physical_state))
+        self.assertTrue(torch.equal(baseline_output.action, gated_output.action))
+
+        incomplete = dict(baseline.state_dict())
+        incomplete.pop("state_input.weight")
+        with self.assertRaisesRegex(ValueError, "source migration mismatch"):
+            load_source_model_weights(gated, incomplete, "C")
+
+    def test_f4c_checkpoint_readback_requires_all_finite_gate_tensors(self) -> None:
+        gate_state = {
+            f"decoder_layer_latent_gates.{index}": torch.full((384,), index + 1.0)
+            for index in range(8)
+        }
+        payload = {
+            "format_version": CHECKPOINT_FORMAT,
+            "optimizer_step": 2,
+            "model": {"dummy": torch.zeros(1), **gate_state},
+            "optimizer": {"state": {}},
+            "scheduler": {"last_epoch": 2},
+            "resolved_config": {
+                "model": {"decoder_layer_latent_gates": True},
+            },
+            "dataset_manifest_sha256": "dataset",
+            "source_checkpoint_sha256": "source",
+            "fixture_bitmap_sha256": "fixtures",
+            "parameter_count": EXPECTED_C_PARAMETERS,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_path = Path(directory) / "checkpoint.pt"
+            torch.save(payload, checkpoint_path)
+            result = validate_saved_checkpoint(
+                checkpoint_path,
+                expected_step=2,
+                dataset_hash="dataset",
+                source_checkpoint_hash="source",
+                fixture_hash="fixtures",
+                expected_parameters=EXPECTED_C_PARAMETERS,
+                f4c_layer_gates_enabled=True,
+            )
+            self.assertTrue(result["passed"])
+
+            broken = copy.deepcopy(payload)
+            del broken["model"]["decoder_layer_latent_gates.7"]
+            torch.save(broken, checkpoint_path)
+            with self.assertRaisesRegex(ValueError, "saved-checkpoint readback failed"):
+                validate_saved_checkpoint(
+                    checkpoint_path,
+                    expected_step=2,
+                    dataset_hash="dataset",
+                    source_checkpoint_hash="source",
+                    fixture_hash="fixtures",
+                    expected_parameters=EXPECTED_C_PARAMETERS,
+                    f4c_layer_gates_enabled=True,
+                )
+
+    def test_f4c_layer_injection_skips_latent_token_and_padding(self) -> None:
+        model = PosteriorCapacityTransformerCVAE(
+            _posterior_model_config(gates=True)
+        )
+        model.decoder.layers = torch.nn.ModuleList(
+            [_IdentityDecoderLayer(), _IdentityDecoderLayer()]
+        )
+        model.decoder.norm = torch.nn.Identity()
+        for gate in model.decoder_layer_latent_gates:
+            gate.data.fill_(1.0)
+        value = torch.zeros(1, 4, 32)
+        valid = torch.tensor([[True, True, False, True]])
+        condition = torch.arange(32, dtype=torch.float32).unsqueeze(0)
+        decoded = model._decode_tokens(
+            value, valid, torch.arange(4), condition
+        )
+        self.assertTrue(torch.equal(decoded[:, 0], value[:, 0]))
+        self.assertTrue(torch.equal(decoded[:, 2], value[:, 2]))
+        self.assertTrue(torch.equal(decoded[:, 1], 2.0 * condition))
+        self.assertTrue(torch.equal(decoded[:, 3], 2.0 * condition))
+
+    def test_f4c_gates_receive_gradients_and_preserve_truth_isolation(self) -> None:
+        torch.manual_seed(23)
+        model = PosteriorCapacityTransformerCVAE(
+            _posterior_model_config(gates=True)
+        ).eval()
+        value = _posterior_batch()
+        state_mask = torch.ones_like(value["physical_state"], dtype=torch.bool)
+        action_mask = torch.ones_like(value["action"], dtype=torch.bool)
+        first = model(value, state_mask, action_mask)
+        objective = ab_reconstruction_objective(
+            first, value, state_mask, action_mask, "C"
+        )
+        objective.optimization_total.backward()
+        diagnostic = latent_gate_diagnostics(model, include_gradients=True)
+        self.assertTrue(diagnostic["all_gradients_present"])
+        self.assertGreater(diagnostic["total_gradient_l2_norm_before_clip"], 0.0)
+        torch.optim.SGD(model.parameters(), lr=1e-3).step()
+        self.assertGreater(
+            latent_gate_diagnostics(model)["nonzero_parameter_count"], 0
+        )
+
+        fixed_latent = first.posterior_mean.detach()
+        changed = dict(value)
+        changed["physical_state"] = value["physical_state"] + 100.0
+        changed["action"] = value["action"] - 100.0
+        fixed = model(value, state_mask, action_mask, latent_override=fixed_latent)
+        changed_output = model(
+            changed, state_mask, action_mask, latent_override=fixed_latent
+        )
+        self.assertTrue(torch.equal(fixed.physical_state, changed_output.physical_state))
+        self.assertTrue(torch.equal(fixed.action, changed_output.action))
+
+    def test_f4c_requires_a_hash_verified_triggering_comparison(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=repository) as temporary:
+            root = Path(temporary)
+            inputs = {}
+            for arm in ("A", "B"):
+                run = root / arm
+                (run / "manifests").mkdir(parents=True)
+                summary = _summary(arm, exceed=0.1, maximum=0.02)
+                summary["format_version"] = FORMAT_VERSION
+                path = run / "manifests/posterior_ab_summary.json"
+                path.write_text(json.dumps(summary), encoding="utf-8")
+                inputs[arm] = {
+                    "run": str(run.resolve()),
+                    "summary_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            comparison = root / "comparison"
+            (comparison / "manifests").mkdir(parents=True)
+            (comparison / "markers").mkdir(parents=True)
+            manifest = {
+                "format_version": COMPARISON_FORMAT,
+                "execution_pass": True,
+                "comparison_phase": "initial",
+                "inputs": inputs,
+                "decision": {
+                    "decision": "IMPLEMENT_F4C",
+                    "implement_f4c": True,
+                    "candidate_comparisons": {"B": {"pairing": {"passed": True}}},
+                },
+            }
+            (comparison / "manifests/posterior_ab_comparison.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            (comparison / f"markers/{COMPARISON_MARKER}").write_text(
+                "PASS decision=IMPLEMENT_F4C\n", encoding="utf-8"
+            )
+            validated = validate_f4c_trigger(
+                comparison,
+                dataset_hash="dataset",
+                source_checkpoint_hash="checkpoint",
+                optimizer_seed=20260830,
+            )
+            self.assertEqual(validated["decision"], "IMPLEMENT_F4C")
+            with self.assertRaisesRegex(ValueError, "explicit triggering"):
+                validate_f4c_trigger(
+                    None,
+                    dataset_hash="dataset",
+                    source_checkpoint_hash="checkpoint",
+                    optimizer_seed=20260830,
+                )
 
     def test_arm_a_is_exact_old_objective_and_backpropagates(self) -> None:
         batch = _batch()
@@ -197,8 +430,10 @@ class PosteriorCapacityABTest(unittest.TestCase):
         )
         self.assertEqual(float(objective.optimization_state), 0.0)
         self.assertGreater(float(objective.optimization_action), 0.0)
-        with self.assertRaisesRegex(ValueError, "arm C"):
-            ab_reconstruction_objective(output, batch, state_mask, action_mask, "C")
+        arm_c = ab_reconstruction_objective(output, batch, state_mask, action_mask, "C")
+        self.assertIs(arm_c.optimization_total, arm_c.raw.total)
+        with self.assertRaisesRegex(ValueError, "arm A, B, or C"):
+            ab_reconstruction_objective(output, batch, state_mask, action_mask, "D")
         with self.assertRaisesRegex(ValueError, "no targets"):
             ab_reconstruction_objective(
                 output,

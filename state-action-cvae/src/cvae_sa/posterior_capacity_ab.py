@@ -63,7 +63,8 @@ PROGRESSION_MARKER = "cvae_posterior_capacity_progression.ok"
 FIXTURE_SEED = 20260830
 FORMAL_STEPS = 10_000
 EVALUATION_STEPS = (8_000, 9_000, 10_000)
-ARMS = ("A", "B")
+ARMS = ("A", "B", "C")
+EXPECTED_C_PARAMETERS = EXPECTED_PARAMETERS + 8 * 384
 EXPECTED_WINDOWS = 80
 EXPECTED_FIXTURES = EXPECTED_WINDOWS * len(FIXED_MASK_NAMES)
 EXPECTED_DATASET_RUN_NAME = "cvae_overfit_subset_20260828_234506"
@@ -85,6 +86,94 @@ class ABObjective:
 def _finite_tensor(name: str, value: torch.Tensor) -> None:
     if not bool(torch.isfinite(value).all()):
         raise FloatingPointError(f"non-finite {name}")
+
+
+def expected_parameter_count(arm: str) -> int:
+    return EXPECTED_C_PARAMETERS if str(arm).upper() == "C" else EXPECTED_PARAMETERS
+
+
+def latent_gate_diagnostics(
+    model: torch.nn.Module, *, include_gradients: bool = False
+) -> dict[str, Any]:
+    enabled = bool(getattr(model, "decoder_layer_latent_gates_enabled", False))
+    gates = list(getattr(model, "decoder_layer_latent_gates", []))
+    if not enabled:
+        if gates:
+            raise ValueError("disabled decoder latent gates unexpectedly contain parameters")
+        return {
+            "enabled": False,
+            "layer_count": 0,
+            "parameter_count": 0,
+        }
+    decoder_layers = list(getattr(getattr(model, "decoder", None), "layers", []))
+    if len(gates) != len(decoder_layers):
+        raise ValueError("decoder latent gate count does not match decoder layers")
+    detached = [gate.detach() for gate in gates]
+    for index, gate in enumerate(detached):
+        _finite_tensor(f"decoder latent gate {index}", gate)
+    result: dict[str, Any] = {
+        "enabled": True,
+        "layer_count": len(gates),
+        "parameter_count": sum(gate.numel() for gate in gates),
+        "layer_l2_norms": [float(torch.linalg.vector_norm(gate).cpu()) for gate in detached],
+        "layer_max_abs": [float(gate.abs().max().cpu()) for gate in detached],
+        "total_l2_norm": float(
+            torch.sqrt(sum(torch.square(gate).sum() for gate in detached)).cpu()
+        ),
+        "nonzero_parameter_count": sum(int(torch.count_nonzero(gate).cpu()) for gate in detached),
+    }
+    if include_gradients:
+        gradients = [gate.grad for gate in gates]
+        result["all_gradients_present"] = all(gradient is not None for gradient in gradients)
+        gradient_norms: list[float | None] = []
+        gradient_squares: list[torch.Tensor] = []
+        for index, gradient in enumerate(gradients):
+            if gradient is None:
+                gradient_norms.append(None)
+                continue
+            detached_gradient = gradient.detach()
+            _finite_tensor(f"decoder latent gate gradient {index}", detached_gradient)
+            gradient_norms.append(float(torch.linalg.vector_norm(detached_gradient).cpu()))
+            gradient_squares.append(torch.square(detached_gradient).sum())
+        result["layer_gradient_l2_norms_before_clip"] = gradient_norms
+        result["total_gradient_l2_norm_before_clip"] = (
+            float(torch.sqrt(sum(gradient_squares)).cpu()) if gradient_squares else None
+        )
+    return result
+
+
+def load_source_model_weights(
+    model: torch.nn.Module, source_state: dict[str, torch.Tensor], arm: str
+) -> dict[str, Any]:
+    arm = str(arm).upper()
+    if arm != "C":
+        model.load_state_dict(source_state, strict=True)
+        return {"strict": True, "missing_keys": [], "unexpected_keys": []}
+    incompatible = model.load_state_dict(source_state, strict=False)
+    expected_missing = {
+        f"decoder_layer_latent_gates.{index}"
+        for index in range(len(getattr(model, "decoder_layer_latent_gates", [])))
+    }
+    observed_missing = set(incompatible.missing_keys)
+    observed_unexpected = set(incompatible.unexpected_keys)
+    if observed_missing != expected_missing or observed_unexpected:
+        raise ValueError(
+            "F4C source migration mismatch: "
+            f"missing={sorted(observed_missing)}, unexpected={sorted(observed_unexpected)}"
+        )
+    gate_state = latent_gate_diagnostics(model)
+    expected_gate_parameters = len(model.decoder.layers) * int(model.width)
+    if gate_state["parameter_count"] != expected_gate_parameters:
+        raise ValueError("F4C source migration has the wrong gate parameter count")
+    if gate_state["nonzero_parameter_count"] != 0:
+        raise ValueError("F4C source migration did not zero-initialize every gate")
+    return {
+        "strict": False,
+        "allowed_missing_keys": sorted(expected_missing),
+        "missing_keys": sorted(observed_missing),
+        "unexpected_keys": sorted(observed_unexpected),
+        "gate_initialization": gate_state,
+    }
 
 
 def tail_mixed_domain_loss(
@@ -129,9 +218,9 @@ def ab_reconstruction_objective(
 ) -> ABObjective:
     arm = str(arm).upper()
     if arm not in ARMS:
-        raise ValueError("F4B-v2 supports only arm A or B; arm C is not triggered")
+        raise ValueError("F4B-v2/F4C supports only arm A, B, or C")
     raw = reconstruction_loss(output, batch, state_mask, action_mask)
-    if arm == "A":
+    if arm in {"A", "C"}:
         return ABObjective(raw.total, raw.state, raw.action, raw.contact, raw)
     state_squared = torch.square(
         output.physical_state[..., :68] - batch["physical_state"][..., :68]
@@ -883,6 +972,96 @@ def _load_control_dt(base: Any) -> float:
     return values.pop()
 
 
+def validate_f4c_trigger(
+    trigger_comparison_run: Path | None,
+    *,
+    dataset_hash: str,
+    source_checkpoint_hash: str,
+    optimizer_seed: int,
+) -> dict[str, Any]:
+    if trigger_comparison_run is None:
+        raise ValueError("F4C requires an explicit triggering A/B comparison run")
+    if int(optimizer_seed) != FIXTURE_SEED:
+        raise ValueError("the first F4C run requires optimizer seed 20260830")
+    run = trigger_comparison_run.expanduser().resolve()
+    marker = run / f"markers/{COMPARISON_MARKER}"
+    manifest_path = run / "manifests/posterior_ab_comparison.json"
+    if not marker.is_file() or not manifest_path.is_file():
+        raise FileNotFoundError("F4C triggering comparison marker or manifest is missing")
+    manifest = load_json(manifest_path)
+    decision = manifest.get("decision", {})
+    pairing = decision.get("candidate_comparisons", {}).get("B", {}).get("pairing", {})
+    inputs = manifest.get("inputs", {})
+    checks: dict[str, bool] = {
+        "format_version": manifest.get("format_version") == COMPARISON_FORMAT,
+        "execution_pass": bool(manifest.get("execution_pass")),
+        "comparison_phase": manifest.get("comparison_phase") == "initial",
+        "decision": decision.get("decision") == "IMPLEMENT_F4C",
+        "implement_f4c": decision.get("implement_f4c") is True,
+        "pairing_passed": pairing.get("passed") is True,
+        "input_arms": set(inputs) == {"A", "B"},
+    }
+    input_records: dict[str, dict[str, str]] = {}
+    input_summaries: dict[str, dict[str, Any]] = {}
+    for expected_arm in ("A", "B"):
+        record = inputs.get(expected_arm, {})
+        summary_path = Path(str(record.get("run", ""))).expanduser().resolve() / (
+            "manifests/posterior_ab_summary.json"
+        )
+        exists = summary_path.is_file()
+        checks[f"{expected_arm}.summary_present"] = exists
+        if not exists:
+            continue
+        summary_hash = file_sha256(summary_path)
+        summary = load_json(summary_path)
+        checks[f"{expected_arm}.summary_sha256"] = summary_hash == record.get("summary_sha256")
+        checks[f"{expected_arm}.format_version"] = summary.get("format_version") == FORMAT_VERSION
+        checks[f"{expected_arm}.arm"] = summary.get("arm") == expected_arm
+        checks[f"{expected_arm}.execution_pass"] = bool(summary.get("execution_pass"))
+        checks[f"{expected_arm}.formal"] = not bool(summary.get("smoke"))
+        checks[f"{expected_arm}.fixture_seed"] = int(summary.get("fixture_seed", -1)) == FIXTURE_SEED
+        checks[f"{expected_arm}.optimizer_seed"] = (
+            int(summary.get("optimizer_seed", -1)) == int(optimizer_seed)
+        )
+        checks[f"{expected_arm}.dataset"] = summary.get("dataset_manifest_sha256") == dataset_hash
+        checks[f"{expected_arm}.source"] = (
+            summary.get("source", {}).get("checkpoint_sha256") == source_checkpoint_hash
+        )
+        checks[f"{expected_arm}.windows"] = (
+            int(summary.get("data_contract", {}).get("window_count", -1)) == EXPECTED_WINDOWS
+        )
+        checks[f"{expected_arm}.fixtures"] = (
+            int(summary.get("data_contract", {}).get("fixture_count", -1)) == EXPECTED_FIXTURES
+        )
+        input_records[expected_arm] = {
+            "run": str(summary_path.parent.parent),
+            "summary_sha256": summary_hash,
+        }
+        input_summaries[expected_arm] = summary
+    if set(input_summaries) == {"A", "B"}:
+        recomputed_pairing = validate_paired_runs(
+            input_summaries["A"], input_summaries["B"]
+        )
+        recomputed_decision = initial_decision(
+            input_summaries["A"], input_summaries["B"]
+        )
+        checks["recomputed_pairing"] = bool(recomputed_pairing.get("passed"))
+        checks["recomputed_decision"] = (
+            recomputed_decision.get("decision") == "IMPLEMENT_F4C"
+        )
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise ValueError(f"F4C triggering comparison is invalid: {failed}")
+    return {
+        "run": str(run),
+        "manifest": str(manifest_path),
+        "manifest_sha256": file_sha256(manifest_path),
+        "decision": decision.get("decision"),
+        "checks": checks,
+        "inputs": input_records,
+    }
+
+
 def validate_ab_contract(
     *,
     dataset_run: Path,
@@ -894,7 +1073,7 @@ def validate_ab_contract(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     arm = arm.upper()
     if arm not in ARMS:
-        raise ValueError("F4B-v2 arm must be A or B; F4C is not enabled")
+        raise ValueError("F4B-v2/F4C arm must be A, B, or C")
     source_run = validate_output_isolation(dataset_run, checkpoint_path, output_run)
     resolved_f4a = f4a_run.expanduser().resolve()
     resolved_output = output_run.expanduser().resolve()
@@ -967,6 +1146,8 @@ def validate_ab_contract(
     for name, value in expected_config["training"].items():
         if config.get("training", {}).get(name) != value:
             failed.append(f"training.{name}")
+    if bool(config.get("model", {}).get("decoder_layer_latent_gates", False)):
+        failed.append("model.decoder_layer_latent_gates must be false in the fixed base config")
     if failed:
         raise ValueError(f"F4B config contract mismatch: {failed}")
     source_model = checkpoint["config"]["model"]
@@ -1084,6 +1265,7 @@ def run_full_evaluation(
         },
         "fixed_curve_artifact": str(paths["curves"]),
         "fixed_curve_plot": str(paths["curve_plot"]),
+        "latent_layer_gates": latent_gate_diagnostics(model),
         "detail_artifacts": {key: str(value) for key, value in paths.items()},
         "cuda_peak_memory_bytes": (
             int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
@@ -1126,8 +1308,19 @@ def validate_saved_checkpoint(
     dataset_hash: str,
     source_checkpoint_hash: str,
     fixture_hash: str,
+    expected_parameters: int = EXPECTED_PARAMETERS,
+    f4c_layer_gates_enabled: bool = False,
 ) -> dict[str, Any]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    model_state = checkpoint.get("model", {})
+    gate_tensors = {
+        key: value
+        for key, value in model_state.items()
+        if key.startswith("decoder_layer_latent_gates.")
+    }
+    expected_gate_keys = {
+        f"decoder_layer_latent_gates.{index}" for index in range(8)
+    } if f4c_layer_gates_enabled else set()
     checks = {
         "format_version": checkpoint.get("format_version") == CHECKPOINT_FORMAT,
         "optimizer_step": int(checkpoint.get("optimizer_step", -1)) == int(expected_step),
@@ -1136,8 +1329,20 @@ def validate_saved_checkpoint(
             checkpoint.get("source_checkpoint_sha256") == source_checkpoint_hash
         ),
         "fixture_bitmap_sha256": checkpoint.get("fixture_bitmap_sha256") == fixture_hash,
-        "parameter_count": int(checkpoint.get("parameter_count", -1)) == EXPECTED_PARAMETERS,
-        "model_state_present": bool(checkpoint.get("model")),
+        "parameter_count": int(checkpoint.get("parameter_count", -1)) == int(expected_parameters),
+        "f4c_layer_gates_enabled": bool(
+            checkpoint.get("resolved_config", {})
+            .get("model", {})
+            .get("decoder_layer_latent_gates", False)
+        ) is bool(f4c_layer_gates_enabled),
+        "f4c_layer_gate_state_keys": set(gate_tensors) == expected_gate_keys,
+        "f4c_layer_gate_state_shapes": all(
+            tuple(value.shape) == (384,) for value in gate_tensors.values()
+        ),
+        "f4c_layer_gate_state_finite": all(
+            bool(torch.isfinite(value).all()) for value in gate_tensors.values()
+        ),
+        "model_state_present": bool(model_state),
         "optimizer_state_present": bool(checkpoint.get("optimizer")),
         "scheduler_state_present": bool(checkpoint.get("scheduler")),
     }
@@ -1184,6 +1389,7 @@ def run_ab_experiment(
     arm: str,
     optimizer_seed: int,
     smoke: bool = False,
+    trigger_comparison_run: Path | None = None,
 ) -> dict[str, Any]:
     from .dataset import StateActionWindowDataset
 
@@ -1192,6 +1398,8 @@ def run_ab_experiment(
     f4a_run = f4a_run.expanduser().resolve()
     output_run = output_run.expanduser().resolve()
     arm = arm.upper()
+    if arm != "C" and trigger_comparison_run is not None:
+        raise ValueError("the F4C trigger comparison may only be supplied for arm C")
     checkpoint, source_summary, f4a_manifest = validate_ab_contract(
         dataset_run=dataset_run,
         checkpoint_path=source_checkpoint,
@@ -1204,6 +1412,20 @@ def run_ab_experiment(
     training = config["training"]
     dataset_hash = file_sha256(dataset_run / "manifests/dataset_manifest.json")
     checkpoint_hash = file_sha256(source_checkpoint)
+    f4c_trigger = (
+        validate_f4c_trigger(
+            trigger_comparison_run,
+            dataset_hash=dataset_hash,
+            source_checkpoint_hash=checkpoint_hash,
+            optimizer_seed=optimizer_seed,
+        )
+        if arm == "C"
+        else None
+    )
+    if f4c_trigger is not None:
+        trigger_run = Path(f4c_trigger["run"])
+        if output_run == trigger_run or output_run.is_relative_to(trigger_run):
+            raise ValueError("F4C output run must be isolated from its triggering comparison")
     base = StateActionWindowDataset(
         dataset_run,
         "train",
@@ -1239,10 +1461,17 @@ def run_ab_experiment(
         resolved_config["arm"] = arm
         resolved_config["optimizer_seed"] = int(optimizer_seed)
         resolved_config["smoke"] = bool(smoke)
+        resolved_config["f4c_trigger_comparison"] = f4c_trigger
+        resolved_config["model"]["decoder_layer_latent_gates"] = arm == "C"
+        expected_parameters = expected_parameter_count(arm)
+        resolved_config["model"]["parameter_count_range"] = [
+            expected_parameters,
+            expected_parameters,
+        ]
         model = build_model(resolved_config["model"])
-        if parameter_count(model) != EXPECTED_PARAMETERS:
-            raise ValueError("F4B reconstructed model parameter count mismatch")
-        model.load_state_dict(checkpoint["model"], strict=True)
+        if parameter_count(model) != expected_parameters:
+            raise ValueError("F4B-v2/F4C reconstructed model parameter count mismatch")
+        source_migration = load_source_model_weights(model, checkpoint["model"], arm)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
         workers = 0 if smoke else int(data_config.get("num_workers", 4))
@@ -1317,6 +1546,8 @@ def run_ab_experiment(
             "learning_rate": None,
             "gradient_norm_before_clip": None,
         }
+        if arm == "C" and step0["latent_layer_gates"]["nonzero_parameter_count"] != 0:
+            raise ValueError("F4C step0 gates are not exactly zero")
         records.append(step0)
         _append_record(metrics_path, step0)
 
@@ -1425,11 +1656,13 @@ def run_ab_experiment(
                 }
                 for name, value in values.items():
                     sums[name] += float(value.detach().cpu()) / accumulation
+            gate_before_update = latent_gate_diagnostics(model, include_gradients=True)
             gradient_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), float(training["gradient_clip"])
             )
             _finite_tensor("gradient norm", gradient_norm)
             optimizer.step()
+            gate_after_update = latent_gate_diagnostics(model)
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
             train_record = {
@@ -1455,6 +1688,8 @@ def run_ab_experiment(
                 "gradient_was_clipped": bool(
                     float(gradient_norm.detach().cpu()) > float(training["gradient_clip"])
                 ),
+                "latent_layer_gates_before_update": gate_before_update,
+                "latent_layer_gates_after_update": gate_after_update,
                 "learning_rate": float(optimizer.param_groups[0]["lr"]),
                 "cuda_peak_memory_bytes": (
                     int(torch.cuda.max_memory_allocated(device))
@@ -1524,6 +1759,41 @@ def run_ab_experiment(
             render_training_plots(output_run, records)
             model.train()
 
+        train_records = [row for row in records if row["phase"] == "train"]
+        final_gate_state = latent_gate_diagnostics(model)
+        gate_training_check: dict[str, Any] = {
+            "required": arm == "C",
+            "passed": True,
+            "initial_zero": True,
+            "all_gradients_present": True,
+            "nonzero_gradient_observed": False,
+            "final_nonzero_parameter_count": int(
+                final_gate_state.get("nonzero_parameter_count", 0)
+            ),
+            "final": final_gate_state,
+        }
+        if arm == "C":
+            gate_training_records = [
+                row["latent_layer_gates_before_update"] for row in train_records
+            ]
+            gate_training_check["initial_zero"] = (
+                step0["latent_layer_gates"]["nonzero_parameter_count"] == 0
+            )
+            gate_training_check["all_gradients_present"] = all(
+                bool(row.get("all_gradients_present")) for row in gate_training_records
+            )
+            gate_training_check["nonzero_gradient_observed"] = any(
+                float(row.get("total_gradient_l2_norm_before_clip") or 0.0) > 0.0
+                for row in gate_training_records
+            )
+            gate_training_check["passed"] = bool(
+                gate_training_check["initial_zero"]
+                and gate_training_check["all_gradients_present"]
+                and gate_training_check["nonzero_gradient_observed"]
+                and gate_training_check["final_nonzero_parameter_count"] > 0
+            )
+            if not gate_training_check["passed"]:
+                raise ValueError(f"F4C latent-gate training check failed: {gate_training_check}")
         quality_pass = False if smoke else _progression_last_three_pass(evaluations)
         checkpoint_readback = validate_saved_checkpoint(
             output_run / "checkpoints/last.pt",
@@ -1531,6 +1801,8 @@ def run_ab_experiment(
             dataset_hash=dataset_hash,
             source_checkpoint_hash=checkpoint_hash,
             fixture_hash=bitmap_hash,
+            expected_parameters=expected_parameters,
+            f4c_layer_gates_enabled=arm == "C",
         )
         plots = render_training_plots(output_run, records)
         training_hashes = {
@@ -1538,7 +1810,6 @@ def run_ab_experiment(
             for row in records
             if row["phase"] == "train"
         }
-        train_records = [row for row in records if row["phase"] == "train"]
         summary = {
             "format_version": FORMAT_VERSION,
             "scope": (
@@ -1561,6 +1832,8 @@ def run_ab_experiment(
                 "f4a_manifest_sha256": file_sha256(
                     f4a_run / "manifests/posterior_tail_diagnostic.json"
                 ),
+                "model_state_migration": source_migration,
+                "f4c_trigger_comparison": f4c_trigger,
                 "step0_reproduction": step0_reproduction,
                 "legacy_source_reproduction": legacy_reproduction,
             },
@@ -1581,7 +1854,10 @@ def run_ab_experiment(
                 "kl_beta": 0.0,
                 "dropout": float(resolved_config["model"]["dropout"]),
                 "weight_decay": 0.0,
-                "f4c_layer_gates_enabled": False,
+                "f4c_layer_gates_enabled": arm == "C",
+                "f4c_layer_gate_parameter_count": (
+                    EXPECTED_C_PARAMETERS - EXPECTED_PARAMETERS if arm == "C" else 0
+                ),
             },
             "training_contract": {
                 "micro_batch": int(training["micro_batch"]),
@@ -1612,6 +1888,7 @@ def run_ab_experiment(
                     float(row["step_seconds"]) for row in train_records
                 ),
                 "training_identity_sha256_by_step": training_hashes,
+                "latent_layer_gate_training": gate_training_check,
             },
             "evaluations": evaluations,
             "decision_steps": list(EVALUATION_STEPS),
@@ -1706,6 +1983,28 @@ def validate_paired_runs(
             baseline.get("model_contract", {}).get("parameter_count")
             == candidate.get("model_contract", {}).get("parameter_count")
             == EXPECTED_PARAMETERS
+        )
+        checks["model.f4c_layer_gates_enabled"] = not bool(
+            candidate.get("model_contract", {}).get("f4c_layer_gates_enabled", False)
+        )
+    else:
+        checks["model.parameter_count"] = (
+            baseline.get("model_contract", {}).get("parameter_count") == EXPECTED_PARAMETERS
+            and candidate.get("model_contract", {}).get("parameter_count")
+            == EXPECTED_C_PARAMETERS
+        )
+        checks["model.f4c_layer_gates_enabled"] = bool(
+            candidate.get("model_contract", {}).get("f4c_layer_gates_enabled", False)
+        )
+        checks["model.f4c_layer_gate_parameter_count"] = (
+            candidate.get("model_contract", {}).get("f4c_layer_gate_parameter_count")
+            == EXPECTED_C_PARAMETERS - EXPECTED_PARAMETERS
+        )
+        trigger = candidate.get("source", {}).get("f4c_trigger_comparison") or {}
+        checks["source.f4c_trigger_comparison"] = (
+            trigger.get("decision") == "IMPLEMENT_F4C"
+            and bool(trigger.get("checks"))
+            and all(bool(value) for value in trigger.get("checks", {}).values())
         )
     baseline_hashes = baseline.get("training_contract", {}).get(
         "training_identity_sha256_by_step", {}
@@ -2232,7 +2531,7 @@ def run_ab_comparison(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run or compare F4B-v2 posterior A/B arms")
+    parser = argparse.ArgumentParser(description="Run or compare F4B-v2/F4C posterior arms")
     subparsers = parser.add_subparsers(dest="command", required=True)
     train = subparsers.add_parser("train")
     train.add_argument("--dataset-run", type=Path, required=True)
@@ -2242,6 +2541,7 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--config", type=Path, required=True)
     train.add_argument("--arm", required=True)
     train.add_argument("--optimizer-seed", type=int, required=True)
+    train.add_argument("--trigger-comparison-run", type=Path)
     train.add_argument("--smoke", action="store_true")
     compare = subparsers.add_parser("compare")
     compare.add_argument("--output-run", type=Path, required=True)
@@ -2283,8 +2583,9 @@ def main() -> int:
                 arm=args.arm,
                 optimizer_seed=args.optimizer_seed,
                 smoke=args.smoke,
+                trigger_comparison_run=args.trigger_comparison_run,
             )
-            print("Posterior F4B-v2: PASS (execution complete)")
+            print("Posterior F4B-v2/F4C: PASS (execution complete)")
             print(json.dumps({
                 "output_run": str(args.output_run.expanduser().resolve()),
                 "arm": result["arm"],

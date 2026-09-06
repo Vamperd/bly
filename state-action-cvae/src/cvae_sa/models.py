@@ -1686,6 +1686,14 @@ class PosteriorCapacityTransformerCVAE(nn.Module):
             int(config["decoder_layers"]), self.width, int(config["heads"]),
             int(config["ffn_dim"]), dropout,
         )
+        self.decoder_layer_latent_gates_enabled = bool(
+            config.get("decoder_layer_latent_gates", False)
+        )
+        self.decoder_layer_latent_gates = nn.ParameterList(
+            [nn.Parameter(torch.zeros(self.width)) for _ in self.decoder.layers]
+            if self.decoder_layer_latent_gates_enabled
+            else []
+        )
         self.posterior = nn.Linear(self.width, self.latent_dim * 2)
         self.prior = nn.Linear(self.width, self.latent_dim * 2)
         self.latent_projection = nn.Linear(self.latent_dim, self.width)
@@ -1754,6 +1762,30 @@ class PosteriorCapacityTransformerCVAE(nn.Module):
         )
         return self._distribution(head(encoded[:, 0]))
 
+    def _decode_tokens(
+        self,
+        value: torch.Tensor,
+        valid_tokens: torch.Tensor,
+        times: torch.Tensor,
+        latent_condition: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.decoder_layer_latent_gates_enabled:
+            return self.decoder(value, valid_tokens, times, False)
+        if len(self.decoder_layer_latent_gates) != len(self.decoder.layers):
+            raise RuntimeError("decoder latent gate count does not match decoder layers")
+        if value.shape[:2] != valid_tokens.shape:
+            raise ValueError("decoder values and valid-token mask disagree")
+        if latent_condition.shape != (value.shape[0], self.width):
+            raise ValueError("decoder latent condition has the wrong shape")
+        data_valid = valid_tokens.clone()
+        data_valid[:, 0] = False
+        data_valid = data_valid.unsqueeze(-1).to(value.dtype)
+        for layer, gate in zip(self.decoder.layers, self.decoder_layer_latent_gates):
+            injection = latent_condition[:, None] * gate[None, None]
+            value = value + injection * data_valid
+            value = layer(value, valid_tokens, times, False)
+        return self.decoder.norm(value)
+
     def forward(
         self,
         batch: dict[str, torch.Tensor],
@@ -1778,15 +1810,17 @@ class PosteriorCapacityTransformerCVAE(nn.Module):
             if latent_override.shape != latent.shape:
                 raise ValueError("latent override shape does not match the global latent")
             latent = latent_override
-        latent_token = self.decoder_latent_token + self.latent_projection(latent)[:, None]
-        decoded = self.decoder(
+        latent_condition = self.latent_projection(latent)
+        latent_token = self.decoder_latent_token + latent_condition[:, None]
+        decoder_valid = torch.cat(
+            (torch.ones(visible.shape[0], 1, dtype=torch.bool, device=visible.device), valid),
+            dim=1,
+        )
+        decoded = self._decode_tokens(
             torch.cat((latent_token, visible), dim=1),
-            torch.cat(
-                (torch.ones(visible.shape[0], 1, dtype=torch.bool, device=visible.device), valid),
-                dim=1,
-            ),
+            decoder_valid,
             torch.cat((times.new_tensor([-1]), times)),
-            False,
+            latent_condition,
         )[:, 1:]
         state_hidden = decoded[:, state_indices]
         action_hidden = decoded[:, action_indices]

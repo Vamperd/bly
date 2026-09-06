@@ -254,7 +254,7 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 最简 posterior Transformer capacity：F4B-v2 A/B已实现、待Ubuntu执行
+### 6.4 最简 posterior Transformer capacity：F4C已实现、待Ubuntu smoke
 
 新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
 使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
@@ -400,11 +400,42 @@ fixture seed固定20260830，优化seed首轮20260830、复核20260831；每支�
 marker分离；质量失败仍保留execution marker和`QUALITY_FAIL`。比较器只用8k/9k/10k配对结果及
 逐点保护条件输出唯一下一步。Windows相关组合37项测试通过；全发现中除3个既有模块仅因Windows
 未安装`h5py`导入失败外，其余均通过。25,453,411参数检查、compile、CLI help、Shell语法及diff check
-已通过；真实HDF5/CUDA仍待Ubuntu smoke，不得写成实验PASS。
+已通过。
 
-F4C结构仍未实现，A/B训练入口会明确拒绝C；只有比较manifest输出`IMPLEMENT_F4C`时才允许新增3072个
-零初始化逐层latent gate。完整命令和回填合同见[Next.md](Next.md)与[plan.md](plan.md)。当前唯一
-下一步为串行执行A smoke、B smoke并回填工程结果；R128与KL继续冻结。
+Ubuntu A/B工程smoke已完成。A run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_smoke_20260906_112939`，B run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_smoke_20260906_113154`，源码均为
+`c1ae5f79111bf61ddace32073df8122dbbefec95`。两支均为4 motion、T128、80 windows、800 fixtures，
+`execution_pass=true`；step0/legacy源指标复现、checkpoint readback和`cvae_posterior_ab_smoke.ok`
+全部通过，逐step训练身份SHA256一致。step-2 progression score为21.5601/21.5606且
+`quality_pass=false`，这是2-step smoke的预期质量状态，只证明真实HDF5/CUDA工程链路，不证明A/B效果。
+
+完整命令和回填合同见[Next.md](Next.md)与[plan.md](plan.md)。
+A正式10k已在run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634`完整执行，源码
+`c1ae5f79111bf61ddace32073df8122dbbefec95`。`execution_pass=true`但`quality_pass=false`；8k/9k/10k
+全部FAIL。step 10000的worst State/Action RMSE为0.015999/0.014238、max abs 0.137220、contact 100%、
+zero ratio 122.437，global State/Action RMSE为0.008425/0.007545；18.456%连续元素及800/800 fixtures
+仍超max阈值。execution marker、`QUALITY_FAIL`和checkpoint readback均符合协议。当时的下一步是只从
+相同F4D源独立执行optimizer seed 20260830的B正式10k，不得继承A checkpoint；该步骤现已完成。
+
+B正式10k已在run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_20260906_203844`完整执行，源码同为
+`c1ae5f79111bf61ddace32073df8122dbbefec95`。`execution_pass=true`、`quality_pass=false`，8k/9k/10k
+全部FAIL；step 10000的worst State/Action为0.016398/0.014550、max abs 0.130564、超阈值比例20.718%、
+contact 100%、zero ratio 120.443。A/B全部10,000 step训练身份及固定合同diff均为空。最后三点中位数
+B/A为`R_p=1.11982`、`R_a=0.95902`，不满足50%强改善；保护条件仍成立。当时的下一步是运行显式
+A/B比较器；该比较现已完成并正式输出`IMPLEMENT_F4C`。
+
+正式比较run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429`已execution PASS，源码
+`c1ae5f79111bf61ddace32073df8122dbbefec95`，13项配对检查全部通过，marker和SVG完整，并正式输出
+`IMPLEMENT_F4C`。F4C随后在Windows实现：仅在posterior模型配置开启时新增8×384个零初始化gate，
+每层decoder前只对有效数据token注入同一`latent_projection(z)`，C使用A原损失，总参数25,456,483。
+通用TransformerStack及A/B state dict不变；旧权重迁移只允许缺失8个gate。C必须显式提供触发比较run并
+重验manifest、A/B哈希、配对和决定；记录逐层gate范数、梯度与非零更新。相关42项测试、compile、CLI、
+Shell及diff check通过；完整发现95项仍只有3个既有`h5py`导入失败。真实Ubuntu C尚未运行，当前唯一
+下一步为同步后执行C 2-step smoke，不能直接执行正式C或第二seed。
 
 ### 6.5 已完成 parent 训练
 
@@ -551,8 +582,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. 按[Next.md](Next.md)串行执行F4B-v2 A smoke、B smoke并先回填工程结果，再执行正式A/B各10k和
-   显式路径比较。收益不足才实现F4C小结构对照，最后按规则做优化seed复核，正式预算总计不超过50k；
+1. A/B比较已触发`IMPLEMENT_F4C`，F4C Windows实现已READY；按[Next.md](Next.md)提交/同步后只运行
+   C 2-step smoke，回填通过后才执行C正式10k及A/B/C比较，随后按规则决定是否做优化seed复核；
    不直接续训或扩大模型，不提前实现C。fixture seed必须独立于优化seed，旧F4B提案不再执行。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。

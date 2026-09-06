@@ -1,8 +1,8 @@
 # 下一步实施合同：F4B-v2短程损失A/B与条件触发的结构对照
 
-最后更新：2026-09-06
+最后更新：2026-09-07
 
-状态：F4B-v2 A/B入口、seed分离、配对比较器、真实跨窗口/跨motion置换和execution/quality marker隔离已在Windows实现并通过轻量验证；Ubuntu A/B smoke与正式训练仍PENDING。F4C仍只有条件合同，未实现且A/B入口会明确拒绝C。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账；本文件定义当前下一步的详细合同。实施前同时阅读[AGENTS.md](AGENTS.md)。
+状态：F4B-v2 A/B入口、Ubuntu工程smoke、两支正式10k及比较均已完成；比较manifest已输出`IMPLEMENT_F4C`。F4C现已在Windows实现并通过轻量验证，Ubuntu C smoke仍PENDING。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账；本文件定义当前下一步的详细合同。实施前同时阅读[AGENTS.md](AGENTS.md)。
 
 ## 1. 目标、证据边界与固定输入
 
@@ -178,7 +178,7 @@ $$
 
 ## 5. 条件触发的F4C结构规格
 
-此节只定义后备方案，A/B结果触发前不得提前实现或运行C。目标是在原模型函数相同的起点，单独测试latent传递通路。
+正式A/B比较已触发本节并授权实现C。目标是在原模型函数相同的起点，单独测试latent传递通路。
 
 保留现有latent token、encoder、RoPE时间位置、所有输出头和256维global latent。令`P(z)`为现有latent projection的输出，每层decoder block之前，仅对有效State/Action token应用：
 
@@ -192,15 +192,15 @@ P复用原参数（含原bias）；每层一个按通道的gate向量，所有�
 
 C使用A原损失、同样两个seed、优化参数和采样序列，训练10k。step0先证明与原F4D输出及源指标一致，再允许更新；额外记录gate范数、梯度和非零变化。固定latent后改变被Mask真值不得改变decode输出。新通路只接收实际选定latent，不得偷读posterior真值或完整encoder token。
 
-已完成的不落盘CPU小模型检查仅证明gate=0时State/Action输出与原模型一致，gate梯度有限且非零；它不是源码实现，也不证明真实数据训练有效。该设计借鉴逐层条件注入的研究动机，不等同于DiT/AdaLN；论文结果不代替本项目对照。[参考：DiT条件注入对照](https://arxiv.org/html/2212.09748v2)
+源码实现及CPU测试现已证明gate=0时State/Action输出与原模型逐位一致、gate梯度有限非零、注入跳过latent/padding且固定latent不读取被遮挡真值；仍不证明真实数据训练有效。该设计借鉴逐层条件注入的研究动机，不等同于DiT/AdaLN；论文结果不代替本项目对照。[参考：DiT条件注入对照](https://arxiv.org/html/2212.09748v2)
 
 ## 6. 实施入口、验证顺序与交付验收
 
-### 6.1 已实现A/B接口及兼容性
+### 6.1 已实现A/B/C接口及兼容性
 
-新增独立模块`src/cvae_sa/posterior_capacity_ab.py`和固定配置`configs/posterior_capacity_ab.json`；历史`posterior-capacity[-25m]`、其配置默认值、KL=0行为与strict F4A wrapper未改。Shell入口为`posterior-capacity-ab-smoke`、`posterior-capacity-ab`和`posterior-capacity-ab-compare`；通过`CVAE_POSTERIOR_AB_ARM=A|B`与`CVAE_POSTERIOR_OPTIMIZER_SEED`选择分支及优化seed。复用`CVAE_DATASET_RUN`指定固定数据集，并用`CVAE_POSTERIOR_AB_SOURCE_CHECKPOINT`、`CVAE_POSTERIOR_F4A_RUN`显式固定只读来源；fixture seed始终为20260830，不由优化seed覆盖。
+新增独立模块`src/cvae_sa/posterior_capacity_ab.py`和固定配置`configs/posterior_capacity_ab.json`；历史`posterior-capacity[-25m]`、其配置默认值、KL=0行为与strict F4A wrapper未改。Shell入口为`posterior-capacity-ab-smoke`、`posterior-capacity-ab`和`posterior-capacity-ab-compare`；通过`CVAE_POSTERIOR_AB_ARM=A|B|C`与`CVAE_POSTERIOR_OPTIMIZER_SEED`选择分支及优化seed。复用`CVAE_DATASET_RUN`指定固定数据集，并用`CVAE_POSTERIOR_AB_SOURCE_CHECKPOINT`、`CVAE_POSTERIOR_F4A_RUN`显式固定只读来源；fixture seed始终为20260830，不由优化seed覆盖。
 
-第一阶段仅支持A/B；传入C会明确报“未触发/未启用”，不能静默回退为A。只有首轮比较manifest输出`IMPLEMENT_F4C`后才允许回到Windows实现C。resolved config、summary和checkpoint均记录A/B、fixture seed、optimizer seed及实际步数，不沿用旧F4B加法CVaR配置。
+`CVAE_POSTERIOR_AB_TRIGGER_COMPARISON`只允许用于C且必填；入口重算比较manifest引用的A/B summary哈希，并复验配对与`IMPLEMENT_F4C`决定。未经触发的C或把触发参数传给A/B均拒绝。resolved config、summary和checkpoint记录arm、fixture seed、optimizer seed、实际步数、结构开关与触发来源，不沿用旧F4B加法CVaR配置。
 
 实现复用`posterior_capacity.py`的原始loss、fixed Mask与exact evaluator，以及`posterior_capacity_tail.py`的底层统计；独立逻辑处理seed、实际优化目标、真实donor、比较器和execution-only状态。比较器强制读取显式A/B/C run路径，核对source/dataset/window/fixture及逐step采样SHA256后才生成结构化结论。
 
@@ -224,7 +224,7 @@ Windows改代码使用apply_patch并检查实际Git差异；记录外层、SONIC
 
 Windows轻量验证通过且实际命令补入本文后，先对A/B分别创建独立2-step Ubuntu smoke：使用同一真实80窗口/800 fixtures，执行完整step0复现与末步评测、loss/梯度、保存与读回checkpoint、曲线、manifest和execution-only marker。smoke无质量结论，正式A/B必须重新从F4D源checkpoint起步，不能继承smoke权重。若触发C，同样先独立smoke再正式训练。
 
-当前可执行的固定前置环境与A/B smoke如下；两支必须串行，且不设置`CVAE_RUN_DIR`：
+固定前置环境与A/B smoke命令如下；两支已在Ubuntu串行通过，且未设置`CVAE_RUN_DIR`：
 
 ```bash
 cd /home/helloworld/bly/state-action-cvae
@@ -240,11 +240,16 @@ CVAE_POSTERIOR_AB_ARM=A bash ./cvae_repro.sh posterior-capacity-ab-smoke
 CVAE_POSTERIOR_AB_ARM=B bash ./cvae_repro.sh posterior-capacity-ab-smoke
 ```
 
-两支smoke均有`cvae_posterior_ab_smoke.ok`且summary的`source.step0_reproduction.passed=true`后，分别从原F4D checkpoint重新开始正式10k：
+两支smoke run分别为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_smoke_20260906_112939`与
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_smoke_20260906_113154`，源码均为
+`c1ae5f79111bf61ddace32073df8122dbbefec95`。二者均有`cvae_posterior_ab_smoke.ok`，step0/legacy复现、
+checkpoint读回全部通过，窗口/fixture/逐step训练身份一致。以下是当时从原F4D checkpoint分别开始正式10k的执行合同；A/B现均已完成：
 
 ```bash
-CVAE_POSTERIOR_AB_ARM=A bash ./cvae_repro.sh posterior-capacity-ab
-CVAE_POSTERIOR_AB_ARM=B bash ./cvae_repro.sh posterior-capacity-ab
+# A/B均已在独立run完成；不得重跑、续训或交叉使用checkpoint。
+# CVAE_POSTERIOR_AB_ARM=A bash ./cvae_repro.sh posterior-capacity-ab
+# CVAE_POSTERIOR_AB_ARM=B bash ./cvae_repro.sh posterior-capacity-ab
 
 export CVAE_POSTERIOR_AB_RUN_A=<A_FORMAL_RUN>
 export CVAE_POSTERIOR_AB_RUN_B=<B_FORMAL_RUN>
@@ -254,6 +259,15 @@ bash ./cvae_repro.sh posterior-capacity-ab-compare
 
 比较器只接受相同optimizer seed的正式run。若decision为`REPLICATE_A_ONLY`或`REPLICATE_A_AND_B`，把optimizer seed改为20260831并只运行`replication_arms`列出的分支；完成后将首次比较run设为`CVAE_POSTERIOR_AB_INITIAL_COMPARISON`，把第二seed run重新设为`RUN_A/RUN_B`后再次调用同一比较入口。A-only复核必须unset B/C；A/B复核必须提供两支。复核比较器只在所选分支最后三次通过正式门禁时输出`NEW_32_MOTION_FIXED_RUN`。若首次decision为`IMPLEMENT_F4C`，停止Ubuntu训练并回到Windows实现C；若为`STOP_LOSS_LATENT_SEED_SEARCH`，停止本路线。不能人工跳过manifest决策。
 
-工程smoke通过后更新plan.md，再顺序运行正式A/B和合法比较。每个正式run结束先回传小型summary/metrics尾部/source状态/marker清单，更新plan.md事实与唯一下一步，再决定C或复核；不复制HDF5、大checkpoint或视频用于文档验收。
+比较run `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429`已合法输出`IMPLEMENT_F4C`并回填plan.md。同步Windows实现后，当前只运行C smoke：
 
-本次Windows实现的验收是：旧F4B明确SUPERSEDED、历史结果数值未改、A/B独立入口与比较器可调用、C仍被拒绝、seed/损失/预算/分支触发条件无冲突，并通过CPU测试、compile、CLI help、Shell语法与diff check。真实HDF5/CUDA及质量仍必须由上述Ubuntu smoke和正式run验证，不能因Windows READY写成实验PASS。
+```bash
+export CVAE_POSTERIOR_AB_TRIGGER_COMPARISON=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429
+export CVAE_POSTERIOR_OPTIMIZER_SEED=20260830
+unset CVAE_CONFIG CVAE_RUN_DIR CVAE_POSTERIOR_AB_INITIAL_COMPARISON
+CVAE_POSTERIOR_AB_ARM=C bash ./cvae_repro.sh posterior-capacity-ab-smoke
+```
+
+结束后回传summary中的source migration/trigger、step0 reproduction、gate training check、参数量、checkpoint readback、source状态和marker。更新plan.md后才运行正式C；不复制HDF5、大checkpoint或视频用于文档验收。
+
+当前Windows验收为posterior相关组合42项通过；全发现95项中仅3个既有模块因缺`h5py`导入失败。A/B和C参数量分别为25,453,411与25,456,483，compile、CLI help、Shell语法和diff check通过。C的真实HDF5/CUDA、step0复现、gate更新与checkpoint roundtrip仍必须由Ubuntu smoke验证，不能因Windows READY写成工程或模型质量PASS。

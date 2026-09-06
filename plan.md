@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
-最后更新：2026-09-06
-当前阶段：F4B-v2 A/B代码与比较器已在Windows实现并通过轻量验证，真实Ubuntu实验仍PENDING。F4D/F4A事实不变：全局State/Action RMSE为0.009149/0.008118，但21.08%的连续masked元素超过`1e-2`，800/800 fixtures均有max abs超阈值。当前唯一下一步是按固定F4D/F4A来源串行执行A smoke、B smoke；两支step0复现与工程marker都通过后，才分别从原F4D checkpoint启动正式10k并配对比较。F4C仍未实现，只有比较manifest明确输出`IMPLEMENT_F4C`时才进入实现；R128和KL继续冻结。
+最后更新：2026-09-07
+当前阶段：F4B-v2正式比较run已execution PASS并输出`IMPLEMENT_F4C`；A/B全部配对检查成立，`R_p=1.11982`、`R_a=0.95902`，B不值得复核。F4C现已按触发合同在Windows实现：只增加8×384个零初始化decoder逐层latent gate，总参数25,456,483，C使用A原损失；旧权重只允许缺失这8个gate。相关42项测试通过，真实Ubuntu尚未运行。当前唯一下一步是提交/同步本次Windows修改后，仅执行C的2-step smoke；smoke回填前不得启动C正式10k、第二seed、R128或KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -200,7 +200,7 @@ masked元素或5%的fixture，判定为`tail_objective_mismatch`，下一步只�
 
 ### 3.2 F4B-v2 / F4C / F4R受控改进路线
 
-状态：A/B代码与比较器已在Windows实现并通过轻量验证；Ubuntu训练尚未运行，C仍为条件触发后实现。详细合同、源路径、公式、接口和测试见[Next.md](Next.md)。
+状态：A/B工程与正式10k均已完成，正式比较器已输出`IMPLEMENT_F4C`；C结构、授权入口、迁移与诊断已在Windows实现并通过轻量验证，Ubuntu C smoke尚未运行。详细合同、源路径、公式、接口和测试见[Next.md](Next.md)。
 F4A的21.077%是跨全部fixed fixtures的masked元素出现次数比例，不是独立原始数据点的比例。
 当前只检验有限预算下的优化与条件注入机制，不把平均误差达标直接归因为loss错误。
 
@@ -214,10 +214,12 @@ A保留原损失。B对每个fixture和State/Action连续域取`0.5×MSE+0.5×to
 平均保持原样。`top_fraction=0.2`、`tail_mix=0.5`预先固定，不搜索；20%是启发式值，不声称由21.077%
 严格推导出最优参数，也不同时增加per-fixture均衡或其他loss。
 
-F4C只有在下表明确触发后才实现和执行。它保留A原损失与同一源起点，在每层decoder block前对有效
+F4C已由正式比较manifest触发并在Windows实现。它保留A原损失与同一源起点，在每层decoder block前对有效
 State/Action token加`g_l ⊙ P(z)`；`P`复用现有latent projection，`g_l`为384维零初始化向量。
 latent token与padding不注入；只增加3072参数，总参数25,456,483，不修改encoder、RoPE或latent维度。
-不落盘CPU合成可行性检查已确认初始输出一致且门控梯度有限非零；尚无真实数据效果证据。
+实现保持A/B结构开关默认关闭；C必须显式引用触发比较run，重新计算A/B summary哈希、配对与决定。
+CPU测试已确认初始输出逐位一致、只注入有效数据token、固定latent不泄漏真值且门控梯度有限非零；
+尚无真实HDF5/CUDA或质量效果证据。
 
 主指标为最后8000/9000/10000步的超阈值元素比例和worst max abs，各自取三个对应点的中位数。
 所有候选必须在三个点逐次满足contact 100%、zero-ratio至少10；global State/Action RMSE及worst
@@ -442,12 +444,16 @@ CVAE_POSTERIOR_AB_ARM=A bash ./cvae_repro.sh posterior-capacity-ab-smoke
 CVAE_POSTERIOR_AB_ARM=B bash ./cvae_repro.sh posterior-capacity-ab-smoke
 ```
 
-只有两支smoke的`source.step0_reproduction.passed=true`、checkpoint readback和
-`cvae_posterior_ab_smoke.ok`均成立，才串行执行正式A/B及显式路径比较：
+两支smoke已分别在
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_smoke_20260906_112939`和
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_smoke_20260906_113154`完成；
+`source.step0_reproduction.passed=true`、checkpoint readback和`cvae_posterior_ab_smoke.ok`均成立，
+且逐step训练身份SHA256完全一致。A/B正式10k与比较均已完成；以下命令保留为历史合同：
 
 ```bash
-CVAE_POSTERIOR_AB_ARM=A bash ./cvae_repro.sh posterior-capacity-ab
-CVAE_POSTERIOR_AB_ARM=B bash ./cvae_repro.sh posterior-capacity-ab
+# A/B均已完成；不得重跑、续训或交叉加载checkpoint。
+# CVAE_POSTERIOR_AB_ARM=A bash ./cvae_repro.sh posterior-capacity-ab
+# CVAE_POSTERIOR_AB_ARM=B bash ./cvae_repro.sh posterior-capacity-ab
 
 export CVAE_POSTERIOR_AB_RUN_A=<A_FORMAL_RUN>
 export CVAE_POSTERIOR_AB_RUN_B=<B_FORMAL_RUN>
@@ -455,9 +461,25 @@ unset CVAE_POSTERIOR_AB_RUN_C CVAE_RUN_DIR
 bash ./cvae_repro.sh posterior-capacity-ab-compare
 ```
 
+正式比较run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429`，其marker、全部配对检查和
+`IMPLEMENT_F4C`决定均已回传。同步Windows实现后，当前只执行C smoke：
+
+```bash
+export CVAE_POSTERIOR_AB_TRIGGER_COMPARISON=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429
+export CVAE_POSTERIOR_OPTIMIZER_SEED=20260830
+unset CVAE_CONFIG CVAE_RUN_DIR CVAE_POSTERIOR_AB_INITIAL_COMPARISON
+
+CVAE_POSTERIOR_AB_ARM=C bash ./cvae_repro.sh posterior-capacity-ab-smoke
+```
+
+C入口会重验触发manifest及其A/B summary哈希。smoke必须证明step0源指标复现、8个gate初始为零且训练后
+非零、全部gate梯度存在、25,456,483参数、checkpoint readback及`cvae_posterior_ab_smoke.ok`；完成并回填
+前不得运行正式C。正式命令仍为同一环境下`CVAE_POSTERIOR_AB_ARM=C bash ./cvae_repro.sh posterior-capacity-ab`。
+
 正式run即使质量失败也应正常完成并同时保留`cvae_posterior_ab_execution.ok`与内容为
 `QUALITY_FAIL`的`cvae.failed`；只有最后8k/9k/10k均通过progression才生成既有quality marker。
-比较器核对逐step采样SHA256并只输出一个下一动作；C依旧会被训练入口拒绝，直到比较manifest触发。
+比较器核对逐step采样SHA256并只输出一个下一动作；C仅在缺失或无法通过哈希复核的触发comparison manifest时被训练入口拒绝。当前正式comparison已经触发`IMPLEMENT_F4C`。
 
 K0/K1当前没有执行命令。只有L128、F128、R128全部通过并完成本文结果回填后，才允许在Windows
 设计和实现新的KL配置、Python入口、Shell命令及测试；实现完成且Windows轻量验证通过后，再把
@@ -510,9 +532,15 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | I-F4A Windows实现 | PASS | N/A | `tiny-model@6463b2ec960cda22c7ed70814a46a44e6804d4c0`+工作树 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 独立只读入口、严格F4D合同、逐fixture/feature/contact产物、SVG及execution-only marker已实现；执行F4A |
 | F4A | PASS（execution） | `/home/helloworld/bly/runs/cvae_posterior_capacity_tail_diagnostic_f4a_20260905_200807` | `2ff1ec95db72fed9db80d3b040cccc32b3f9703f` | source step 100000；`mixed_tail_and_reconstruction_failure` | 0.009149 global / 0.023021 worst fixture | 0.008118 global / 0.015263 worst fixture | 0.215620 | 100% | N/A（只读复用F4D） | `cvae_posterior_capacity_tail_diagnostic.ok` | 21.08%元素及100% fixtures超max阈值；当前由F4B-v2接管 |
 | F4B（旧） | SUPERSEDED | — | 未实现、未运行 | — | — | — | — | — | — | — | 加法CVaR与各25k提案由F4B-v2替代 |
-| I-F4B-v2 Windows实现 | READY | N/A | `tiny-model@2ff1ec95db72fed9db80d3b040cccc32b3f9703f`+工作树 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | A/B独立入口、严格step0、双seed、完整统计、真实donor、比较器与marker隔离已实现；执行A/B smoke |
-| F4B-v2 A/B | PENDING | — | Windows READY；Ubuntu尚未运行 | — | — | — | — | — | — | — | 原损失与归一化尾部加权，各10k；先完成两支smoke |
-| F4C | PENDING | — | 条件触发后才实现 | — | — | — | — | — | — | — | 原损失与逐层latent门控，10k |
+| I-F4B-v2实现 | PASS | N/A | `c1ae5f79111bf61ddace32073df8122dbbefec95` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | A/B入口、严格step0、双seed、完整统计、真实donor、比较器与marker隔离已由两支Ubuntu smoke验证 |
+| F4B-v2 A smoke | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_smoke_20260906_112939` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | step 2 / progression score 21.5601（仅smoke诊断） | 未回传 | 未回传 | 未回传 | 未回传 | 未回传 | `cvae_posterior_ab_smoke.ok` | execution-only：step0/legacy复现、2步训练、评测和checkpoint读回通过；无质量结论 |
+| F4B-v2 B smoke | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_smoke_20260906_113154` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | step 2 / progression score 21.5606（仅smoke诊断） | 未回传 | 未回传 | 未回传 | 未回传 | 未回传 | `cvae_posterior_ab_smoke.ok` | execution-only：与A的窗口、fixture及两步训练身份逐位配对；step0与checkpoint读回通过 |
+| F4B-v2 A正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | step 10000 / progression score 13.7220 | 0.015999 worst / 0.008425 global | 0.014238 worst / 0.007545 global | 0.137220 | 100% | 122.437 | `cvae_posterior_ab_execution.ok` + `cvae.failed` | 8k/9k/10k均FAIL；18.456%元素及800/800 fixtures仍超阈值；执行B正式10k |
+| F4B-v2 B正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_20260906_203844` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | step 10000 / progression score 13.0564 | 0.016398 worst / 0.008444 global | 0.014550 worst / 0.007629 global | 0.130564 | 100% | 120.443 | `cvae_posterior_ab_execution.ok` + `cvae.failed` | 8k/9k/10k均FAIL；20.718%元素仍超阈值；身份完全配对，运行比较器 |
+| F4B-v2 A/B比较 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | `IMPLEMENT_F4C` | — | — | `R_p=1.11982` / `R_a=0.95902` | guards PASS | — | `cvae_posterior_ab_comparison.ok` | 13项配对检查全PASS；B不满足progression/50%规则，授权实现C |
+| I-F4C Windows实现 | READY | N/A | `tiny-model@c1ae5f79111bf61ddace32073df8122dbbefec95`+工作树 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 8层零初始化gate、触发授权、严格迁移、诊断与比较兼容已实现；执行C smoke |
+| F4C smoke | PENDING | — | 等待同步Windows实现 | — | — | — | — | — | — | — | 2-step只验证真实工程链路、step0等价及gate更新 |
+| F4C正式 | PENDING | — | 仅C smoke回填通过后运行 | — | — | — | — | — | — | — | A原损失与逐层latent门控，10k；随后A/B/C比较 |
 | F4R | PENDING | — | 等待A/B及可选C结论 | — | — | — | — | — | — | — | fixture seed不变，优化seed改20260831；A单独10k或配对20k |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
@@ -556,6 +584,49 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-07 — I-F4C Windows实现 READY
+
+- 触发：正式比较run `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429` 的`execution_pass=true`、全部配对检查、comparison marker与`decision=IMPLEMENT_F4C`已回传；实现入口要求显式提供该run并重新验证manifest、A/B summary哈希、数据/来源、配对及决定。
+- 结构：只在`PosteriorCapacityTransformerCVAE`配置开启时创建8个384维零初始化gate；每个decoder block前向有效State/Action token加`gate × latent_projection(z)`，不作用于latent token或padding，不修改通用`TransformerStack`。A/B关闭时参数与state dict不变；C总参数25,456,483。
+- 迁移与训练：C继续使用A原始MSE/BCE，从F4D `best_progression.pt` model-only初始化；加载仅允许缺失精确的8个gate key且验证全零，任何其他missing/unexpected key失败。每步记录逐层gate范数、max abs、裁剪前梯度和更新后非零数；评测、summary与checkpoint记录结构及触发来源。
+- 防护：C只接受optimizer seed 20260830和有效的`IMPLEMENT_F4C`初始比较；触发参数传给A/B会拒绝。保存checkpoint回读验证8个gate key、shape、有限性、结构开关和25,456,483参数；A/C比较额外验证C结构与触发记录。
+- Windows验证：posterior/model/tail/plot/AB组合42项通过，涵盖零gate输出逐位一致、有效token限定、真值隔离、gate梯度/更新、严格迁移、checkpoint gate读回、触发哈希及比较分支；参数断言A/B 25,453,411、C 25,456,483，compile、CLI、Shell语法和diff check通过。完整发现运行95项，只有3个既有模块因Windows缺`h5py`导入失败。
+- 边界与唯一下一步：尚未在真实HDF5/CUDA运行C，不能声称step0复现或结构有效。先提交/同步Windows修改，再只执行C 2-step smoke并回填；不得直接启动正式C。
+
+### 2026-09-07 — F4B-v2 A/B正式比较 PASS（execution）
+
+- 运行：`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429`；源码`c1ae5f79111bf61ddace32073df8122dbbefec95`，marker为`cvae_posterior_ab_comparison.ok`，SVG为`plots/posterior_ab_comparison.svg`。
+- 验证：`execution_pass=true`、`comparison_phase=initial`；fixture/optimizer seed、dataset、窗口、Mask、固定案例、source/F4A、25M模型、10,000 step样本身份和8k/9k/10k存在性等13项配对检查全部通过，guards PASS。
+- 结果：B/A三点中位残余比例为`R_p=1.1198186676`、`R_a=0.9590180833`；B未通过progression，`strong_improvement=false`、`worth_replicating=false`。
+- 决定：manifest正式输出`IMPLEMENT_F4C`，原因是B不满足受保护的progression/双指标50%改善规则；不启动第二seed，不把B checkpoint用于C。
+- 唯一下一步：在Windows实现并轻量验证F4C，随后先运行独立C smoke。
+
+### 2026-09-06 — F4B-v2 B正式10k FAIL（quality）
+
+- 运行：`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_20260906_203844`；源码`c1ae5f79111bf61ddace32073df8122dbbefec95`，4 motion、T128、80 windows、800 fixtures，完成10,000 optimizer steps。
+- 状态：`execution_pass=true`、`quality_pass=false`；checkpoint readback全部通过，保留`cvae_posterior_ab_execution.ok`与`QUALITY_FAIL`。源码状态只有两个既有嵌套目录未跟踪。A/B全部10,000 step训练身份SHA256及dataset/source/window/fixture合同diff均为空，满足配对比较前提。
+- 最佳/最后点：step 10000，score 13.056414；worst State/Action RMSE为0.016398/0.014550，max abs为0.130564，contact 100%，zero ratio 120.443；global State/Action RMSE为0.008444/0.007629，连续元素超阈值比例20.718%。
+- 正式决策点：8k/9k/10k全部FAIL。最后三点中位数相对A为`R_p=1.11982`和`R_a=0.95902`；即超阈值比例恶化11.98%，max abs仅改善4.10%。worst State/Action中位数也分别恶化2.41%/2.14%，global State/Action中位数恶化0.15%/1.05%，但仍处于10%保护范围，contact和zero-ratio保护成立。
+- 初步判断：A未PASS，B也未PASS且两项残余比例远高于0.50，故按冻结决策表预期应触发`IMPLEMENT_F4C`；这只是人工复核，最终唯一动作必须由正式比较manifest给出。
+- 唯一下一步：只运行显式A/B比较器；回填`posterior_ab_comparison.json`、comparison marker和decision后，若确为`IMPLEMENT_F4C`才回到Windows实现C。
+
+### 2026-09-06 — F4B-v2 A正式10k FAIL（quality）
+
+- 运行：`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634`；源码`c1ae5f79111bf61ddace32073df8122dbbefec95`，4 motion、T128、80 windows、800 fixtures，完成10,000 optimizer steps。
+- 状态：`execution_pass=true`、`quality_pass=false`；checkpoint readback全部通过，保留`cvae_posterior_ab_execution.ok`与内容为`QUALITY_FAIL execution_complete=true progression_last_three=false`的`cvae.failed`。源码状态只有两个既有嵌套目录未跟踪，没有观测到CVAE源码差异。
+- 最佳/最后点：step 10000，score 13.721974；worst State/Action RMSE为0.015999/0.014238，max abs为0.137220，contact 100%，zero ratio 122.437；global State/Action/combined RMSE为0.008425/0.007545/0.008173。
+- 正式决策点：8k/9k/10k全部FAIL；其超`1e-2`元素比例为18.737%/18.558%/18.456%，max abs为0.138204/0.137329/0.137220，且每个点均为800/800 fixtures存在max-abs超阈值。
+- 相对源F4D的描述性比较：最后三点中位数的超阈值比例下降11.95%，max abs下降36.31%，worst State/Action下降30.34%/6.51%；这表明A继续优化但不足以通过门禁。A/B主比较尚不能计算，必须等待B的同step配对结果。
+- 唯一下一步：从相同F4D `best_progression.pt`、optimizer seed 20260830独立启动B正式10k；不得继承A checkpoint。B完成并回填后才运行比较器。
+
+### 2026-09-06 — F4B-v2 A/B Ubuntu smoke PASS（execution）
+
+- 运行：A为`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_smoke_20260906_112939`，B为`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_smoke_20260906_113154`；两支源码均为`c1ae5f79111bf61ddace32073df8122dbbefec95`。
+- 固定合同：两支均为4 motion、T128、80 windows、800 fixtures、25,453,411参数、fixture/optimizer seed均为20260830；dataset、源checkpoint、窗口、Mask位图、固定速度案例和身份合同hash一致。
+- 复现与执行：两支`execution_pass=true`、`smoke=true`；step0与legacy source reproduction的全部检查为true，2个optimizer step的训练身份SHA256逐步完全相同，checkpoint readback全部检查通过，marker均为`cvae_posterior_ab_smoke.ok`。
+- 质量边界：A/B的step-2 progression score分别为21.5601/21.5606，`quality_pass=false`。smoke仅验证真实HDF5/CUDA、A/B loss路径、评测、诊断与落盘读回，2步结果不得用于判断A/B优劣或posterior容量。
+- 唯一下一步：从同一F4D `best_progression.pt`重新初始化并完整运行A正式10k；回填A的summary、8k/9k/10k评测、source状态和marker后，再运行B正式10k。
 
 ### 2026-09-06 — I-F4B-v2 Windows实现 READY
 
