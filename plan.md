@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：F4F G8与T129两个正式15k run均完整执行但质量FAIL。T129 run`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123`最佳step15k的worst State/Action RMSE为0.117395/0.065137、max abs 2.909683、global State/Action RMSE为0.040533/0.025330，53.122%连续元素超1e-2；三类code依赖仍高于16倍。T129在全部核心连续误差上均差于G8，两臂13k–15k均FAIL且训练身份一致。当前唯一下一步是不训练，只运行显式G8/T129比较器以固化双臂身份与决策。继续禁止追加步数、32-motion、R128和KL。
+当前阶段：F4F显式比较已在run`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708`完成，18项身份检查全PASS；G8/T129三个主比较点全部质量FAIL，固定决策为`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`，唯一下一步为`RUN_DIRECT_OUTPUT_MEMORY_CEILING_FOR_DECODER_AND_OBJECTIVE`。F4F只证明当前同预算拓扑、初始化、decoder与15k协议不足，不证明global/temporal latent理论上不可行。下一步先设计并实现直接输出记忆上限诊断，禁止追加F4F步数、32-motion、R128和KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -562,7 +562,8 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4F T129 smoke | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_smoke_20260907_182754` | `478f479bb3345697ff5c7da14583c9c3e13be193` | 2 step；随机code质量值不作容量判断 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 工程依赖检查PASS | `cvae_posterior_latent_topology_smoke.ok` | T129参数、身份、隔离及读回全PASS；执行G8正式15k |
 | F4F G8 formal | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_20260907_184707` | `8012b972b5d842f3196586eb995c963fb6dda06d` | 固定15k；best step15k/score71.0758 | 0.071671 worst / 0.018158 global | 0.043046 worst / 0.013475 global | 0.710758；39.456%超1e-2 | 100% | zero/cross-window/cross-motion `42.80/43.25/54.69` | `cvae_posterior_latent_topology_execution.ok` + `cvae.failed` | 有效质量失败；13k/14k/15k均FAIL，不追加步数，执行T129正式15k |
 | F4F T129 formal | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123` | `6e7caed535721a5ee575b80eba138cb6e392152e` | 固定15k；best step15k/score290.9683 | 0.117395 worst / 0.040533 global | 0.065137 worst / 0.025330 global | 2.909683；53.122%超1e-2 | 100% | zero/cross-window/cross-motion `18.94/16.58/20.97` | `cvae_posterior_latent_topology_execution.ok` + `cvae.failed` | 有效质量失败且全面差于G8；运行显式双臂比较器 |
-| F4F topology compare | PENDING | — | 已实现、未运行 | 只读比较13k/14k/15k | — | — | — | — | — | — | 当前唯一动作；预期固定决策为双臂FAIL后停止latent拓扑扩展 |
+| F4F topology compare | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708` | `6e7caed535721a5ee575b80eba138cb6e392152e` | 只读比较13k/14k/15k；18项身份检查PASS | G8中位0.073426；T129中位0.118866 | G8中位0.044032；T129中位0.065852 | G8中位0.729531；T129中位2.956917 | 两臂100% | 两臂均满足依赖≥10 | `cvae_posterior_latent_topology_comparison.ok` | `BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`；停止latent拓扑扩展 |
+| F4G direct-output ceiling | PENDING | — | 尚未设计/实现 | 先隔离objective/evaluator，再定位decoder上限 | — | — | — | — | — | — | 当前唯一方向；新合同明确前不得启动训练 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
 | K1 | PENDING | — | 尚未实现；从R128 `last.pt` model-only初始化 | — | — | — | — | — | — | — | 32 motion、T128、beta线性预热与三路径正式对照 |
@@ -605,6 +606,16 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-08 00:07 — F4F显式比较 PASS（双臂质量FAIL）
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708`；源码`tiny-model@6e7caed535721a5ee575b80eba138cb6e392152e`，exit code 0，仅生成`cvae_posterior_latent_topology_comparison.ok`。
+- 配对合同：dataset/source/F4E/fixture/window/motion、训练seed与完整15k训练身份、optimizer、比较step、初始化seed/分布、F4E全局保护、两臂shape/参数和code预算共18项检查全部PASS。G8/T129 summary SHA256为`845a3d5e...`/`92d2f632...`。
+- 三点中位：G8/T129 score为72.953/295.692，worst State为0.073426/0.118866，worst Action为0.044032/0.065852，max abs为0.729531/2.956917，超阈值比例为39.849%/53.272%。两臂contact均100%，code依赖均超过10倍；G8全面优于T129但仍远未PASS。
+- 预算公平性：每window code标量为2,048/2,064，差0.775%；总参数差0.0185%。因此结果不能归因于明显参数预算差异。
+- 固定结论：`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`。在当前F4D初始化、A损失、decoder与15k协议下，增加global memory token或改为16维per-time code都没有解决已见80窗口的精确记忆；不允许选择相对更好的G8继续推进。
+- 边界：该比较不证明global或temporal latent在其他初始化、更长训练或其他decoder中理论上不可行，也不涉及posterior/prior、随机Mask或未见motion；它只终止当前latent拓扑扩展路线。
+- 唯一下一步：`RUN_DIRECT_OUTPUT_MEMORY_CEILING_FOR_DECODER_AND_OBJECTIVE`。先建立无需latent编码/广播的直接输出上限，区分objective/evaluator是否可达到门禁，再决定是否仍需诊断decoder；新合同明确前不启动训练。
 
 ### 2026-09-07 21:31 — F4F T129正式 FAIL（execution PASS）
 

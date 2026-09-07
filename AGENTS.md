@@ -558,6 +558,16 @@ RMSE为0.040533/0.025330、contact 100%、53.122%元素超1e-2，zero/cross-wind
 和G8完全一致。T129全部核心连续误差均差于G8，当前唯一下一步是只读运行显式双臂比较器；
 不得追加训练或进入32-motion/R128/KL。
 
+F4F显式比较run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708`
+已以源码`6e7caed535721a5ee575b80eba138cb6e392152e`完成，exit code0且comparison marker存在。dataset、
+source、F4E、fixture/window/motion、完整训练身份、optimizer、初始化、shape/参数和code预算共18项
+配对检查全PASS。G8/T129三个比较点均质量FAIL；三点中位score为72.953/295.692，max abs为
+0.729531/2.956917，超阈值比例为39.849%/53.272%。code预算仅差0.775%、总参数差0.0185%。正式
+决策为`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`，唯一下一步为
+`RUN_DIRECT_OUTPUT_MEMORY_CEILING_FOR_DECODER_AND_OBJECTIVE`。不得继续F4F训练、选择相对较好的G8
+推进或进入32-motion/R128/KL；先设计独立的直接输出记忆上限合同。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -709,8 +719,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. G8与T129正式15k均已完整执行且质量FAIL。当前唯一动作是只读运行显式双臂比较器，核验完整
-   配对身份并固化决策；比较完成前后均不得追加训练或提前进入其他结构实验。
+1. F4F显式比较已完成并固定为双臂FAIL。当前唯一方向是设计并实现F4G直接输出记忆上限诊断，先
+   隔离objective/evaluator，再定位decoder参数化；新合同明确前不得启动训练或扩展数据规模。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较

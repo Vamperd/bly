@@ -1,14 +1,13 @@
-# 下一步实施合同：F4F 等预算 Latent Topology 对照
+# 已完成合同：F4F 等预算 Latent Topology 对照
 
 最后更新：2026-09-07
 
-状态：G8与T129两个正式15k run均完整执行但质量FAIL。T129 run
-`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123`
-最佳step15k的worst State/Action RMSE为0.117395/0.065137、max abs 2.909683、global State/Action
-RMSE为0.040533/0.025330，53.122%连续元素超1e-2；三类code依赖仍为16.58–20.97倍。它在所有核心
-连续误差上均差于G8，两臂13k/14k/15k全部FAIL，且训练身份逐step一致。当前唯一下一步是不启动
-训练，只运行显式G8/T129比较器，固化双臂身份与`BOTH_FAIL`决策。禁止追加步数、修改loss/门禁或
-进入32-motion/R128/KL。概览与实际结果仍以
+状态：F4F已由显式比较run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708`
+正式收尾。18项配对身份检查全PASS，G8/T129在13k/14k/15k均质量FAIL；决策为
+`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`，唯一下一步为
+`RUN_DIRECT_OUTPUT_MEMORY_CEILING_FOR_DECODER_AND_OBJECTIVE`。当前禁止追加G8/T129步数、改门禁、
+扩32-motion或进入R128/KL；必须先为直接输出记忆上限建立独立合同并实现工程smoke。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 已知事实与实验问题
