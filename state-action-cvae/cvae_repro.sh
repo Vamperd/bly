@@ -523,6 +523,80 @@ posterior_capacity_autodecoder() {
   printf '%s\n' "$run_dir"
 }
 
+posterior_capacity_latent_topology() {
+  local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
+  local source_checkpoint="${CVAE_POSTERIOR_TOPOLOGY_SOURCE_CHECKPOINT:-}"
+  local f4e_run="${CVAE_POSTERIOR_F4E_RUN:-}"
+  local arm="${CVAE_POSTERIOR_TOPOLOGY_ARM:-}"
+  local config="$SCRIPT_DIR/configs/posterior_capacity_latent_topology.json"
+  local prefix run_dir marker latest_key
+  arm="${arm^^}"
+  [[ -z "${CVAE_CONFIG:-}" ]] \
+    || die "posterior-capacity-latent-topology uses its fixed config; unset CVAE_CONFIG"
+  [[ "$arm" == "G8" || "$arm" == "T129" ]] \
+    || die "CVAE_POSTERIOR_TOPOLOGY_ARM must be G8 or T129"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  [[ -n "$source_checkpoint" ]] \
+    || die "CVAE_POSTERIOR_TOPOLOGY_SOURCE_CHECKPOINT is required"
+  [[ -f "$source_checkpoint" ]] \
+    || die "F4F source checkpoint is missing: $source_checkpoint"
+  [[ "$(basename -- "$source_checkpoint")" == "best_progression.pt" ]] \
+    || die "F4F requires the F4D best_progression.pt"
+  [[ -n "$f4e_run" ]] || die "CVAE_POSTERIOR_F4E_RUN is required"
+  [[ -f "$f4e_run/markers/cvae_posterior_autodecoder_execution.ok" ]] \
+    || die "formal F4E execution marker is missing: $f4e_run"
+  [[ -f "$f4e_run/manifests/posterior_autodecoder_summary.json" ]] \
+    || die "formal F4E summary is missing: $f4e_run"
+  prefix="cvae_posterior_capacity_latent_topology_f4f_${arm,,}"
+  [[ "$smoke" == "true" ]] && prefix="${prefix}_smoke"
+  run_dir="$(new_run_dir "$prefix")"
+  capture_environment "$run_dir"
+  local extra_args=()
+  [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
+  run_logged "$run_dir" posterior_capacity_latent_topology.log \
+    "$PYTHON" -m cvae_sa.posterior_capacity_latent_topology train \
+      --dataset-run "$dataset_run" \
+      --source-checkpoint "$source_checkpoint" \
+      --f4e-run "$f4e_run" \
+      --output-run "$run_dir" \
+      --config "$config" \
+      --arm "$arm" \
+      "${extra_args[@]}"
+  marker="cvae_posterior_latent_topology_execution.ok"
+  [[ "$smoke" == "true" ]] && marker="cvae_posterior_latent_topology_smoke.ok"
+  [[ -f "$run_dir/markers/$marker" ]] \
+    || die "F4F execution marker is missing: $marker"
+  latest_key="posterior_latent_topology_f4f_${arm,,}"
+  [[ "$smoke" == "true" ]] && latest_key="${latest_key}_smoke"
+  update_latest "$latest_key" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+posterior_capacity_latent_topology_compare() {
+  local run_g8="${CVAE_POSTERIOR_TOPOLOGY_RUN_G8:-}"
+  local run_t129="${CVAE_POSTERIOR_TOPOLOGY_RUN_T129:-}"
+  local run_dir
+  [[ -n "$run_g8" ]] || die "CVAE_POSTERIOR_TOPOLOGY_RUN_G8 is required"
+  [[ -f "$run_g8/manifests/posterior_latent_topology_summary.json" ]] \
+    || die "formal G8 summary is missing: $run_g8"
+  [[ -n "$run_t129" ]] || die "CVAE_POSTERIOR_TOPOLOGY_RUN_T129 is required"
+  [[ -f "$run_t129/manifests/posterior_latent_topology_summary.json" ]] \
+    || die "formal T129 summary is missing: $run_t129"
+  run_dir="$(new_run_dir cvae_posterior_capacity_latent_topology_f4f_comparison)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" posterior_capacity_latent_topology_compare.log \
+    "$PYTHON" -m cvae_sa.posterior_capacity_latent_topology compare \
+      --run-g8 "$run_g8" \
+      --run-t129 "$run_t129" \
+      --output-run "$run_dir"
+  [[ -f "$run_dir/markers/cvae_posterior_latent_topology_comparison.ok" ]] \
+    || die "F4F comparison marker is missing"
+  update_latest posterior_latent_topology_f4f_comparison "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 overfit_single_task() {
   local dataset_run="${CVAE_DATASET_RUN:-}" task="${CVAE_OVERFIT_TASK:-}"
   local seed="${CVAE_SEED:-20260828}" profile="${CVAE_OVERFIT_MODEL:-compact}"
@@ -905,6 +979,9 @@ case "${1:-}" in
   posterior-capacity-ab-compare) posterior_capacity_ab_compare ;;
   posterior-capacity-autodecoder-smoke) posterior_capacity_autodecoder true ;;
   posterior-capacity-autodecoder) posterior_capacity_autodecoder false ;;
+  posterior-capacity-latent-topology-smoke) posterior_capacity_latent_topology true ;;
+  posterior-capacity-latent-topology) posterior_capacity_latent_topology false ;;
+  posterior-capacity-latent-topology-compare) posterior_capacity_latent_topology_compare ;;
   analyze-overfit) analyze_overfit ;;
   diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
@@ -915,5 +992,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

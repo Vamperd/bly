@@ -1,0 +1,71 @@
+{
+  "format_version": "sonic_posterior_latent_topology_config_v1",
+  "fixture_seed": 20260830,
+  "initialization_seed": 20260832,
+  "training_seed": 20260831,
+  "data": {
+    "motion_count": 4,
+    "window_transitions": 128,
+    "max_windows": null,
+    "num_workers": 4
+  },
+  "model": {
+    "kind": "physics_posterior_transformer",
+    "d_model": 384,
+    "encoder_layers": 6,
+    "decoder_layers": 8,
+    "heads": 8,
+    "ffn_dim": 1536,
+    "latent_dim": 256,
+    "dropout": 0.0,
+    "decoder_layer_latent_gates": false,
+    "base_parameter_count": 25453411,
+    "arms": {
+      "G8": {
+        "code_shape": [80, 8, 256],
+        "code_parameter_count": 163840,
+        "topology_parameter_count": 3072,
+        "total_parameter_count": 25620323
+      },
+      "T129": {
+        "code_shape": [80, 129, 16],
+        "code_parameter_count": 165120,
+        "topology_parameter_count": 6528,
+        "total_parameter_count": 25625059
+      }
+    }
+  },
+  "training": {
+    "objective": "A",
+    "mask_phase": "fixed",
+    "precision": "FP32",
+    "no_early_stop": true,
+    "micro_batch": 4,
+    "gradient_accumulation": 16,
+    "max_optimizer_steps": 15000,
+    "validation_interval": 1000,
+    "warmup_steps": 250,
+    "gradient_clip": 1.0,
+    "weight_decay": 0.0,
+    "code_learning_rate": 0.0003,
+    "code_minimum_learning_rate": 0.00001,
+    "decoder_learning_rate": 0.00003,
+    "decoder_minimum_learning_rate": 0.000001,
+    "kl_beta": 0.0,
+    "free_bits": 0.0,
+    "thresholds": {
+      "state_rmse": 0.0001,
+      "action_rmse": 0.0001,
+      "continuous_max_abs": 0.001,
+      "latent_ratio": 10.0
+    },
+    "progression_thresholds": {
+      "state_rmse": 0.01,
+      "action_rmse": 0.01,
+      "continuous_max_abs": 0.01,
+      "latent_ratio": 10.0
+    },
+    "f4e_global_rmse_guard_multiplier": 1.1,
+    "comparison_steps": [13000, 14000, 15000]
+  }
+}

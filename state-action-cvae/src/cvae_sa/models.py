@@ -1853,6 +1853,85 @@ class PosteriorCapacityTransformerCVAE(nn.Module):
             visible, valid, times, state_indices, action_indices, latent
         )
 
+    def decode_from_latent_topology(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        *,
+        prefix_tokens: torch.Tensor | None = None,
+        time_conditions: torch.Tensor | None = None,
+    ) -> PosteriorCapacityDecodedOutput:
+        """Decode from either width-space memory tokens or per-time conditions.
+
+        This parameter-free interface exists for the F4F capacity diagnostic.  It
+        never evaluates a latent encoder, and exactly one topology must be supplied.
+        """
+        if (prefix_tokens is None) == (time_conditions is None):
+            raise ValueError(
+                "exactly one of prefix_tokens or time_conditions must be provided"
+            )
+        if self.decoder_layer_latent_gates_enabled:
+            raise ValueError("latent topology decoding requires decoder gates disabled")
+        visible, valid, times, state_indices, action_indices = self._tokens(
+            batch, state_mask, action_mask, full=False
+        )
+        batch_size = visible.shape[0]
+        latent_condition = visible.new_zeros((batch_size, self.width))
+        if prefix_tokens is not None:
+            if (
+                prefix_tokens.ndim != 3
+                or prefix_tokens.shape[0] != batch_size
+                or prefix_tokens.shape[1] < 1
+                or prefix_tokens.shape[2] != self.width
+            ):
+                raise ValueError("prefix_tokens must have shape [batch, slots, d_model]")
+            prefix_count = prefix_tokens.shape[1]
+            decoder_valid = torch.cat(
+                (
+                    torch.ones(
+                        batch_size,
+                        prefix_count,
+                        dtype=torch.bool,
+                        device=visible.device,
+                    ),
+                    valid,
+                ),
+                dim=1,
+            )
+            decoded = self._decode_tokens(
+                torch.cat((prefix_tokens, visible), dim=1),
+                decoder_valid,
+                torch.cat((times.new_full((prefix_count,), -1), times)),
+                latent_condition,
+            )[:, prefix_count:]
+        else:
+            assert time_conditions is not None
+            expected = (
+                batch_size,
+                batch["physical_state"].shape[1],
+                self.width,
+            )
+            if tuple(time_conditions.shape) != expected:
+                raise ValueError(
+                    "time_conditions must have shape [batch, state_steps, d_model]"
+                )
+            interleaved = torch.stack(
+                (time_conditions[:, :-1], time_conditions[:, :-1]), dim=2
+            ).flatten(1, 2)
+            token_conditions = torch.cat(
+                (interleaved, time_conditions[:, -1:]), dim=1
+            )
+            if token_conditions.shape != visible.shape:
+                raise ValueError("per-time conditions do not align with decoder tokens")
+            decoded = self._decode_tokens(
+                visible + token_conditions,
+                valid,
+                times,
+                latent_condition,
+            )
+        return self._decoder_outputs(decoded, state_indices, action_indices)
+
     def _decode_from_tokens(
         self,
         visible: torch.Tensor,
@@ -1879,6 +1958,14 @@ class PosteriorCapacityTransformerCVAE(nn.Module):
             torch.cat((times.new_tensor([-1]), times)),
             latent_condition,
         )[:, 1:]
+        return self._decoder_outputs(decoded, state_indices, action_indices)
+
+    def _decoder_outputs(
+        self,
+        decoded: torch.Tensor,
+        state_indices: torch.Tensor,
+        action_indices: torch.Tensor,
+    ) -> PosteriorCapacityDecodedOutput:
         state_hidden = decoded[:, state_indices]
         action_hidden = decoded[:, action_indices]
         state_contact_logits = self.state_contact_output(state_hidden)
