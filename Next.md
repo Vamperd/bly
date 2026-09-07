@@ -2,7 +2,7 @@
 
 最后更新：2026-09-07
 
-状态：F4B-v2 A/B与F4C正式10k均已完成。C execution通过但quality失败，人工配对显示`R_p≈0.94117`、`R_a≈1.25945`且worst State违反110%保护线。当前唯一下一步是运行显式A/B/C比较器生成正式决定。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账；本文件定义当前下一步的详细合同。实施前同时阅读[AGENTS.md](AGENTS.md)。
+状态：F4B-v2 A/B/C训练与正式比较全部完成；comparison manifest输出`STOP_LOSS_LATENT_SEED_SEARCH`，未授权第二seed。本合同已到达终止条件，当前没有训练命令；下一步是方向审查。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账。实施新实验前同时阅读[AGENTS.md](AGENTS.md)。
 
 ## 1. 目标、证据边界与固定输入
 
@@ -259,16 +259,16 @@ bash ./cvae_repro.sh posterior-capacity-ab-compare
 
 比较器只接受相同optimizer seed的正式run。若decision为`REPLICATE_A_ONLY`或`REPLICATE_A_AND_B`，把optimizer seed改为20260831并只运行`replication_arms`列出的分支；完成后将首次比较run设为`CVAE_POSTERIOR_AB_INITIAL_COMPARISON`，把第二seed run重新设为`RUN_A/RUN_B`后再次调用同一比较入口。A-only复核必须unset B/C；A/B复核必须提供两支。复核比较器只在所选分支最后三次通过正式门禁时输出`NEW_32_MOTION_FIXED_RUN`。若首次decision为`IMPLEMENT_F4C`，停止Ubuntu训练并回到Windows实现C；若为`STOP_LOSS_LATENT_SEED_SEARCH`，停止本路线。不能人工跳过manifest决策。
 
-比较run已合法输出`IMPLEMENT_F4C`，C smoke及正式10k也已完成。以下训练环境保留为历史合同；当前设置三支正式run并执行比较：
+比较run已合法输出`IMPLEMENT_F4C`，C smoke、正式10k及三支比较也已完成。以下命令仅保留为历史合同，不得重跑：
 
 ```bash
-export CVAE_POSTERIOR_AB_RUN_A=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634
-export CVAE_POSTERIOR_AB_RUN_B=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_20260906_203844
-export CVAE_POSTERIOR_AB_RUN_C=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_20260907_004301
-unset CVAE_POSTERIOR_AB_INITIAL_COMPARISON CVAE_RUN_DIR
-bash ./cvae_repro.sh posterior-capacity-ab-compare
+# export CVAE_POSTERIOR_AB_RUN_A=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634
+# export CVAE_POSTERIOR_AB_RUN_B=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_20260906_203844
+# export CVAE_POSTERIOR_AB_RUN_C=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_20260907_004301
+# unset CVAE_POSTERIOR_AB_INITIAL_COMPARISON CVAE_RUN_DIR
+# bash ./cvae_repro.sh posterior-capacity-ab-compare
 ```
 
-比较器必须保持`CVAE_POSTERIOR_AB_INITIAL_COMPARISON`未设置，因为这仍是seed20260830的初始三支结构比较，不是第二seed复核。结束后回传comparison manifest、marker、SVG路径与source状态；manifest若输出停止，不得追加20k或第二seed。
+正式三支比较run为`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260907_102553`，已输出`STOP_LOSS_LATENT_SEED_SEARCH`。不得追加20k、第二seed或绕过4-motion门禁进入R128/KL。
 
-Windows与Ubuntu工程检查均已通过；C正式质量失败不是工程错误。最终路线决定必须以本次A/B/C比较manifest为准。
+Windows与Ubuntu工程检查均已通过；停止原因是B/C未取得受保护改善，不是工程错误。若继续研究，必须另立能够区分根因的新诊断合同，不能继续微调当前loss/gate/seed。

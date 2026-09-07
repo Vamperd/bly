@@ -254,7 +254,7 @@ Physics v5 数据合同、`patches/0008` recorder、四类 Action 信息增量�
 `sonic-repro.sh prepare-overfit-reference-subset` 会从旧 overfit selection manifest 提取同一
 32 个 motion，并在新 run 中建立经 hash 校验的只读绝对软链接；不得用另一批 motion 代替。
 
-### 6.4 最简 posterior Transformer capacity：F4C正式失败、待A/B/C比较
+### 6.4 最简 posterior Transformer capacity：A/B/C比较完成、局部路线停止
 
 新增独立 `physics_posterior_transformer`：只读取归一化 State、Action、逐特征 Mask 与位置/类型，
 使用共享双向 encoder、单个 global latent 和单个双向 decoder，不包含 RobotInfo、reference、
@@ -449,8 +449,16 @@ F4C正式10k随后在run
 `163be1f4c40c46bbd5c680b7ac1711e87f382e97`；execution通过但quality失败，8k/9k/10k均未过门禁。
 step10k State/Action worst RMSE为0.019039/0.013908、max abs 0.171898、超阈值比例17.379%、contact
 100%、zero ratio 123.268。gate训练与checkpoint读回完整，3,072个gate参数全部非零。人工三点中位
-配对C/A为`R_p≈0.94117`、`R_a≈1.25945`，worst State约恶化19.12%，预期不满足保护的20%改善，
-但正式决定仍须运行A/B/C比较器。当前不得追加20k或启动第二seed。
+配对C/A为`R_p≈0.94117`、`R_a≈1.25945`，worst State约恶化19.12%，不满足保护的20%改善；
+后续正式A/B/C比较确认了该判断。
+
+三支正式比较run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260907_102553`，源码
+`8fbe327c487c66482ba4ece6912c8f76bab3720b`，marker为`cvae_posterior_ab_comparison.ok`。所有A/B/C
+身份检查通过。B为`R_p=1.11982、R_a=0.95902`且不值得复核；C为`R_p=0.94117、R_a=1.25945`，
+并在三个决策点均违反worst State保护。manifest正式输出`STOP_LOSS_LATENT_SEED_SEARCH`、无下一seed
+及复核分支。当前不得追加20k、第二seed、32-motion、R128或KL。该停止仅针对本轮loss/gate/seed
+局部搜索；若继续，应先另立区分encoder code与decoder/global-code容量的新诊断，不直接调参。
 
 ### 6.5 已完成 parent 训练
 
@@ -597,8 +605,9 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. F4C正式10k已quality失败；按[Next.md](Next.md)只运行显式A/B/C比较器并服从其唯一决定。比较前后
-   不得追加20k、启动第二seed或扩大模型；fixture seed必须独立于优化seed，旧F4B提案不再执行。
+1. A/B/C比较已正式停止本轮loss/gate/seed路线。当前不运行训练；先决定是否新增auto-decoder根因诊断：
+   每个已见窗口使用可学习256维code、保留同一decoder和Mask，以区分posterior encoder与global-code
+   decoder容量。未经新计划确认不得实现；旧F4B、追加20k和第二seed均不再执行。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
