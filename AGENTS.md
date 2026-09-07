@@ -481,7 +481,8 @@ CLI help、Shell语法和diff check通过；实现提交为
 optimizer step，Shell成功返回run并生成smoke marker，证明真实HDF5/CUDA主链路可运行。但该版本
 summary把smoke固定的`quality_pass=false`错误映射为
 `E1_E2_FAIL_GLOBAL_CODE_DECODER_CAPACITY_UNPROVEN`；这个根因字段无效，因为E1尚未完成5k且E2根本
-未运行。Windows现已把smoke报告隔离为`SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT`并增加回归
+未运行。Windows提交`6d7111d9f5cddd9aac7cd6950ffae00484b7fae4`已把smoke报告隔离为
+`SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT`并增加回归
 测试。修复后posterior/F4E相关54项测试全部PASS；完整发现107项中104项PASS，另3项仍仅因既有
 Windows环境缺`h5py`而导入失败。历史smoke run保持只读；必须同步修复并重新smoke、审核完整合同后，
 才允许启动正式F4E。
