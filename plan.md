@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：F4F首个G8 smoke在构造optimizer时因训练器读取`topology_learning_rate`、固定配置提供`code_learning_rate`而工程失败，尚未执行任何optimizer step，不能形成模型结论。Windows提交`774c3ac9bcd285f73ef3336ec48d63eaa055d198`已统一读取固定`code_*`键，并增加真实optimizer/scheduler构造回归测试。当前唯一下一步是同步修复后从F4D重新运行全新G8 smoke；通过后才执行T129 smoke。继续禁止正式15k、F4E追加、32-motion、R128和KL。
+当前阶段：修复后的F4F G8 smoke已在run`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608`完成2个optimizer step，Shell确认execution complete与smoke marker。`quality_pass=false`及score 2321.02只反映两步随机code尚未拟合，符合smoke语义，不是容量失败。source commit、固定身份、初始化hash、encoder隔离与checkpoint readback仍待完整回传；当前唯一下一步是审计该run，全部工程合同通过后才执行T129 smoke。继续禁止正式15k、F4E追加、32-motion、R128和KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -558,7 +558,8 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4E正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_20260907_120414` | `cfb6735b54f56e49977665948397f80855987d74` | E1 5k + E2 15k；best step20k；score20.9413 | 0.029776 worst / 0.008951 global | 0.020474 worst / 0.007856 global | 0.209413 | 100% | zero/cross-window/cross-motion `95.65/94.85/119.93` | `cvae_posterior_autodecoder_execution.ok` + `cvae.failed` | E1/E2均FAIL；19.679%元素超阈值；单256维共享code+当前decoder容量未获证明 |
 | I-F4F Windows实现 | READY | N/A | `302cb594c3e1c828256946110f6ba0aece36d8de` | G8/T129各2-step smoke入口与固定15k正式入口 | — | — | — | — | — | 尚无Ubuntu marker | 总参数25,620,323/25,625,059；60项posterior相关测试PASS，全发现116项PASS且3项仅缺h5py；先执行G8 smoke |
 | F4F G8 smoke v1 | ENGINEERING_FAIL | 路径尚未回传 | 修复前`302cb594…` | 0 optimizer step；构造optimizer时报`KeyError: topology_learning_rate` | — | — | — | — | — | `cvae.failed`应由Shell生成，待路径核验 | 配置键不一致；无模型结论，使用`774c3ac…`重新smoke |
-| F4F G8 smoke/formal | PENDING | — | 修复`774c3ac9bcd285f73ef3336ec48d63eaa055d198` | smoke 2 step；formal固定15k | — | — | — | — | — | — | 先重跑G8 smoke，审核后才允许T129 smoke |
+| F4F G8 smoke v2 | AUDIT_PENDING | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608` | 待回传 | 2 step；best score2321.019 | 待回传 | 待回传 | 待回传 | 待回传 | 待回传 | `cvae_posterior_latent_topology_smoke.ok`（Shell成功返回确认） | 执行链通过；质量false符合smoke，先审计完整合同 |
+| F4F G8 formal | PENDING | — | 已实现、未运行 | 固定15k | — | — | — | — | — | — | 仅两支smoke审计通过后运行 |
 | F4F T129 smoke/formal | PENDING | — | 已实现、未运行 | smoke 2 step；formal固定15k | — | — | — | — | — | — | G8 smoke后执行T129 smoke；两支正式run完成后显式比较 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
@@ -602,6 +603,14 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-07 18:16 — F4F G8 smoke v2 execution PASS、合同待审计
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608`；源码commit与status尚未回传。
+- 执行：G8完成2个optimizer step，入口打印`PASS (execution complete)`及run路径并返回提示符；依据Shell合同确认`cvae_posterior_latent_topology_smoke.ok`存在。
+- 质量读数：`quality_pass=false`、best progression score2321.01898。smoke只跑2步且code随机初始化，这些数值不参与容量门禁，不能称为G8失败。
+- 待审计：仍需核对F4D/F4E source复现、80 windows/800 fixtures、25,620,323参数、初始化hash、训练身份、encoder零调用/零梯度、step0/step2完整评测、checkpoint readback及marker唯一性。
+- 唯一下一步：只读回传完整summary与marker；合同全部通过后才执行T129 2-step smoke，不启动G8/T129正式15k。
 
 ### 2026-09-07 — F4F G8 smoke v1 ENGINEERING_FAIL
 

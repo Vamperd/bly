@@ -2,10 +2,11 @@
 
 最后更新：2026-09-07
 
-状态：F4F首个G8 smoke在optimizer构造阶段因配置键名不一致工程失败，未执行任何optimizer step，不能
-形成模型结论。该问题已由Windows提交`774c3ac9bcd285f73ef3336ec48d63eaa055d198`修复，并新增真实构造
-两组optimizer/scheduler的回归测试。当前唯一下一步是从F4D重新运行全新的G8 smoke；通过后再执行
-T129 smoke并审计工程合同。在两支smoke均通过前不得启动正式
+状态：修复后的G8 smoke run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608`
+已完成2个optimizer step并由Shell确认smoke marker，`quality_pass=false`符合工程smoke语义。完整summary、
+source commit、初始化hash与checkpoint readback尚待回传，因此当前唯一下一步是只读审计该run；合同
+全部通过后才执行T129 smoke。在两支smoke均通过前不得启动正式
 15k训练。禁止追加F4E步数、修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
