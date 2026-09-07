@@ -611,9 +611,12 @@ exit code 0返回；它只确认真实HDF5/CUDA/训练/评测链路，`quality_p
 读回PASS。每fixture平均只有`5000×256/12032≈106.4`次采样，归一化State初始max abs约42且5k后
 仍38.4，因此当前证据支持稀疏独立查表优化不足，不支持evaluator失效或H38容量失败。不得续训F4G。
 
-Windows现已新增F4G-O解析上限：把每个window真值直接写入同一答案表，0 optimizer step，在完整bank
-重复评测三次并校验metric hash。只有oracle/fit marker同时存在才允许H38。当前唯一下一步为
-`posterior-direct-output-oracle`；Ubuntu命令不再包含Git操作，用户会预先完成同步。
+F4G-O解析上限run
+`/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727`已以0 optimizer
+step返回`quality_pass=true`、score 1.0和`RUN_H38_ENGINEERING_SMOKE`。这证明解析loss/Mask/evaluator
+上限可达，并把原F4G定位为稀疏查表优化不足；source commit、strict/exact字段和完整marker列表尚未
+回传。H38脚本会强制检查oracle/fit marker。当前唯一下一步为以该run只读授权运行
+`posterior-hierarchical-t64-smoke`；Ubuntu命令不再包含Git操作，用户会预先完成同步。
 
 ### 6.5 已完成 parent 训练
 
@@ -771,9 +774,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. 正式F4G已质量FAIL且不续训。当前只运行`posterior-direct-output-oracle`；解析真值复制未取得
-   三次确定性fit PASS时禁止H38。
-2. F4G-O通过后依次运行H38 smoke、H38-A、H38-B、H38-R；仅F4G-O通过且H38-A失败时允许一次H50-A。
+1. F4G-O已取得quality PASS。当前只运行`posterior-hierarchical-t64-smoke`，审核工程合同后再启动H38-A。
+2. H38 smoke后依次运行H38-A、H38-B、H38-R；仅F4G-O通过且H38-A失败时允许一次H50-A。
    每步必须先回填plan.md。H38-R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。

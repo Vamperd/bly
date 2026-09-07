@@ -344,7 +344,9 @@ F4G完全移除encoder、latent和decoder。每个T64窗口直接拥有一份可
 - 如果仍失败，Mask、窗口身份或evaluator确实存在矛盾。
 - 如果得到零连续误差并通过，说明解析上限可达，原F4G只暴露了稀疏查表的优化问题；随后可以进入H38。
 
-F4G-O当前已实现但尚未在Ubuntu运行，所以现在仍不能启动H38。
+F4G-O随后在Ubuntu完成：不执行任何训练步骤，直接复制真值后得到`quality_pass=true`和`best_fit_score=1.0`。这证明同一批数据、Mask、loss和evaluator确实存在可达答案；原F4G失败可以明确解释为1,504张独立答案表从零开始时更新暴露不足，而不是评测器要求自相矛盾。
+
+因此现在允许进入H38工程smoke。这个smoke仍只检查程序链路，不代表H38已经具备重建能力。
 
 ### 8.10 H38：缩短时序并使用层级latent
 
@@ -376,7 +378,7 @@ global latent像整段录像的总摘要；16个local latent像16个章节摘要
 
 decoder不再把被Mask序列本身当作主要query，而是从时间位置和State/Action类型建立query，并在每一层主动读取条件和latent。这是针对“长序列信息难以从单个token均匀广播”设计的结构性改进。
 
-H38目前尚未正式运行。只有F4G正式通过后，才按以下阶段执行：
+H38目前尚未正式运行。F4G-O解析上限已经通过，因此现在按以下阶段执行：
 
 1. H38 smoke：只检查工程链路。
 2. H38-A：全序列遮挡，只检查层级latent能否重建完整答案。
@@ -398,7 +400,7 @@ H38目前尚未正式运行。只有F4G正式通过后，才按以下阶段执�
 | F4E | 显式window code+原decoder是否足够 | 未通过 | 比较latent拓扑 |
 | F4F | 多global token或逐时间code是否足够 | 两者均FAIL，G8相对较好 | 检查直接输出上限 |
 | F4G | 从零优化独立答案表能否在5k内拟合 | 持续改善但质量FAIL | 用F4G-O拆分优化与评测问题 |
-| F4G-O | 真值直接复制后loss/Mask/evaluator是否可达 | 已实现，Ubuntu待运行 | PASS后进入H38；FAIL则修复协议 |
+| F4G-O | 真值直接复制后loss/Mask/evaluator是否可达 | score 1.0，质量PASS | 进入H38工程smoke |
 | H38-A/B/R | 层级latent在32 motion、T64上是否有效 | 尚未运行 | R通过后进入KL三路径 |
 | KL三路径 | posterior与conditional prior能否对齐 | 尚未实现 | 根据三路径差异调整KL |
 
@@ -412,6 +414,6 @@ H38目前尚未正式运行。只有F4G正式通过后，才按以下阶段执�
 
 目前不能证明：模型已具备conditional prior能力、随机生成能力、新motion泛化能力或真正的State→Action/Action→State部署推理。posterior能看完整答案，这与只看剩余条件是两件事。
 
-当前最合理的下一步不是继续盲目改latent，也不是简单给F4G追加步数，而是用F4G-O直接复制真值，证明目标函数和评测门禁在32 motion、T64上确实存在零误差解；随后再用H38判断“缩短时序 + global/local层级latent + 独立condition encoder + 每层cross-attention/FiLM”是否能把时序细节稳定传到所有输出位置。
+F4G-O已经证明目标函数和评测门禁在32 motion、T64上存在解析可达解。当前最合理的下一步是先运行H38工程smoke，再通过H38-A判断“缩短时序 + global/local层级latent + 独立condition encoder + 每层cross-attention/FiLM”是否能把时序细节稳定传到所有输出位置。
 
 如果H38-R最终通过，我们才有一个可信的KL=0重建基线。之后再加入概率分布和KL，并公平比较posterior mean、posterior sample与conditional prior sample，才能回答这个模型是否真正成为可用的条件CVAE。

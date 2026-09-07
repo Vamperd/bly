@@ -2,7 +2,7 @@
 
 最后更新：2026-09-08
 
-状态：正式F4G已在Ubuntu以源码`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`跑满5k并质量FAIL；1,504张独立答案表的指标全程单调改善，但每个fixture平均只有约106次稀疏更新，不能把该结果解释为evaluator不可达或H38容量失败。当前唯一下一步是运行已实现的F4G-O真值复制解析上限；不得续训F4G或启动H38。历史F4D/F4E/F4F、源HDF5和checkpoint保持只读。事实结果仍以
+状态：正式F4G已质量FAIL，但F4G-O已在同一1,504 windows、12,032 fixtures上以0 optimizer step取得`quality_pass=true`和`best_fit_score=1.0`。这证明解析loss/Mask/evaluator上限可达，并把原F4G定位为稀疏查表优化不足。当前唯一下一步是以F4G-O run只读授权运行H38工程smoke；不得续训F4G或把smoke写成质量结论。历史F4D/F4E/F4F、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 问题与顺序
@@ -11,15 +11,14 @@
 和评测门禁可达，再检验层级posterior结构。固定顺序为：
 
 ```text
-F4G-O analytic target-copy ceiling
-→ H38 smoke
+H38 smoke
 → H38-A full-both autoencoding
 → H38-B fixed physical Masks
 → H38-R held-out random physical Masks
 → 冻结KL=0基线后再实现KL三路径
 ```
 
-只有F4G通过而H38-A失败时允许一次H50-A；不得继续建立参数阶梯。H38-A通过而B失败定位为condition
+只有F4G-O通过而H38-A失败时允许一次H50-A；不得继续建立参数阶梯。H38-A通过而B失败定位为condition
 融合问题，B通过而R失败定位为随机Mask覆盖问题。R之前不实现prior、logvar、采样或KL。
 
 ## 2. 固定数据与Mask合同
@@ -64,7 +63,7 @@ F4G-O使用相同1,504 windows、12,032 fixtures、Mask seed、loss、evaluator�
 - 三次均须通过fit、strict-memory与legacy-exact；
 - 通过时生成oracle、execution、fit、strict和exact marker；失败只保留execution与`cvae.failed`。
 
-F4G-O通过表示loss/Mask/evaluator存在解析零误差解，并把原F4G定位为稀疏查表优化不足；H38只读验证其summary、dataset hash和fit marker后方可启动。F4G-O失败则停止H38，调查Mask target、window identity或evaluator。
+F4G-O run `/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727`已返回quality PASS、score 1.0和下一步`RUN_H38_ENGINEERING_SMOKE`。它表示loss/Mask/evaluator存在解析可达解，并把原F4G定位为稀疏查表优化不足；完整source commit、strict/exact字段和marker仍以run内文件为准。
 
 H38授权必须同时检查`oracle_target_copy=true`、`cvae_posterior_direct_output_oracle.ok`和`cvae_posterior_direct_output_fit.ok`，不能用旧F4G训练run或手工补单个marker绕过。
 
@@ -110,7 +109,7 @@ scheduler、loader与RNG。
 | H38-A | full-both，随机初始化，最多20k，每1k评测 | 进入H38-B |
 | H38-B | 从A `best_fit.pt` model-only；8 fixed Mask，最多60k，每2k | 进入H38-R |
 | H38-R | 从B `best_fit.pt` model-only；动态Mask30k，每2k held-out评测 | 冻结KL0基线 |
-| H50-A | 仅F4G PASS且H38-A FAIL；随机20k | PASS后以H50继续B/R；FAIL停止扩模 |
+| H50-A | 仅F4G-O PASS且H38-A FAIL；随机20k | PASS后以H50继续B/R；FAIL停止扩模 |
 
 fit门禁必须连续三次完整评测同时满足：global State/Action RMSE各`≤1e-2`；每类Mask的worst-window
 State/Action RMSE各`≤2e-2`；continuous p99 absolute error `≤5e-2`；contact accuracy精确100%；
@@ -136,19 +135,18 @@ export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_2
 unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
 unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT CVAE_POSTERIOR_HIERARCHICAL_PROFILE
 
-# F4G smoke和正式5k均已完成；当前只执行解析上限：
-bash ./cvae_repro.sh posterior-direct-output-oracle
-```
-
-F4G-O fit通过后：
-
-```bash
-export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/<formal_f4g_run>
+# F4G-O已通过；当前只执行H38工程smoke：
+export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727
 export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H38
 unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT
-
+test -f "$CVAE_POSTERIOR_DIRECT_OUTPUT_RUN/markers/cvae_posterior_direct_output_oracle.ok"
+test -f "$CVAE_POSTERIOR_DIRECT_OUTPUT_RUN/markers/cvae_posterior_direct_output_fit.ok"
 bash ./cvae_repro.sh posterior-hierarchical-t64-smoke
-# 审核smoke后：
+```
+
+H38 smoke审核通过后：
+
+```bash
 bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
 ```
 
