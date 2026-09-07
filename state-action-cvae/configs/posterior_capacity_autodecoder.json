@@ -1,0 +1,62 @@
+{
+  "format_version": "sonic_posterior_autodecoder_config_v1",
+  "fixture_seed": 20260830,
+  "data": {
+    "motion_count": 4,
+    "window_transitions": 128,
+    "max_windows": null,
+    "num_workers": 4
+  },
+  "model": {
+    "kind": "physics_posterior_transformer",
+    "d_model": 384,
+    "encoder_layers": 6,
+    "decoder_layers": 8,
+    "heads": 8,
+    "ffn_dim": 1536,
+    "latent_dim": 256,
+    "dropout": 0.0,
+    "decoder_layer_latent_gates": false,
+    "base_parameter_count": 25453411,
+    "code_parameter_count": 20480,
+    "total_parameter_count": 25473891
+  },
+  "training": {
+    "micro_batch": 4,
+    "gradient_accumulation": 16,
+    "gradient_clip": 1.0,
+    "weight_decay": 0.0,
+    "kl_beta": 0.0,
+    "free_bits": 0.0,
+    "stage_e1": {
+      "optimizer_seed": 20260830,
+      "max_optimizer_steps": 5000,
+      "validation_interval": 500,
+      "code_learning_rate": 0.0003,
+      "code_minimum_learning_rate": 0.00001,
+      "warmup_steps": 100
+    },
+    "stage_e2": {
+      "optimizer_seed": 20260831,
+      "max_optimizer_steps": 15000,
+      "validation_interval": 1000,
+      "code_learning_rate": 0.0003,
+      "code_minimum_learning_rate": 0.00001,
+      "decoder_learning_rate": 0.00003,
+      "decoder_minimum_learning_rate": 0.000001,
+      "warmup_steps": 250
+    },
+    "thresholds": {
+      "state_rmse": 0.0001,
+      "action_rmse": 0.0001,
+      "continuous_max_abs": 0.001,
+      "latent_ratio": 10.0
+    },
+    "progression_thresholds": {
+      "state_rmse": 0.01,
+      "action_rmse": 0.01,
+      "continuous_max_abs": 0.01,
+      "latent_ratio": 10.0
+    }
+  }
+}

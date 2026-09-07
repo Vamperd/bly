@@ -1,8 +1,104 @@
-# 下一步实施合同：F4B-v2短程损失A/B与条件触发的结构对照
+# 下一步实施合同：F4E Auto-Decoder 根因诊断
 
 最后更新：2026-09-07
 
-状态：F4B-v2 A/B/C训练与正式比较全部完成；comparison manifest输出`STOP_LOSS_LATENT_SEED_SEARCH`，未授权第二seed。本合同已到达终止条件，当前没有训练命令；下一步是方向审查。概览、历史数值和结果状态以[plan.md](plan.md)为唯一台账。实施新实验前同时阅读[AGENTS.md](AGENTS.md)。
+状态：Windows实现与CPU轻量测试已完成，真实HDF5/CUDA尚未执行。当前唯一下一步是同步提交后运行
+`posterior-capacity-autodecoder-smoke`；只有smoke的源复现、80-code共享、encoder零调用/零梯度、
+checkpoint读回与execution marker全部通过，才从F4D源重新启动正式F4E。概览与实际结果仍以
+[plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
+
+## 1. 当前问题与固定诊断
+
+F4E只区分两种根因：posterior encoder是否不能形成易解码的global code，以及单个256维global code
+连同当前A结构decoder是否本身不足以记忆80个窗口。允许window identity查表仅是容量探针，不能进入
+部署模型，也不证明conditional prior、新Mask、未见motion或真实State与Action之间的推理。
+
+| 项目 | 固定合同 |
+|---|---|
+| 数据 | 原4 motion、32 episode、80 windows、T128 |
+| Mask | seed 20260830的原10类fixed Mask，共800 fixtures |
+| 来源 | F4D `best_progression.pt`、正式F4A、最终A/B/C STOP comparison |
+| decoder | 原A结构，无F4C gate；State/Action输入投影、类型embedding与原8层decoder |
+| code | `Embedding(80,256)`，同一window的10种Mask严格共享，禁止800个fixture code |
+| 初始化 | 分别编码800个fixture的posterior mean，再取每个window十个向量的算术质心 |
+| 损失与精度 | A的State MSE、Action MSE、contact BCE等权；KL/dropout/weight decay为0；FP32 |
+| 批量 | micro-batch 4、累积16、effective batch 64 |
+
+模型新增`decode_from_global_latent(batch,state_mask,action_mask,latent)`，只构建masked tokens并调用
+latent projection和decoder，不执行共享encoder、posterior head或prior head。原`forward()`继续计算
+q/p并复用该解码入口，旧checkpoint和历史接口不变。训练器通过forward调用计数和梯度状态同时证明
+encoder隔离；被Mask真值改变时decoder-only输出必须逐位不变。
+
+## 2. 前置身份与step-0门禁
+
+训练前必须重验最终比较run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260907_102553`的marker、manifest和A/B/C
+summary哈希，重新计算配对结果并得到`STOP_LOSS_LATENT_SEED_SEARCH`。随后严格加载F4D权重，在同一
+80窗口×10 Mask上重新计算原posterior路径；F4D step、fixture数、worst State/Action RMSE、max abs、
+contact与global RMSE须满足`rtol=1e-5、atol=1e-7`。任何失败都是工程失败，不得形成模型结论。
+
+初始化产物同时保存800×256原始q编码、fixture→window/mask映射、80×256质心、确定性SHA256，以及
+每个window十个q到质心的RMS/max离散度。step0另评测质心auto-decoder路径，但它不要求与原posterior
+路径相等；差异正是诊断基线的一部分。
+
+## 3. 两阶段20k协议
+
+| 阶段 | 可训练参数 | 优化与验收 |
+|---|---|---|
+| E1 | 仅20,480个window-code参数 | 固定5k；seed 20260830；LR `3e-4`，warmup100，cosine至`1e-5`；每500步全评测；4k/4.5k/5k连续PASS则停止 |
+| E2 | code加decoder侧，encoder与q/p头冻结 | 从E1 last继续但重置loader RNG、optimizer和scheduler；seed 20260831；code `3e-4→1e-5`、decoder `3e-5→1e-6`，warmup250；最多15k，每1k全评测，连续3次PASS早停 |
+
+E2 decoder侧allowlist只包含State/Action输入投影、类型embedding、decoder latent token、latent projection、
+8层decoder与State/Action/contact输出头。`encoder_cls`、共享Transformer encoder、posterior/prior分布头
+始终冻结，训练和auto-decoder评测路径调用数必须为0。两阶段都只训练全部800个fixed fixtures，不使用
+held-out Mask、动态Mask或裁剪。
+
+正式progression门禁要求worst State/Action normalized RMSE和continuous max abs均`≤1e-2`、contact
+100%，并且full-both的zero-code、cross-window donor与cross-motion donor误差相对正确code均`≥10×`。
+三项依赖门禁统一使用State前68维与Action的continuous combined RMSE并排除contact；包含contact概率的
+旧ratio继续以legacy字段保存。exact的`1e-4 RMSE + 1e-3 max abs`只作诊断。E1和E2分别有质量marker；
+execution marker仅表示协议完整。
+
+## 4. 结论与产物
+
+| 结果 | 根因判断 | 唯一下一步 |
+|---|---|---|
+| E1 PASS | 原decoder与256维code足够，posterior code形成是主要瓶颈 | posterior-to-code蒸馏，或先auto-decoder后拟合encoder |
+| E1 FAIL、E2 PASS | code+decoder容量足够，联合code形成/协同优化有问题 | 分阶段CVAE：先auto-decoder，再冻结decoder训练encoder |
+| E1/E2均FAIL | 仍无证据支持当前256维共享code+decoder可达门禁 | 只比较更大global latent与per-time latent，或重审max-abs门禁 |
+| 工程合同失败 | 无模型结论 | 修复后重跑smoke |
+
+run输出summary、逐step JSONL、code初始化manifest/tensor、fixture/window/97-feature/contact明细、固定关节
+速度曲线、donor身份映射、四张SVG与checkpoint。checkpoint固定为`best_code_only.pt`、
+`code_only_last.pt`、条件存在的`best_coadapt.pt`及最终`last.pt`。marker为：
+`cvae_posterior_autodecoder_smoke.ok`、`cvae_posterior_autodecoder_execution.ok`、
+`cvae_posterior_autodecoder_code_only.ok`和`cvae_posterior_autodecoder_coadapt.ok`；质量失败额外保留
+内容明确的`cvae.failed`。
+
+## 5. Ubuntu固定执行命令
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+export CVAE_POSTERIOR_AUTODECODER_SOURCE_CHECKPOINT=/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m4_t128_25m_s100000_gprogression_20260904_190425/checkpoints/best_progression.pt
+export CVAE_POSTERIOR_F4A_RUN=/home/helloworld/bly/runs/cvae_posterior_capacity_tail_diagnostic_f4a_20260905_200807
+export CVAE_POSTERIOR_AUTODECODER_TRIGGER_COMPARISON=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260907_102553
+
+unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
+bash ./cvae_repro.sh posterior-capacity-autodecoder-smoke
+
+# 仅在smoke结果回填plan.md并确认工程PASS后，从F4D重新开始正式run：
+# bash ./cvae_repro.sh posterior-capacity-autodecoder
+```
+
+每个run结束后先回传`posterior_autodecoder_summary.json`、marker列表、`source_commit.txt`、source status、
+最后三个评测点和checkpoint列表，再更新台账。smoke checkpoint不得用于正式初始化。
+
+## 附录：已结束的F4B-v2/F4C历史合同
+
+以下内容只保留已执行实验的可审计合同；其训练命令不得重跑或用于绕过F4E。
 
 ## 1. 目标、证据边界与固定输入
 

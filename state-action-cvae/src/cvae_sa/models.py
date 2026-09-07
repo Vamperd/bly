@@ -48,6 +48,15 @@ class PosteriorCapacityOutput:
     latent: torch.Tensor
 
 
+@dataclass
+class PosteriorCapacityDecodedOutput:
+    """Decoder-only output for externally supplied posterior-capacity latents."""
+
+    physical_state: torch.Tensor
+    action: torch.Tensor
+    state_contact_logits: torch.Tensor
+
+
 class MLPTokenizer(nn.Module):
     def __init__(self, input_dim: int, output_dim: int) -> None:
         super().__init__()
@@ -1810,6 +1819,54 @@ class PosteriorCapacityTransformerCVAE(nn.Module):
             if latent_override.shape != latent.shape:
                 raise ValueError("latent override shape does not match the global latent")
             latent = latent_override
+        decoded_output = self._decode_from_tokens(
+            visible, valid, times, state_indices, action_indices, latent
+        )
+        return PosteriorCapacityOutput(
+            physical_state=decoded_output.physical_state,
+            action=decoded_output.action,
+            state_contact_logits=decoded_output.state_contact_logits,
+            posterior_mean=posterior_mean,
+            posterior_logvar=posterior_logvar,
+            prior_mean=prior_mean,
+            prior_logvar=prior_logvar,
+            latent=latent,
+        )
+
+    def decode_from_global_latent(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        latent: torch.Tensor,
+    ) -> PosteriorCapacityDecodedOutput:
+        """Decode masked inputs without evaluating either latent encoder.
+
+        This is intentionally a narrow capacity-diagnostic interface.  The
+        caller owns the global latent and the decoder never receives masked
+        ground-truth values.
+        """
+        visible, valid, times, state_indices, action_indices = self._tokens(
+            batch, state_mask, action_mask, full=False
+        )
+        return self._decode_from_tokens(
+            visible, valid, times, state_indices, action_indices, latent
+        )
+
+    def _decode_from_tokens(
+        self,
+        visible: torch.Tensor,
+        valid: torch.Tensor,
+        times: torch.Tensor,
+        state_indices: torch.Tensor,
+        action_indices: torch.Tensor,
+        latent: torch.Tensor,
+    ) -> PosteriorCapacityDecodedOutput:
+        expected_shape = (visible.shape[0], self.latent_dim)
+        if latent.shape != expected_shape:
+            raise ValueError(
+                f"global latent has shape {tuple(latent.shape)}, expected {expected_shape}"
+            )
         latent_condition = self.latent_projection(latent)
         latent_token = self.decoder_latent_token + latent_condition[:, None]
         decoder_valid = torch.cat(
@@ -1832,15 +1889,10 @@ class PosteriorCapacityTransformerCVAE(nn.Module):
             ),
             dim=-1,
         )
-        return PosteriorCapacityOutput(
+        return PosteriorCapacityDecodedOutput(
             physical_state=physical_state,
             action=self.action_output(action_hidden),
             state_contact_logits=state_contact_logits,
-            posterior_mean=posterior_mean,
-            posterior_logvar=posterior_logvar,
-            prior_mean=prior_mean,
-            prior_logvar=prior_logvar,
-            latent=latent,
         )
 
 

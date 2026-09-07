@@ -474,6 +474,55 @@ posterior_capacity_ab_compare() {
   printf '%s\n' "$run_dir"
 }
 
+posterior_capacity_autodecoder() {
+  local smoke="$1" dataset_run="${CVAE_DATASET_RUN:-}"
+  local source_checkpoint="${CVAE_POSTERIOR_AUTODECODER_SOURCE_CHECKPOINT:-}"
+  local f4a_run="${CVAE_POSTERIOR_F4A_RUN:-}"
+  local trigger_comparison="${CVAE_POSTERIOR_AUTODECODER_TRIGGER_COMPARISON:-}"
+  local config="$SCRIPT_DIR/configs/posterior_capacity_autodecoder.json"
+  local prefix="cvae_posterior_capacity_autodecoder_f4e" run_dir marker
+  [[ -z "${CVAE_CONFIG:-}" ]] \
+    || die "posterior-capacity-autodecoder uses its fixed config; unset CVAE_CONFIG"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  [[ -n "$source_checkpoint" ]] \
+    || die "CVAE_POSTERIOR_AUTODECODER_SOURCE_CHECKPOINT is required"
+  [[ -f "$source_checkpoint" ]] \
+    || die "F4E source checkpoint is missing: $source_checkpoint"
+  [[ "$(basename -- "$source_checkpoint")" == "best_progression.pt" ]] \
+    || die "F4E requires the F4D best_progression.pt"
+  [[ -n "$f4a_run" ]] || die "CVAE_POSTERIOR_F4A_RUN is required"
+  [[ -f "$f4a_run/markers/cvae_posterior_capacity_tail_diagnostic.ok" ]] \
+    || die "formal F4A execution marker is missing: $f4a_run"
+  [[ -n "$trigger_comparison" ]] \
+    || die "CVAE_POSTERIOR_AUTODECODER_TRIGGER_COMPARISON is required"
+  [[ -f "$trigger_comparison/markers/cvae_posterior_ab_comparison.ok" ]] \
+    || die "final A/B/C comparison marker is missing: $trigger_comparison"
+  [[ "$smoke" == "true" ]] && prefix="${prefix}_smoke"
+  run_dir="$(new_run_dir "$prefix")"
+  capture_environment "$run_dir"
+  local extra_args=()
+  [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
+  run_logged "$run_dir" posterior_capacity_autodecoder.log \
+    "$PYTHON" -m cvae_sa.posterior_capacity_autodecoder \
+      --dataset-run "$dataset_run" \
+      --source-checkpoint "$source_checkpoint" \
+      --f4a-run "$f4a_run" \
+      --trigger-comparison-run "$trigger_comparison" \
+      --output-run "$run_dir" \
+      --config "$config" \
+      "${extra_args[@]}"
+  marker="cvae_posterior_autodecoder_execution.ok"
+  [[ "$smoke" == "true" ]] && marker="cvae_posterior_autodecoder_smoke.ok"
+  [[ -f "$run_dir/markers/$marker" ]] \
+    || die "F4E execution marker is missing: $marker"
+  local latest_key="posterior_autodecoder_f4e"
+  [[ "$smoke" == "true" ]] && latest_key="${latest_key}_smoke"
+  update_latest "$latest_key" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 overfit_single_task() {
   local dataset_run="${CVAE_DATASET_RUN:-}" task="${CVAE_OVERFIT_TASK:-}"
   local seed="${CVAE_SEED:-20260828}" profile="${CVAE_OVERFIT_MODEL:-compact}"
@@ -854,6 +903,8 @@ case "${1:-}" in
   posterior-capacity-ab-smoke) posterior_capacity_ab true ;;
   posterior-capacity-ab) posterior_capacity_ab false ;;
   posterior-capacity-ab-compare) posterior_capacity_ab_compare ;;
+  posterior-capacity-autodecoder-smoke) posterior_capacity_autodecoder true ;;
+  posterior-capacity-autodecoder) posterior_capacity_autodecoder false ;;
   analyze-overfit) analyze_overfit ;;
   diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
@@ -864,5 +915,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

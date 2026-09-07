@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：正式A/B/C比较run已execution PASS并输出`STOP_LOSS_LATENT_SEED_SEARCH`。全部身份配对检查成立；B为`R_p=1.11982、R_a=0.95902`且不值得复核，C为`R_p=0.94117、R_a=1.25945`并在三次决策点均违反worst State 110%保护线。当前F4B-v2/F4C/F4R局部路线已按预注册规则终止：不追加20k、不运行第二seed、不扩32 motion、不进入R128/KL。这不否定posterior/CVAE方向；下一步只做研究方向审查，优先考虑用每窗口可学习256维code替代posterior encoder的auto-decoder诊断，以区分encoder压缩与global-latent decoder容量，但未经用户确认不实现或训练。
+当前阶段：正式A/B/C比较run已execution PASS并输出`STOP_LOSS_LATENT_SEED_SEARCH`，原loss/gate/seed路线保持终止。用户已批准独立F4E auto-decoder根因诊断；Windows实现和CPU轻量验证完成，真实HDF5/CUDA尚未执行。F4E固定使用80个共享window code而非800个fixture code，先5k code-only，失败才执行最多15k code+decoder；当前唯一下一步是同步提交并运行2-step Ubuntu smoke。F4E通过也不授权直接进入R128/KL，必须先依据根因结论重新规划posterior训练。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -162,14 +162,15 @@ fixed图例必须写`Full fixed-fixture evaluation`，明确它是同一训练wi
 | F4B-v2 | 归一化尾部加权A/B | 均从F4D `best_progression.pt`开始；A原损失，B只改连续元素权重 | 各10k，共20k | 按第3.2节选择复核或F4C |
 | F4C | 小结构条件对照 | 同F4D起点、A原损失，只新增逐层零初始化latent门控 | 条件触发10k | 与同seed的A比较，选定复核方案或停止 |
 | F4R | 训练顺序复核 | 仍从F4D起点，fixture seed不变；优化seed改为20260831 | A单独10k或A/胜出改动各10k | 先取得4-motion正式通过，再更新32-motion计划 |
+| F4E | Auto-decoder根因诊断 | F4D原A decoder；每window共享一个可学习256维code，以十个q均值质心初始化 | E1 5k code-only；失败才E2最多15k code+decoder | 按encoder形成、协同优化或code+decoder容量三分结论 |
 | R128 | 动态随机Mask与16-slot held-out验收 | 32 motion、T=128，从F128 `last.pt` model-only warm-start | 50k，每2,500 step验收 | 冻结KL=0结果并开始K0代码实现 |
 | K0 | KL三路径工程smoke | 仅在L128/F128/R128全部PASS后新增入口；从R128 `last.pt` model-only初始化 | 2 step、单个确定性窗口 | K1 |
 | K1 | 32-motion KL三路径正式实验 | 32 motion、T=128，从R128 `last.pt` model-only初始化 | 50k，每2,500 step三路径验收 | 按KL判断表确定唯一下一步 |
 
 初始快速链中任一级质量失败即停止，不直接启动后一级；T=256不在本轮关键路径。F128已经失败，
-因此先完成F4D边界实验与F4A只读诊断，不恢复完整的4→8→16→32阶梯。现在F4A已完成，允许按
-F4B-v2→条件触发F4C→F4R的合同进行受控改进实验，正式新增训练总计不超过50k step；各2-step
-工程smoke不计入该正式预算。若无有效改进可提前结束；预算用完或证据不足时停止，不自动续训。
+因此先完成F4D边界实验与F4A只读诊断，不恢复完整的4→8→16→32阶梯。F4B-v2/F4C比较已按规则
+终止且不执行F4R；当前改为独立F4E根因诊断，正式预算至多20k step，各2-step工程smoke不计入预算。
+F4E不修改数据、Mask、latent维度或A decoder结构，只将posterior输出替换为每window共享可学习code。
 L128、F128、R128
 三个`KL=0`正式阶段未全部获得对应PASS marker前，禁止新增或启用K0/K1模型接口、配置、训练器、
 评测器、测试或Shell入口；只能继续更新本文的实际结果台账。R128通过并冻结其`last.pt`与基线指标
@@ -550,6 +551,9 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4C正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_20260907_004301` | `163be1f4c40c46bbd5c680b7ac1711e87f382e97` | step 10000 / progression score 17.1898 | 0.019039 worst / 0.008196 global | 0.013908 worst / 0.007330 global | 0.171898 | 100% | 123.268 | `cvae_posterior_ab_execution.ok` + `cvae.failed` | 8k/9k/10k均FAIL；17.379%元素超阈值；后续比较器已终止本路线 |
 | F4B-v2 A/B/C比较 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260907_102553` | `8fbe327c487c66482ba4ece6912c8f76bab3720b` | `STOP_LOSS_LATENT_SEED_SEARCH` | — | — | B `1.11982/0.95902`；C `0.94117/1.25945` | B PASS；C FAIL | — | `cvae_posterior_ab_comparison.ok` | B/C均不满足受保护20%改善；终止当前loss/gate/seed路线 |
 | F4R | SUPERSEDED | — | 未运行 | — | — | — | — | — | — | — | 正式比较未授权任何第二seed分支 |
+| I-F4E Windows实现 | READY | N/A | 当前工作树，待提交 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 80个共享code、质心初始化、decoder-only API、E1/E2隔离训练、三类code依赖和独立marker已实现；53项相关测试PASS，全发现106项仅3个既有h5py导入限制；先执行Ubuntu smoke |
+| F4E smoke | PENDING | — | — | — | — | — | — | — | — | — | 2-step code-only，仅作真实HDF5/CUDA工程验收 |
+| F4E正式 | PENDING | — | — | — | — | — | — | — | — | — | E1固定5k；仅E1失败才E2最多15k；按三分根因结论停止或重规划 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
 | K1 | PENDING | — | 尚未实现；从R128 `last.pt` model-only初始化 | — | — | — | — | — | — | — | 32 motion、T128、beta线性预热与三路径正式对照 |
@@ -592,6 +596,16 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-07 — I-F4E Windows实现 READY
+
+- 范围：新增独立F4E训练器、固定配置和两个Shell入口；posterior模型只增加向后兼容的decoder-only方法，原`forward()`、F4D/F4A/F4B checkpoint与入口不变。
+- 固定诊断：4 motion、T128、80 windows、800 fixed fixtures；从F4D加载原A结构，以每window十个Mask-conditioned posterior mean的质心初始化一个共享256维code，明确拒绝per-fixture code。
+- 两阶段：E1仅训练20,480个code参数5k；失败才执行E2 code+decoder侧最多15k，并用不同seed重置loader、optimizer与scheduler；encoder及q/p头通过参数allowlist、调用计数和梯度状态三重隔离。
+- 验收：保留原progression/exact、全局与尾部、97 feature、10 Mask、固定速度案例；新增zero/cross-window/cross-motion code依赖均至少10的质量门禁，execution/E1/E2 marker相互独立。
+- 产物：保存800个原始q、80个质心、Mask间离散度及hash，逐step JSONL、四张SVG、donor身份和四类checkpoint；最终A/B/C STOP comparison会在训练前重算验证。
+- 当前验证：posterior/F4E相关组合53项全部PASS；完整发现运行106项，其中103项PASS，另3个仍仅因既有Windows环境缺`h5py`而导入失败。Python compile、全部JSON、CLI help、Shell语法和diff check均通过；尚未读取真实HDF5或运行CUDA，因此只能标记READY。
+- 唯一下一步：提交并同步到Ubuntu，运行`posterior-capacity-autodecoder-smoke`；先回填smoke summary、marker、source commit与checkpoint读回，再决定是否启动正式F4E。
 
 ### 2026-09-07 — F4B-v2 A/B/C正式比较 PASS（execution，路线停止）
 

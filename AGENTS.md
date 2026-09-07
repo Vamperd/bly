@@ -460,6 +460,22 @@ step10k State/Action worst RMSE为0.019039/0.013908、max abs 0.171898、超阈�
 及复核分支。当前不得追加20k、第二seed、32-motion、R128或KL。该停止仅针对本轮loss/gate/seed
 局部搜索；若继续，应先另立区分encoder code与decoder/global-code容量的新诊断，不直接调参。
 
+F4E auto-decoder根因诊断现已在Windows实现、待Ubuntu smoke。新增
+`posterior_capacity_autodecoder.py`、固定配置和`posterior-capacity-autodecoder[-smoke]`入口；基础模型
+保持原A结构25,453,411参数，另加80×256=20,480个按window identity查表的共享code，总参数
+25,473,891。同一window的10类Mask不得使用不同code；初始化先用F4D posterior分别编码800个fixture，
+再取每window十个mean的质心并保存原始编码、离散度和hash。新增模型方法
+`decode_from_global_latent`只运行masked-token构造、latent projection和decoder，历史`forward()`保持兼容。
+
+正式F4E先固定5k只训练code；若4k/4.5k/5k未连续通过，再从E1 last执行最多15k的code+decoder适配，
+同时重置optimizer/scheduler/loader RNG。E2始终冻结且零调用`encoder_cls`、共享encoder与posterior/prior
+分布头。质量门禁除原progression四项及zero-code ratio外，还要求真实cross-window和cross-motion code
+donor ratio均至少10。F4E允许window identity，仅用于已见80窗口容量诊断，不能进入部署接口或证明prior、
+新Mask、未见motion及真实State与Action推理。Windows posterior/F4E相关53项测试全部PASS；完整发现
+106项中103项PASS，另3个仍仅因既有Windows环境缺`h5py`而导入失败。Python compile、全部JSON、
+CLI help、Shell语法和diff check通过；源码commit须在提交后回填，真实HDF5/CUDA未运行，不得将当前
+READY写成实验PASS。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -600,14 +616,17 @@ bash ./cvae_repro.sh validate-state-mask-video
 | F4B-v2工程smoke | `cvae_posterior_ab_smoke.ok`（仅表示step0、2步训练、评测与checkpoint读回完整） |
 | F4B-v2正式执行 | `cvae_posterior_ab_execution.ok`（仅表示10k与全部诊断完整；不表示质量通过） |
 | F4B-v2配对比较 | `cvae_posterior_ab_comparison.ok`（仅表示身份一致且决策完整） |
+| F4E Auto-decoder smoke | `cvae_posterior_autodecoder_smoke.ok`（仅表示step0、2步code-only、评测与读回完整） |
+| F4E正式执行 | `cvae_posterior_autodecoder_execution.ok`（仅表示E1及条件触发E2完整） |
+| F4E E1/E2质量 | `cvae_posterior_autodecoder_code_only.ok` / `cvae_posterior_autodecoder_coadapt.ok` |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. A/B/C比较已正式停止本轮loss/gate/seed路线。当前不运行训练；先决定是否新增auto-decoder根因诊断：
-   每个已见窗口使用可学习256维code、保留同一decoder和Mask，以区分posterior encoder与global-code
-   decoder容量。未经新计划确认不得实现；旧F4B、追加20k和第二seed均不再执行。
+1. A/B/C比较已正式停止本轮loss/gate/seed路线。F4E已获用户批准并在Windows实现；当前唯一动作是
+   同步提交后运行`posterior-capacity-autodecoder-smoke`。smoke通过并回填`plan.md`后，才从原F4D
+   `best_progression.pt`独立运行正式F4E；不得使用smoke checkpoint初始化。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
