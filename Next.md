@@ -2,7 +2,7 @@
 
 最后更新：2026-09-08
 
-状态：正式F4G已质量FAIL，但F4G-O已在同一1,504 windows、12,032 fixtures上以0 optimizer step取得`quality_pass=true`和`best_fit_score=1.0`。这证明解析loss/Mask/evaluator上限可达，并把原F4G定位为稀疏查表优化不足。当前唯一下一步是以F4G-O run只读授权运行H38工程smoke；不得续训F4G或把smoke写成质量结论。历史F4D/F4E/F4F、源HDF5和checkpoint保持只读。事实结果仍以
+状态：正式F4G已质量FAIL，F4G-O解析上限已质量PASS，H38工程smoke也已完成且只证明链路可运行。当前唯一下一步是从随机初始化运行H38-A full-both autoencoding，预算上限30k、每1k完整评测、连续3次fit PASS提前停止；不得加载smoke checkpoint。历史F4D/F4E/F4F、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 问题与顺序
@@ -11,8 +11,7 @@
 和评测门禁可达，再检验层级posterior结构。固定顺序为：
 
 ```text
-H38 smoke
-→ H38-A full-both autoencoding
+H38-A full-both autoencoding（30k上限）
 → H38-B fixed physical Masks
 → H38-R held-out random physical Masks
 → 冻结KL=0基线后再实现KL三路径
@@ -105,8 +104,8 @@ scheduler、loader与RNG。
 
 | 阶段 | 训练/评测 | 成功后的唯一动作 |
 |---|---|---|
-| H38 smoke | 前2 window、step0+2 step、full-both | 审核summary后启动H38-A |
-| H38-A | full-both，随机初始化，最多20k，每1k评测 | 进入H38-B |
+| H38 smoke | 前2 window、step0+2 step、full-both | 工程PASS；不形成质量结论 |
+| H38-A | full-both，随机初始化，最多30k，每1k评测 | 进入H38-B |
 | H38-B | 从A `best_fit.pt` model-only；8 fixed Mask，最多60k，每2k | 进入H38-R |
 | H38-R | 从B `best_fit.pt` model-only；动态Mask30k，每2k held-out评测 | 冻结KL0基线 |
 | H50-A | 仅F4G-O PASS且H38-A FAIL；随机20k | PASS后以H50继续B/R；FAIL停止扩模 |
@@ -135,18 +134,12 @@ export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_2
 unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
 unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT CVAE_POSTERIOR_HIERARCHICAL_PROFILE
 
-# F4G-O已通过；当前只执行H38工程smoke：
+# F4G-O与H38 smoke均已通过工程授权；当前执行正式H38-A：
 export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727
 export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H38
 unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT
 test -f "$CVAE_POSTERIOR_DIRECT_OUTPUT_RUN/markers/cvae_posterior_direct_output_oracle.ok"
 test -f "$CVAE_POSTERIOR_DIRECT_OUTPUT_RUN/markers/cvae_posterior_direct_output_fit.ok"
-bash ./cvae_repro.sh posterior-hierarchical-t64-smoke
-```
-
-H38 smoke审核通过后：
-
-```bash
 bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
 ```
 

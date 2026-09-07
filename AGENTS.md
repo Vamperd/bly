@@ -615,8 +615,13 @@ F4G-O解析上限run
 `/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727`已以0 optimizer
 step返回`quality_pass=true`、score 1.0和`RUN_H38_ENGINEERING_SMOKE`。这证明解析loss/Mask/evaluator
 上限可达，并把原F4G定位为稀疏查表优化不足；source commit、strict/exact字段和完整marker列表尚未
-回传。H38脚本会强制检查oracle/fit marker。当前唯一下一步为以该run只读授权运行
-`posterior-hierarchical-t64-smoke`；Ubuntu命令不再包含Git操作，用户会预先完成同步。
+回传。H38脚本会强制检查oracle/fit marker；Ubuntu命令不再包含Git操作，用户会预先完成同步。
+
+H38工程smoke run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_smoke_20260908_025405`已完成2个
+optimizer step并返回execution PASS；`quality_pass=false`和score 122.0155没有容量意义。正式H38-A不得
+加载该smoke checkpoint，固定从seed控制的随机初始化开始。用户选择把H38-A上限由20k增至30k，仍每1k
+完整评测且连续3次fit PASS提前停止；模型、数据、loss、门禁与后续B/R合同不变。
 
 ### 6.5 已完成 parent 训练
 
@@ -774,8 +779,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. F4G-O已取得quality PASS。当前只运行`posterior-hierarchical-t64-smoke`，审核工程合同后再启动H38-A。
-2. H38 smoke后依次运行H38-A、H38-B、H38-R；仅F4G-O通过且H38-A失败时允许一次H50-A。
+1. F4G-O与H38工程smoke均已通过。当前只运行30k上限的`posterior-hierarchical-t64-autoencode`。
+2. H38-A后依次运行H38-B、H38-R；仅F4G-O通过且H38-A失败时允许一次H50-A。
    每步必须先回填plan.md。H38-R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。

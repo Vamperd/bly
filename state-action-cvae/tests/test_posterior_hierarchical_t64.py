@@ -97,6 +97,13 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
             del model
             gc.collect()
 
+    def test_h38_autoencode_budget_is_locked_to_30k(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = load_config(root / "configs/posterior_hierarchical_t64_h38.json")
+        autoencode = config["training"]["stages"]["autoencode"]
+        self.assertEqual(autoencode["max_optimizer_steps"], 30000)
+        self.assertEqual(autoencode["validation_interval"], 1000)
+
     def test_shapes_chunk_boundaries_and_canonical_mask_invariance(self) -> None:
         torch.manual_seed(10)
         model = HierarchicalPosteriorTransformer(small_config()).eval()
