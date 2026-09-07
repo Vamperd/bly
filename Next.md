@@ -2,10 +2,10 @@
 
 最后更新：2026-09-07
 
-状态：首个Ubuntu smoke在`5cf48ca`上完成，但发现summary把2步smoke误报为正式E1/E2根因失败；该结论
-无效。Windows已在提交`6d7111d9f5cddd9aac7cd6950ffae00484b7fae4`修复为专用的execution-only结论，当前唯一下一步是同步修复后重新运行
-`posterior-capacity-autodecoder-smoke`；只有新smoke的源复现、80-code共享、encoder零调用/零梯度、
-checkpoint读回、报告语义与execution marker全部通过，才从F4D源重新启动正式F4E。概览与实际结果仍以
+状态：修正版Ubuntu smoke已在`dffc0bf`上通过源复现、80-code共享、encoder零调用/零梯度、checkpoint
+读回、报告语义与smoke marker合同；2步smoke不作容量判断。当前唯一下一步是从原F4D
+`best_progression.pt`重新启动正式`posterior-capacity-autodecoder`，先执行E1固定5k，只有E1失败才
+进入E2最多15k；严禁使用smoke checkpoint初始化。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 当前问题与固定诊断

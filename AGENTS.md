@@ -487,6 +487,14 @@ summary把smoke固定的`quality_pass=false`错误映射为
 Windows环境缺`h5py`而导入失败。历史smoke run保持只读；必须同步修复并重新smoke、审核完整合同后，
 才允许启动正式F4E。
 
+修正版smoke随后在run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_115809`通过，源码
+`dffc0bf25aa0db21e06126e7e3dafba9689e4230`。F4D源指标复现、4 motion/80 windows/800 fixtures、
+25,453,411基础参数加20,480个共享code参数、decoder绕过encoder、E1 checkpoint读回和smoke marker
+均通过；报告正确为`SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT`。posterior编码到同window质心的
+global RMS/max差为1.31366/10.49436，只记录为Mask依赖现象。该run的`quality_pass=false`符合2-step
+smoke语义，不是容量结论；正式F4E现已获准从原F4D checkpoint独立启动。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -635,9 +643,9 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. A/B/C比较已正式停止本轮loss/gate/seed路线。F4E首个smoke工程执行完成但根因字段误报；当前唯一
-   动作是同步报告修复并重新运行`posterior-capacity-autodecoder-smoke`。修正版smoke通过并回填
-   `plan.md`后，才从原F4D `best_progression.pt`独立运行正式F4E；不得使用smoke checkpoint初始化。
+1. A/B/C比较已正式停止本轮loss/gate/seed路线，修正版F4E smoke已通过。当前唯一动作是从原F4D
+   `best_progression.pt`独立运行正式`posterior-capacity-autodecoder`：E1固定5k code-only，只有E1
+   失败才执行E2最多15k code+decoder；不得使用smoke checkpoint初始化。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较

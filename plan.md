@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：F4E首个Ubuntu smoke已在源码`5cf48ca`上完成2步并生成execution marker，证明真实HDF5/CUDA主链路可运行；但summary错误地把smoke固定的`quality_pass=false`映射成正式`E1_E2_FAIL`根因结论。该字段无效，2步smoke不提供任何容量判断。Windows已在提交`6d7111d9f5cddd9aac7cd6950ffae00484b7fae4`修正为专用`SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT`并增加回归测试；当前唯一下一步是同步该修复并重新运行smoke，审核完整summary后才允许正式F4E。
+当前阶段：修正版F4E Ubuntu smoke已在源码`dffc0bf25aa0db21e06126e7e3dafba9689e4230`完整通过工程合同：F4D源指标复现、4 motion/80 window/800 fixture身份、80个共享256维code、decoder绕过encoder、E1 checkpoint读回及smoke marker均通过；报告正确标记为`SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT`。`quality_pass=false`是2-step smoke的预期语义，不是容量失败。当前唯一下一步是从原F4D `best_progression.pt`重新初始化并执行正式F4E：E1固定5k code-only，只有E1未通过才执行E2最多15k code+decoder。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -553,7 +553,7 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4R | SUPERSEDED | — | 未运行 | — | — | — | — | — | — | — | 正式比较未授权任何第二seed分支 |
 | I-F4E Windows实现 | READY | N/A | `c54f0ce4c6da166cfe7b70422302bdc454d805e7` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 80个共享code、质心初始化、decoder-only API、E1/E2隔离训练、三类code依赖和独立marker已实现；53项相关测试PASS，全发现106项仅3个既有h5py导入限制；先执行Ubuntu smoke |
 | F4E smoke v1 | REPORTING_FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_114405` | `5cf48cac8b4289b75d44c148b26513f1d2510c21` | 2 step，execution complete | 未回传 | 未回传 | 未回传 | 未回传 | 未回传 | `cvae_posterior_autodecoder_smoke.ok`（由Shell成功返回确认） | 工程链路通过，但根因字段误报正式失败；结果只作smoke，修复后重跑 |
-| F4E smoke v2 | PENDING | — | 待同步`6d7111d`或其后继提交 | — | — | — | — | — | — | — | 重跑后审核source复现、code hash、encoder隔离、checkpoint读回和marker |
+| F4E smoke v2 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_115809` | `dffc0bf25aa0db21e06126e7e3dafba9689e4230` | E1 2 step | 工程诊断 | 工程诊断 | 工程诊断 | 工程诊断 | 无容量结论 | `cvae_posterior_autodecoder_smoke.ok` | 源复现、80/800身份、共享code、encoder隔离与checkpoint读回通过；允许正式F4E |
 | F4E正式 | PENDING | — | — | — | — | — | — | — | — | — | E1固定5k；仅E1失败才E2最多15k；按三分根因结论停止或重规划 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
@@ -597,6 +597,16 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-07 11:58 — F4E smoke v2 PASS（仅工程合同）
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_115809`；源码`tiny-model@dffc0bf25aa0db21e06126e7e3dafba9689e4230`；marker为`cvae_posterior_autodecoder_smoke.ok`。
+- 源与数据：F4D八项指标复现全部PASS；固定4 motion、T128、80 windows和800 fixtures；fixture、window及identity合同hash均已记录。
+- 模型：基础25,453,411参数，加80×256共享code后共25,473,891；`shared_code_per_window=true`、`per_fixture_code=false`、decoder路径绕过encoder，KL/dropout/weight decay均为0。
+- 初始化：800个Mask-conditioned posterior编码hash为`701ebf6aa15479d647ec33582975cf005a7971b438c1af4be12042a0bc94d1f6`，80个质心hash为`f929e4b359b16974f886a3e0f1f08926e5cdc6c0d40729ff13c44ae83b2428a9`；同window十个posterior mean到质心的global RMS为1.31366、最大绝对差10.49436。这说明现有posterior编码明显依赖Mask，但这里只是待诊断现象，不提前判定根因。
+- 执行与隔离：E1完成2个smoke step；E1 checkpoint readback的13项检查全部PASS。训练器在写`execution_pass=true`前强制要求encoder/prior/posterior调用计数为0且相关梯度为空，因此本次成功退出同时证明隔离合同通过。用户查询中的`training_contract`为null来自jq嵌套字段写法错误，不是manifest缺失。
+- 语义：`quality_pass=false`和不生成E1/E2质量marker符合2-step smoke合同；根因字段正确为`SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT`，不得据此判断256维code或decoder容量。
+- 唯一下一步：从同一个F4D `best_progression.pt`全新启动正式F4E，不使用smoke checkpoint；E1固定5k，只有E1失败才进入E2最多15k。
 
 ### 2026-09-07 11:44 — F4E smoke v1 REPORTING_FAIL（工程执行完成）
 
