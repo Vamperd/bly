@@ -477,7 +477,7 @@ def _optimizer(
 ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]:
     named = dict(model.named_parameters())
     training = config["training"]
-    topology_lr = float(training["topology_learning_rate"])
+    topology_lr = float(training["code_learning_rate"])
     decoder_lr = float(training["decoder_learning_rate"])
     optimizer = torch.optim.AdamW(
         [
@@ -504,7 +504,7 @@ def _optimizer(
                 step,
                 warmup_steps=warmup,
                 max_steps=max_steps,
-                minimum_ratio=float(training["topology_minimum_learning_rate"]) / topology_lr,
+                minimum_ratio=float(training["code_minimum_learning_rate"]) / topology_lr,
             ),
             lambda step: _learning_rate_multiplier(
                 step,

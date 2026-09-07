@@ -33,6 +33,7 @@ from cvae_sa.posterior_capacity_latent_topology import (
     TRAINING_SEED,
     WindowLatentTopologyAutoDecoder,
     _comparison_identity,
+    _optimizer,
     _parameter_count,
     _render_plots,
     comparison_decision,
@@ -213,6 +214,11 @@ class PosteriorCapacityLatentTopologyTest(unittest.TestCase):
             codes, tensors, _ = initialize_topology(arm)
             wrapped = WindowLatentTopologyAutoDecoder(base, arm, codes, tensors)
             self.assertEqual(_parameter_count(wrapped), ARM_TOTAL_PARAMETERS[arm])
+            trainable = configure_trainable_parameters(wrapped)
+            optimizer, scheduler = _optimizer(wrapped, trainable, config, max_steps=2)
+            self.assertEqual([group["name"] for group in optimizer.param_groups], ["topology", "decoder_side"])
+            self.assertEqual(len(scheduler.lr_lambdas), 2)
+            del optimizer, scheduler
             del wrapped
             gc.collect()
         self.assertLess(
