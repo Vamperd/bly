@@ -568,6 +568,35 @@ source、F4E、fixture/window/motion、完整训练身份、optimizer、初始�
 `RUN_DIRECT_OUTPUT_MEMORY_CEILING_FOR_DECODER_AND_OBJECTIVE`。不得继续F4F训练、选择相对较好的G8
 推进或进入32-motion/R128/KL；先设计独立的直接输出记忆上限合同。
 
+### 6.4.1 32-motion、T64层级posterior：Windows代码READY、Ubuntu待执行
+
+F4F比较已经以`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`收尾。当前活动合同已切换到[Next.md](Next.md)：
+先用F4G direct-output查表证明loss/Mask/evaluator上限，再运行H38层级posterior。不得追加F4F步数，
+不得在H38-R通过前实现prior、logvar、采样或KL。
+
+新增模型kind `physics_hierarchical_posterior_transformer`，H38精确37,574,883参数，唯一fallback H50
+精确51,005,283参数。T64的129个token使用独立posterior encoder和condition encoder；canonical
+posterior忽略查询Mask bit，输出一个256维global和16个128维local latent。8层decoder的query不直接
+接masked token，每层通过cross-attention读取condition与17个latent memory，并通过FiLM重复注入
+对应global/local条件。该阶段仍为deterministic posterior mean语义，没有CVAE随机路径。
+
+活动入口为：
+
+```bash
+bash ./cvae_repro.sh posterior-direct-output-smoke
+bash ./cvae_repro.sh posterior-direct-output
+bash ./cvae_repro.sh posterior-hierarchical-t64-smoke
+bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
+bash ./cvae_repro.sh posterior-hierarchical-t64-fixed
+bash ./cvae_repro.sh posterior-hierarchical-t64-random
+```
+
+固定Mask仅为物理State gap、State rollout、Action gap、Full Action和短joint gap；R阶段使用相同语义的
+held-out Mask，不再使用element/feature/semantic Mask。fit门禁与H50触发规则必须以Next.md为准。
+Windows轻量专项10项及旧posterior/F4E/F4F回归38项已通过；全量发现129项中126项通过，另3项仅为
+既有Windows环境缺`h5py`的导入限制。真实HDF5/CUDA尚未运行，因此不得将
+`READY`表述为F4G或H38质量PASS。Ubuntu命令不再包含Git操作，用户会预先完成同步。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -714,15 +743,19 @@ bash ./cvae_repro.sh validate-state-mask-video
 | F4F拓扑smoke | `cvae_posterior_latent_topology_smoke.ok`（仅表示指定臂step0、2步、完整评测与读回完整） |
 | F4F拓扑正式执行/质量 | `cvae_posterior_latent_topology_execution.ok` / `cvae_posterior_latent_topology_progression.ok` |
 | F4F拓扑比较 | `cvae_posterior_latent_topology_comparison.ok`（仅表示双臂身份配对和固定决策完整） |
+| F4G direct-output smoke/执行 | `cvae_posterior_direct_output_smoke.ok` / `cvae_posterior_direct_output_execution.ok` |
+| F4G fit质量 | `cvae_posterior_direct_output_fit.ok` |
+| H38/H50 smoke/执行 | `cvae_posterior_hierarchical_t64_smoke.ok` / `cvae_posterior_hierarchical_t64_execution.ok` |
+| H38/H50分阶段fit | `cvae_posterior_hierarchical_t64_<stage>_fit.ok`，stage为autoencode/fixed/random |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. F4F显式比较已完成并固定为双臂FAIL。当前唯一方向是设计并实现F4G直接输出记忆上限诊断，先
-   隔离objective/evaluator，再定位decoder参数化；新合同明确前不得启动训练或扩展数据规模。
-2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
-   才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
+1. F4G/H38 Windows代码已经READY。当前只运行`posterior-direct-output-smoke`；审核summary、marker、
+   source commit与两步checkpoint读回后，才运行正式F4G。F4G未取得连续三次fit PASS时禁止H38。
+2. F4G通过后依次运行H38 smoke、H38-A、H38-B、H38-R；仅F4G通过且H38-A失败时允许一次H50-A。
+   每步必须先回填plan.md。H38-R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
@@ -774,6 +807,7 @@ df -h /home/helloworld/bly/runs
 | 常规/fine-tune 训练 | `trainer.py`、`configs/physics_v3*.json`、`cvae_repro.sh` |
 | Exact fixture诊断 | `overfit_fixture_eval.py`、`cvae_repro.sh` |
 | 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`posterior_capacity_tail.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
+| T64 direct-output与层级posterior | `posterior_direct_output.py`、`posterior_hierarchical_t64.py`、`posterior_t64_protocol.py`、`configs/posterior_{direct_output,hierarchical}_t64*.json` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

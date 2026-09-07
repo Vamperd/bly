@@ -1,0 +1,25 @@
+{
+  "format_version": "sonic_posterior_hierarchical_t64_reference_v1",
+  "H38": {
+    "parameter_count": 37574883,
+    "parameter_count_range": [37000000, 39500000],
+    "d_model": 384,
+    "ffn_dim": 1536
+  },
+  "H50": {
+    "parameter_count": 51005283,
+    "parameter_count_range": [49000000, 52000000],
+    "d_model": 448,
+    "ffn_dim": 1792
+  },
+  "shared": {
+    "posterior_encoder_layers": 6,
+    "condition_encoder_layers": 4,
+    "decoder_layers": 8,
+    "heads": 8,
+    "global_latent_dim": 256,
+    "local_latent_shape": [16, 128],
+    "window_transitions": 64,
+    "token_count": 129
+  }
+}

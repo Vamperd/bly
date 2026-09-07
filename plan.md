@@ -1,8 +1,18 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
-最后更新：2026-09-07
-当前阶段：F4F显式比较已在run`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708`完成，18项身份检查全PASS；G8/T129三个主比较点全部质量FAIL，固定决策为`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`，唯一下一步为`RUN_DIRECT_OUTPUT_MEMORY_CEILING_FOR_DECODER_AND_OBJECTIVE`。F4F只证明当前同预算拓扑、初始化、decoder与15k协议不足，不证明global/temporal latent理论上不可行。下一步先设计并实现直接输出记忆上限诊断，禁止追加F4F步数、32-motion、R128和KL。
+最后更新：2026-09-08
+当前阶段：F4F显式比较已经收尾；新的32-motion、T64层级latent容量协议已在Windows实现并通过轻量测试，但尚未在Ubuntu真实HDF5/CUDA执行。当前唯一下一步为F4G direct-output smoke；其正式fit通过前禁止启动H38。H38-R通过前不实现conditional prior、采样或KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
+
+## 0. 2026-09-08 — I-F4G/H38 Windows实现 READY
+
+- 路线：`F4G direct output → H38 smoke → H38-A full-both → H38-B fixed physical Mask → H38-R held-out physical Mask → KL三路径`。仅F4G通过而H38-A失败时允许一次H50-A，不再建立其他参数阶梯。
+- 模型：新增独立`physics_hierarchical_posterior_transformer`。H38为37,574,883参数，H50为51,005,283参数；posterior encoder 6层、独立condition encoder 4层、decoder 8层，latent为`1×256 global + 16×128 local`。decoder每层都有self-attention、condition+latent cross-attention、共享FiLM和FFN。
+- 隔离：posterior读取完整序列且Mask bit恒为0，同一窗口latent对所有Mask逐位一致；condition只读取masked value和Mask；decoder query只来自物理时间与State/Action类型。当前没有prior、logvar、sampling或KL接口，也不输入RobotInfo、reference、motion ID或window identity。
+- 数据/Mask：锁定32 motion×8 variant、T64、stride64。固定bank仅包含State gap 4/16、State rollout、Action gap 4/16、Full Action、Joint gap 2/8；R阶段另用每窗口16个独立held-out物理Mask。full-state/full-both仅作posterior诊断。
+- 门禁：fit要求global State/Action RMSE≤`1e-2`、每类worst-window State/Action RMSE≤`2e-2`、p99 abs≤`5e-2`、contact 100%、zero/cross-window/cross-motion整组latent依赖≥10。strict-memory和legacy-exact独立记录但不控制推进。
+- 工程入口：新增`posterior-direct-output[-smoke]`及`posterior-hierarchical-t64-{smoke,autoencode,fixed,random}`。每个run写完整loss/门禁、97连续feature归一化与物理误差、整组/分组donor、五张SVG、checkpoint读回和独立execution/quality marker。
+- Windows验证：新增10项T64专项测试全部通过；旧posterior/F4E/F4F组合38项全部通过；全量发现129项中126项通过，另3个既有模块仅因Windows缺`h5py`无法导入。Python compile、39份JSON配置、Shell语法和`git diff --check`通过。该状态只证明接口与轻量合同一致，不证明真实数据、CUDA显存、速度或质量收敛。唯一下一步为按Next.md运行F4G smoke并回传summary/marker/source commit。
 
 ## 1. 研究问题、成功声明与边界
 
@@ -563,10 +573,16 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4F G8 formal | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_20260907_184707` | `8012b972b5d842f3196586eb995c963fb6dda06d` | 固定15k；best step15k/score71.0758 | 0.071671 worst / 0.018158 global | 0.043046 worst / 0.013475 global | 0.710758；39.456%超1e-2 | 100% | zero/cross-window/cross-motion `42.80/43.25/54.69` | `cvae_posterior_latent_topology_execution.ok` + `cvae.failed` | 有效质量失败；13k/14k/15k均FAIL，不追加步数，执行T129正式15k |
 | F4F T129 formal | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123` | `6e7caed535721a5ee575b80eba138cb6e392152e` | 固定15k；best step15k/score290.9683 | 0.117395 worst / 0.040533 global | 0.065137 worst / 0.025330 global | 2.909683；53.122%超1e-2 | 100% | zero/cross-window/cross-motion `18.94/16.58/20.97` | `cvae_posterior_latent_topology_execution.ok` + `cvae.failed` | 有效质量失败且全面差于G8；运行显式双臂比较器 |
 | F4F topology compare | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708` | `6e7caed535721a5ee575b80eba138cb6e392152e` | 只读比较13k/14k/15k；18项身份检查PASS | G8中位0.073426；T129中位0.118866 | G8中位0.044032；T129中位0.065852 | G8中位0.729531；T129中位2.956917 | 两臂100% | 两臂均满足依赖≥10 | `cvae_posterior_latent_topology_comparison.ok` | `BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`；停止latent拓扑扩展 |
-| F4G direct-output ceiling | PENDING | — | 尚未设计/实现 | 先隔离objective/evaluator，再定位decoder上限 | — | — | — | — | — | — | 当前唯一方向；新合同明确前不得启动训练 |
-| R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
-| K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
-| K1 | PENDING | — | 尚未实现；从R128 `last.pt` model-only初始化 | — | — | — | — | — | — | — | 32 motion、T128、beta线性预热与三路径正式对照 |
+| I-F4G/H38 Windows实现 | READY | N/A | 当前Windows工作树，提交待本轮收尾 | 37,574,883 H38 / 51,005,283 H50 | — | — | — | — | — | N/A | 10项T64专项PASS；全发现129项中126项PASS、3项仅缺既有h5py；执行F4G smoke |
+| F4G direct-output ceiling | PENDING | — | 代码READY、Ubuntu未运行 | 最多5k，每250评测 | — | — | — | — | N/A | 待生成 | 当前唯一实验；正式fit通过后才允许H38 smoke |
+| H38 smoke | PENDING | — | 代码READY、等待F4G | 前2 window、2 step | — | — | — | — | — | 待生成 | 只验证HDF5/CUDA/结构/隔离/checkpoint工程链路 |
+| H38-A | PENDING | — | 代码READY、等待smoke | full-both，最多20k | — | — | — | — | — | 待生成 | PASS进入H38-B；FAIL仅允许H50-A |
+| H38-B | PENDING | — | 代码READY、等待H38-A | 8 fixed physical Mask，最多60k | — | — | — | — | — | 待生成 | PASS进入H38-R；FAIL定位condition融合 |
+| H38-R | PENDING | — | 代码READY、等待H38-B | dynamic train + 16 held-out/window，30k | — | — | — | — | — | 待生成 | PASS后冻结KL=0基线；FAIL定位随机Mask覆盖 |
+| H50-A | PENDING | — | 代码READY但未授权 | full-both，最多20k | — | — | — | — | — | 待生成 | 仅F4G PASS且H38-A FAIL时执行一次 |
+| R128（旧） | SUPERSEDED | — | — | — | — | — | — | — | — | — | 由T64 H38-R取代，不再沿失败F128路线执行 |
+| K0 | PENDING | — | 尚未实现；强制等待H38/H50-R PASS | — | — | — | — | — | — | — | KL三路径工程smoke |
+| K1 | PENDING | — | 尚未实现；从T64 R阶段冻结基线开始 | — | — | — | — | — | — | — | 32 motion、T64、posterior mean/sample与conditional prior sample对照 |
 | K2 | PENDING | — | 不预先实现 | — | — | — | — | — | — | — | 仅当K1的`kl_assessment`要求调整beta或进入prior物理评测时确定 |
 
 ## 6. 每次实验完成后的强制总结

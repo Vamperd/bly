@@ -57,6 +57,26 @@ class PosteriorCapacityDecodedOutput:
     state_contact_logits: torch.Tensor
 
 
+@dataclass
+class HierarchicalPosteriorOutput:
+    """Deterministic output used by the T64 hierarchical capacity experiment."""
+
+    physical_state: torch.Tensor
+    action: torch.Tensor
+    state_contact_logits: torch.Tensor
+    global_latent: torch.Tensor
+    local_latents: torch.Tensor
+
+
+@dataclass
+class HierarchicalDecodedOutput:
+    """Decoder-only output for externally supplied hierarchical latents."""
+
+    physical_state: torch.Tensor
+    action: torch.Tensor
+    state_contact_logits: torch.Tensor
+
+
 class MLPTokenizer(nn.Module):
     def __init__(self, input_dim: int, output_dim: int) -> None:
         super().__init__()
@@ -173,6 +193,126 @@ class TransformerStack(nn.Module):
     ) -> torch.Tensor:
         for layer in self.layers:
             value = layer(value, valid_tokens, times, causal)
+        return self.norm(value)
+
+
+class CrossAttention(nn.Module):
+    """Multi-head cross-attention with an explicit valid-memory contract."""
+
+    def __init__(self, d_model: int, heads: int, dropout: float) -> None:
+        super().__init__()
+        if d_model % heads:
+            raise ValueError("d_model must be divisible by heads")
+        self.heads = heads
+        self.head_dim = d_model // heads
+        self.scale = self.head_dim**-0.5
+        self.query = nn.Linear(d_model, d_model)
+        self.key_value = nn.Linear(d_model, 2 * d_model)
+        self.output = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        query_value: torch.Tensor,
+        memory: torch.Tensor,
+        memory_valid: torch.Tensor,
+    ) -> torch.Tensor:
+        batch, query_length, width = query_value.shape
+        if memory.shape[0] != batch or memory.shape[2] != width:
+            raise ValueError("cross-attention query and memory shapes disagree")
+        if tuple(memory_valid.shape) != tuple(memory.shape[:2]):
+            raise ValueError("cross-attention memory validity has the wrong shape")
+        query = self.query(query_value).reshape(
+            batch, query_length, self.heads, self.head_dim
+        ).transpose(1, 2)
+        key, value = self.key_value(memory).reshape(
+            batch, memory.shape[1], 2, self.heads, self.head_dim
+        ).unbind(dim=2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+        scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+        scores = scores.masked_fill(~memory_valid[:, None, None, :], -torch.inf)
+        attention = torch.softmax(scores.float(), dim=-1).to(scores.dtype)
+        attention = self.dropout(attention)
+        result = torch.matmul(attention, value).transpose(1, 2).reshape(
+            batch, query_length, width
+        )
+        return self.output(result)
+
+
+class HierarchicalDecoderBlock(nn.Module):
+    """Self-attention, condition/latent cross-attention, FiLM, then FFN."""
+
+    def __init__(self, d_model: int, heads: int, ffn_dim: int, dropout: float) -> None:
+        super().__init__()
+        self.self_norm = nn.LayerNorm(d_model)
+        self.self_attention = RotarySelfAttention(d_model, heads, dropout)
+        self.cross_query_norm = nn.LayerNorm(d_model)
+        self.cross_memory_norm = nn.LayerNorm(d_model)
+        self.cross_attention = CrossAttention(d_model, heads, dropout)
+        self.ffn_norm = nn.LayerNorm(d_model)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(d_model, ffn_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_dim, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(
+        self,
+        value: torch.Tensor,
+        query_valid: torch.Tensor,
+        times: torch.Tensor,
+        memory: torch.Tensor,
+        memory_valid: torch.Tensor,
+        film_scale: torch.Tensor,
+        film_shift: torch.Tensor,
+    ) -> torch.Tensor:
+        valid = query_valid.unsqueeze(-1).to(value.dtype)
+        value = value + self.self_attention(
+            self.self_norm(value), query_valid, times, False
+        ) * valid
+        value = value + self.cross_attention(
+            self.cross_query_norm(value),
+            self.cross_memory_norm(memory),
+            memory_valid,
+        ) * valid
+        conditioned = self.ffn_norm(value) * (1.0 + film_scale) + film_shift
+        return value + self.feed_forward(conditioned) * valid
+
+
+class HierarchicalDecoderStack(nn.Module):
+    def __init__(
+        self, layers: int, d_model: int, heads: int, ffn_dim: int, dropout: float
+    ) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(
+            HierarchicalDecoderBlock(d_model, heads, ffn_dim, dropout)
+            for _ in range(layers)
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        value: torch.Tensor,
+        query_valid: torch.Tensor,
+        times: torch.Tensor,
+        memory: torch.Tensor,
+        memory_valid: torch.Tensor,
+        film_scale: torch.Tensor,
+        film_shift: torch.Tensor,
+    ) -> torch.Tensor:
+        for layer in self.layers:
+            value = layer(
+                value,
+                query_valid,
+                times,
+                memory,
+                memory_valid,
+                film_scale,
+                film_shift,
+            )
         return self.norm(value)
 
 
@@ -1983,6 +2123,300 @@ class PosteriorCapacityTransformerCVAE(nn.Module):
         )
 
 
+class HierarchicalPosteriorTransformer(nn.Module):
+    """Deterministic global+local posterior Transformer for the T64 study.
+
+    Full-sequence encoding, masked-condition encoding, and decoder queries are
+    deliberately separate.  The posterior always receives zero Mask bits so
+    its latent is canonical for a window and bitwise invariant to the query
+    Mask.  This class intentionally has no prior, log-variance, or sampler.
+    """
+
+    REQUIRED_TRANSITIONS = 64
+    LOCAL_CHUNKS = 16
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.width = int(config["d_model"])
+        self.state_dim = int(config.get("state_dim", 70))
+        self.global_latent_dim = int(config.get("global_latent_dim", 256))
+        self.local_latent_dim = int(config.get("local_latent_dim", 128))
+        self.local_chunks = int(config.get("local_chunks", self.LOCAL_CHUNKS))
+        self.chunk_transitions = int(config.get("chunk_transitions", 4))
+        self.max_state_steps = int(config.get("max_state_steps", 65))
+        if self.state_dim != 70:
+            raise ValueError("hierarchical posterior requires the 70-D Physics State")
+        if self.local_chunks != self.LOCAL_CHUNKS or self.chunk_transitions != 4:
+            raise ValueError("T64 hierarchical posterior requires 16 four-transition chunks")
+        if self.max_state_steps != self.REQUIRED_TRANSITIONS + 1:
+            raise ValueError("T64 hierarchical posterior requires max_state_steps=65")
+        dropout = float(config.get("dropout", 0.0))
+        heads = int(config["heads"])
+        ffn_dim = int(config["ffn_dim"])
+
+        self.state_input = nn.Linear(self.state_dim * 2, self.width)
+        self.action_input = nn.Linear(ACTION_DIM * 2, self.width)
+        self.input_type_embedding = nn.Embedding(2, self.width)
+        self.time_embedding = nn.Embedding(self.max_state_steps, self.width)
+        self.posterior_cls = nn.Parameter(torch.zeros(1, 1, self.width))
+        self.posterior_encoder = TransformerStack(
+            int(config["posterior_encoder_layers"]),
+            self.width,
+            heads,
+            ffn_dim,
+            dropout,
+        )
+        self.condition_encoder = TransformerStack(
+            int(config["condition_encoder_layers"]),
+            self.width,
+            heads,
+            ffn_dim,
+            dropout,
+        )
+        self.global_head = nn.Linear(self.width, self.global_latent_dim)
+        self.local_head = nn.Linear(self.width, self.local_latent_dim)
+        self.empty_local = nn.Parameter(torch.zeros(1, 1, self.width))
+
+        self.global_memory_projection = nn.Linear(self.global_latent_dim, self.width)
+        self.local_memory_projection = nn.Linear(self.local_latent_dim, self.width)
+        self.global_memory_type = nn.Parameter(torch.zeros(1, 1, self.width))
+        self.local_slot_embedding = nn.Embedding(self.local_chunks, self.width)
+        self.decoder_query_base = nn.Parameter(torch.zeros(1, 1, self.width))
+        self.decoder_type_embedding = nn.Embedding(2, self.width)
+        self.film_global_projection = nn.Linear(self.global_latent_dim, self.width)
+        self.film_local_projection = nn.Linear(self.local_latent_dim, self.width)
+        self.film_projection = nn.Linear(self.width, 2 * self.width)
+        self.decoder = HierarchicalDecoderStack(
+            int(config["decoder_layers"]),
+            self.width,
+            heads,
+            ffn_dim,
+            dropout,
+        )
+        self.state_continuous_output = nn.Linear(self.width, 68)
+        self.state_contact_output = nn.Linear(self.width, 2)
+        self.action_output = nn.Linear(self.width, ACTION_DIM)
+
+        for parameter in (
+            self.posterior_cls,
+            self.empty_local,
+            self.global_memory_type,
+            self.decoder_query_base,
+        ):
+            nn.init.normal_(parameter, std=0.02)
+
+    def _layout(
+        self, batch: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        state = batch["physical_state"]
+        action = batch["action"]
+        if state.ndim != 3 or action.ndim != 3:
+            raise ValueError("hierarchical posterior expects batched State and Action tensors")
+        if state.shape[1] != self.max_state_steps or action.shape[1] != self.REQUIRED_TRANSITIONS:
+            raise ValueError("hierarchical posterior requires exactly T64 windows")
+        if state.shape[2] != self.state_dim or action.shape[2] != ACTION_DIM:
+            raise ValueError("hierarchical posterior State/Action feature dimensions disagree")
+        valid_state = batch["valid_state"].bool()
+        valid_action = batch["valid_action"].bool()
+        valid = torch.stack((valid_state[:, :-1], valid_action), dim=2).flatten(1, 2)
+        valid = torch.cat((valid, valid_state[:, -1:]), dim=1)
+        times = torch.stack(
+            (
+                torch.arange(self.REQUIRED_TRANSITIONS, device=state.device),
+                torch.arange(self.REQUIRED_TRANSITIONS, device=state.device),
+            ),
+            dim=1,
+        ).flatten()
+        times = torch.cat((times, times.new_tensor([self.REQUIRED_TRANSITIONS])))
+        types = torch.stack(
+            (
+                torch.zeros(self.REQUIRED_TRANSITIONS, dtype=torch.long, device=state.device),
+                torch.ones(self.REQUIRED_TRANSITIONS, dtype=torch.long, device=state.device),
+            ),
+            dim=1,
+        ).flatten()
+        types = torch.cat((types, types.new_tensor([0])))
+        state_indices = torch.arange(0, 2 * self.REQUIRED_TRANSITIONS + 1, 2, device=state.device)
+        action_indices = torch.arange(1, 2 * self.REQUIRED_TRANSITIONS, 2, device=state.device)
+        return valid, times, types, state_indices, action_indices, valid_state
+
+    def local_chunk_ids(self, times: torch.Tensor) -> torch.Tensor:
+        """Map physical time indices to the 16 fixed four-transition chunks."""
+        return torch.div(times, self.chunk_transitions, rounding_mode="floor").clamp_max(
+            self.local_chunks - 1
+        )
+
+    def _input_tokens(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        *,
+        canonical: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        state = batch["physical_state"]
+        action = batch["action"]
+        if state_mask.shape != state.shape or action_mask.shape != action.shape:
+            raise ValueError("hierarchical posterior masks must match State and Action")
+        valid, times, types, state_indices, action_indices, _ = self._layout(batch)
+        if canonical:
+            state_values, action_values = state, action
+            state_bits = torch.zeros_like(state_mask)
+            action_bits = torch.zeros_like(action_mask)
+        else:
+            state_values = state.masked_fill(state_mask, 0.0)
+            action_values = action.masked_fill(action_mask, 0.0)
+            state_bits, action_bits = state_mask, action_mask
+        state_tokens = self.state_input(
+            torch.cat((state_values, state_bits.to(state.dtype)), dim=-1)
+        ) + self.input_type_embedding.weight[0]
+        action_tokens = self.action_input(
+            torch.cat((action_values, action_bits.to(action.dtype)), dim=-1)
+        ) + self.input_type_embedding.weight[1]
+        tokens = torch.stack((state_tokens[:, :-1], action_tokens), dim=2).flatten(1, 2)
+        tokens = torch.cat((tokens, state_tokens[:, -1:]), dim=1)
+        tokens = tokens + self.time_embedding(times)[None]
+        return tokens, valid, times, state_indices, action_indices
+
+    def encode_posterior(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        tokens, valid, times, _, _ = self._input_tokens(
+            batch, state_mask, action_mask, canonical=True
+        )
+        cls = self.posterior_cls.expand(tokens.shape[0], -1, -1)
+        encoded = self.posterior_encoder(
+            torch.cat((cls, tokens), dim=1),
+            torch.cat(
+                (torch.ones_like(valid[:, :1]), valid),
+                dim=1,
+            ),
+            torch.cat((times.new_tensor([-1]), times)),
+            False,
+        )
+        global_latent = self.global_head(encoded[:, 0])
+        data_encoded = encoded[:, 1:]
+        chunk_ids = self.local_chunk_ids(times)
+        pooled: list[torch.Tensor] = []
+        for chunk in range(self.local_chunks):
+            members = (chunk_ids == chunk)[None, :] & valid
+            denominator = members.sum(dim=1, keepdim=True)
+            value = (data_encoded * members.unsqueeze(-1).to(data_encoded.dtype)).sum(dim=1)
+            value = value / denominator.clamp_min(1).to(data_encoded.dtype)
+            fallback = self.empty_local[:, 0].expand_as(value)
+            pooled.append(torch.where(denominator > 0, value, fallback))
+        local_latents = self.local_head(torch.stack(pooled, dim=1))
+        return global_latent, local_latents
+
+    @staticmethod
+    def _resolve_override(
+        latent_override: Any,
+        default_global: torch.Tensor,
+        default_local: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if latent_override is None:
+            return default_global, default_local
+        if isinstance(latent_override, dict):
+            global_latent = latent_override.get("global_latent")
+            local_latents = latent_override.get("local_latents")
+        elif isinstance(latent_override, (tuple, list)) and len(latent_override) == 2:
+            global_latent, local_latents = latent_override
+        else:
+            raise ValueError("latent_override must contain global_latent and local_latents")
+        if not isinstance(global_latent, torch.Tensor) or not isinstance(local_latents, torch.Tensor):
+            raise ValueError("hierarchical latent override entries must be tensors")
+        return global_latent, local_latents
+
+    def decode_from_hierarchical_latent(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        global_latent: torch.Tensor,
+        local_latents: torch.Tensor,
+    ) -> HierarchicalDecodedOutput:
+        condition, valid, times, state_indices, action_indices = self._input_tokens(
+            batch, state_mask, action_mask, canonical=False
+        )
+        expected_global = (condition.shape[0], self.global_latent_dim)
+        expected_local = (condition.shape[0], self.local_chunks, self.local_latent_dim)
+        if tuple(global_latent.shape) != expected_global:
+            raise ValueError(f"global latent must have shape {expected_global}")
+        if tuple(local_latents.shape) != expected_local:
+            raise ValueError(f"local latents must have shape {expected_local}")
+        condition = self.condition_encoder(condition, valid, times, False)
+        global_memory = (
+            self.global_memory_projection(global_latent)[:, None] + self.global_memory_type
+        )
+        local_memory = self.local_memory_projection(local_latents) + self.local_slot_embedding.weight
+        memory = torch.cat((condition, global_memory, local_memory), dim=1)
+        latent_valid = torch.ones(
+            condition.shape[0], 1 + self.local_chunks, dtype=torch.bool, device=condition.device
+        )
+        memory_valid = torch.cat((valid, latent_valid), dim=1)
+
+        query = self.decoder_query_base + self.time_embedding(times)[None]
+        decoder_types = torch.cat((
+            torch.stack((
+                torch.zeros(self.REQUIRED_TRANSITIONS, dtype=torch.long, device=times.device),
+                torch.ones(self.REQUIRED_TRANSITIONS, dtype=torch.long, device=times.device),
+            ), dim=1).flatten(),
+            times.new_tensor([0]),
+        ))
+        query = query + self.decoder_type_embedding(decoder_types)
+        query = query.expand(condition.shape[0], -1, -1)
+        token_chunks = self.local_chunk_ids(times)
+        film_base = self.film_global_projection(global_latent)[:, None]
+        film_base = film_base + self.film_local_projection(local_latents)[:, token_chunks]
+        film_scale, film_shift = self.film_projection(film_base).chunk(2, dim=-1)
+        film_scale = torch.tanh(film_scale)
+        decoded = self.decoder(
+            query,
+            valid,
+            times,
+            memory,
+            memory_valid,
+            film_scale,
+            film_shift,
+        )
+        state_hidden = decoded[:, state_indices]
+        action_hidden = decoded[:, action_indices]
+        contact_logits = self.state_contact_output(state_hidden)
+        physical_state = torch.cat(
+            (self.state_continuous_output(state_hidden), torch.sigmoid(contact_logits)), dim=-1
+        )
+        return HierarchicalDecodedOutput(
+            physical_state=physical_state,
+            action=self.action_output(action_hidden),
+            state_contact_logits=contact_logits,
+        )
+
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        latent_override: Any = None,
+    ) -> HierarchicalPosteriorOutput:
+        global_latent, local_latents = self.encode_posterior(batch, state_mask, action_mask)
+        global_latent, local_latents = self._resolve_override(
+            latent_override, global_latent, local_latents
+        )
+        decoded = self.decode_from_hierarchical_latent(
+            batch, state_mask, action_mask, global_latent, local_latents
+        )
+        return HierarchicalPosteriorOutput(
+            physical_state=decoded.physical_state,
+            action=decoded.action,
+            state_contact_logits=decoded.state_contact_logits,
+            global_latent=global_latent,
+            local_latents=local_latents,
+        )
+
+
 def build_model(config: dict[str, Any]) -> nn.Module:
     kind = str(config.get("kind", "transformer"))
     if kind == "transformer":
@@ -1993,6 +2427,8 @@ def build_model(config: dict[str, Any]) -> nn.Module:
         return LeanSplitPhysicsCVAE(config)
     if kind == "physics_posterior_transformer":
         return PosteriorCapacityTransformerCVAE(config)
+    if kind == "physics_hierarchical_posterior_transformer":
+        return HierarchicalPosteriorTransformer(config)
     if kind == "tcn":
         return TCNCVAE(config)
     raise ValueError(f"unsupported model kind {kind!r}")
