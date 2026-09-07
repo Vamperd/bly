@@ -175,7 +175,8 @@ def run_experiment(
     generator = torch.Generator().manual_seed(int(config["seed"]))
     train_loader = DataLoader(
         fixtures, batch_size=micro_batch, shuffle=True, num_workers=workers,
-        generator=generator, pin_memory=device.type == "cuda", persistent_workers=workers > 0,
+        generator=generator, drop_last=not smoke,
+        pin_memory=device.type == "cuda", persistent_workers=workers > 0,
     )
     validation_loader = DataLoader(
         fixtures, batch_size=micro_batch, shuffle=False, num_workers=workers,
