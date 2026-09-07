@@ -524,9 +524,10 @@ optimizer/scheduler构造测试。失败run绝对路径与marker尚待回传；�
 
 修复后的G8 smoke run
 `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608`
-已完成2 optimizer step，Shell打印execution complete并检查到smoke marker；`quality_pass=false`与best
-score2321.019在2-step随机code smoke中无质量含义。完整summary/source commit/初始化hash、encoder隔离
-和checkpoint readback尚未回传，因此状态为`AUDIT_PENDING`，不能据此启动T129或formal。
+已通过完整工程审计，源码`478f479bb3345697ff5c7da14583c9c3e13be193`。F4D复现、F4E授权、80/800
+身份、25,620,323参数、seed20260832初始化、训练/fixture seed20260831/20260830、encoder零调用/零梯度、
+两步训练身份和best/last checkpoint读回全部PASS；exit code0且只有smoke marker。`quality_pass=false`与
+best score2321.019在2-step随机code smoke中无质量含义。当前允许执行T129 smoke，但不得直接formal。
 
 ### 6.5 已完成 parent 训练
 
@@ -679,8 +680,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. 修复后的G8 2-step smoke已执行完成但完整合同待审计。当前唯一动作是回传其summary、source commit、
-   marker、初始化hash、encoder隔离及checkpoint读回；全部通过后才执行T129 smoke，不得直接formal。
+1. G8 2-step smoke工程合同已全部通过。当前唯一动作是从同一F4D源独立执行T129 2-step smoke；不得
+   加载G8 checkpoint。T129审计通过后才运行G8正式15k，仍不得提前进入T129 formal或后续阶段。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较

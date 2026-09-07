@@ -4,9 +4,9 @@
 
 状态：修复后的G8 smoke run
 `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608`
-已完成2个optimizer step并由Shell确认smoke marker，`quality_pass=false`符合工程smoke语义。完整summary、
-source commit、初始化hash与checkpoint readback尚待回传，因此当前唯一下一步是只读审计该run；合同
-全部通过后才执行T129 smoke。在两支smoke均通过前不得启动正式
+已通过完整工程审计：F4D复现与F4E授权、4 motion/80 windows/800 fixtures、25,620,323参数、固定初始化、
+双seed、encoder隔离、训练身份、checkpoint读回及marker全部正确。`quality_pass=false`符合2-step smoke
+语义。当前唯一下一步是从同一F4D源独立执行T129 smoke；两支smoke均通过前不得启动正式
 15k训练。禁止追加F4E步数、修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
