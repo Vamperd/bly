@@ -612,6 +612,30 @@ def _last_three_pass(evaluations: list[dict[str, Any]], required_steps: Iterable
     )
 
 
+def root_cause_assessment(
+    *, smoke: bool, e1_pass: bool, e2_pass: bool
+) -> tuple[str, str]:
+    if smoke:
+        return (
+            "SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT",
+            "REVIEW_SMOKE_ARTIFACTS_AND_RERUN_FORMAL_FROM_F4D",
+        )
+    if e1_pass:
+        return (
+            "E1_PASS_ENCODER_CODE_BOTTLENECK",
+            "POSTERIOR_TO_CODE_DISTILLATION_OR_AUTODECODER_THEN_ENCODER",
+        )
+    if e2_pass:
+        return (
+            "E2_PASS_CODE_DECODER_COADAPTATION_BOTTLENECK",
+            "STAGED_CVAE_AUTODECODER_THEN_FROZEN_DECODER_ENCODER",
+        )
+    return (
+        "E1_E2_FAIL_GLOBAL_CODE_DECODER_CAPACITY_UNPROVEN",
+        "COMPARE_LARGER_GLOBAL_LATENT_WITH_PER_TIME_LATENT_OR_REVIEW_MAX_ABS_GATE",
+    )
+
+
 def _categorical_svg(title: str, rows: list[dict[str, Any]]) -> str:
     width, height = 1280, 700
     left, right, top, bottom = 100.0, 30.0, 80.0, 150.0
@@ -1244,15 +1268,9 @@ def run_autodecoder_experiment(
             handle.remove()
         plots = render_plots(output_run, records, code_manifest, best_evaluation)
         quality_pass = bool(e1_pass or e2_pass)
-        if e1_pass:
-            conclusion = "E1_PASS_ENCODER_CODE_BOTTLENECK"
-            next_step = "POSTERIOR_TO_CODE_DISTILLATION_OR_AUTODECODER_THEN_ENCODER"
-        elif e2_pass:
-            conclusion = "E2_PASS_CODE_DECODER_COADAPTATION_BOTTLENECK"
-            next_step = "STAGED_CVAE_AUTODECODER_THEN_FROZEN_DECODER_ENCODER"
-        else:
-            conclusion = "E1_E2_FAIL_GLOBAL_CODE_DECODER_CAPACITY_UNPROVEN"
-            next_step = "COMPARE_LARGER_GLOBAL_LATENT_WITH_PER_TIME_LATENT_OR_REVIEW_MAX_ABS_GATE"
+        conclusion, next_step = root_cause_assessment(
+            smoke=smoke, e1_pass=e1_pass, e2_pass=e2_pass
+        )
         train_records = [row for row in records if row["phase"] == "train"]
         summary = {
             "format_version": FORMAT_VERSION,

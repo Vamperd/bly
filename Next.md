@@ -2,9 +2,10 @@
 
 最后更新：2026-09-07
 
-状态：Windows实现与CPU轻量测试已完成，真实HDF5/CUDA尚未执行。当前唯一下一步是同步提交后运行
-`posterior-capacity-autodecoder-smoke`；只有smoke的源复现、80-code共享、encoder零调用/零梯度、
-checkpoint读回与execution marker全部通过，才从F4D源重新启动正式F4E。概览与实际结果仍以
+状态：首个Ubuntu smoke在`5cf48ca`上完成，但发现summary把2步smoke误报为正式E1/E2根因失败；该结论
+无效。Windows已修复为专用的execution-only结论，当前唯一下一步是同步修复后重新运行
+`posterior-capacity-autodecoder-smoke`；只有新smoke的源复现、80-code共享、encoder零调用/零梯度、
+checkpoint读回、报告语义与execution marker全部通过，才从F4D源重新启动正式F4E。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 当前问题与固定诊断

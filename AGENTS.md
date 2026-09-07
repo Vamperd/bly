@@ -474,7 +474,17 @@ donor ratio均至少10。F4E允许window identity，仅用于已见80窗口容�
 新Mask、未见motion及真实State与Action推理。Windows posterior/F4E相关53项测试全部PASS；完整发现
 106项中103项PASS，另3个仍仅因既有Windows环境缺`h5py`而导入失败。Python compile、全部JSON、
 CLI help、Shell语法和diff check通过；实现提交为
-`c54f0ce4c6da166cfe7b70422302bdc454d805e7`，真实HDF5/CUDA未运行，不得将当前READY写成实验PASS。
+`c54f0ce4c6da166cfe7b70422302bdc454d805e7`。
+
+首个Ubuntu smoke已在源码`5cf48cac8b4289b75d44c148b26513f1d2510c21`执行完成：run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_114405`，完成2个
+optimizer step，Shell成功返回run并生成smoke marker，证明真实HDF5/CUDA主链路可运行。但该版本
+summary把smoke固定的`quality_pass=false`错误映射为
+`E1_E2_FAIL_GLOBAL_CODE_DECODER_CAPACITY_UNPROVEN`；这个根因字段无效，因为E1尚未完成5k且E2根本
+未运行。Windows现已把smoke报告隔离为`SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT`并增加回归
+测试。修复后posterior/F4E相关54项测试全部PASS；完整发现107项中104项PASS，另3项仍仅因既有
+Windows环境缺`h5py`而导入失败。历史smoke run保持只读；必须同步修复并重新smoke、审核完整合同后，
+才允许启动正式F4E。
 
 ### 6.5 已完成 parent 训练
 
@@ -624,9 +634,9 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. A/B/C比较已正式停止本轮loss/gate/seed路线。F4E已获用户批准并在Windows实现；当前唯一动作是
-   同步提交后运行`posterior-capacity-autodecoder-smoke`。smoke通过并回填`plan.md`后，才从原F4D
-   `best_progression.pt`独立运行正式F4E；不得使用smoke checkpoint初始化。
+1. A/B/C比较已正式停止本轮loss/gate/seed路线。F4E首个smoke工程执行完成但根因字段误报；当前唯一
+   动作是同步报告修复并重新运行`posterior-capacity-autodecoder-smoke`。修正版smoke通过并回填
+   `plan.md`后，才从原F4D `best_progression.pt`独立运行正式F4E；不得使用smoke checkpoint初始化。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较

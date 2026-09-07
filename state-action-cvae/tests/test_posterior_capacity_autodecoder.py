@@ -34,6 +34,7 @@ from cvae_sa.posterior_capacity_autodecoder import (
     configure_trainable_parameters,
     initialize_window_codes,
     render_plots,
+    root_cause_assessment,
     validate_saved_checkpoint,
     validate_stop_trigger,
 )
@@ -180,6 +181,25 @@ def _summary(arm: str, exceed: float, maximum: float) -> dict[str, object]:
 
 
 class PosteriorCapacityAutoDecoderTest(unittest.TestCase):
+    def test_root_cause_assessment_separates_smoke_and_formal_decisions(self) -> None:
+        assessment, next_step = root_cause_assessment(
+            smoke=True, e1_pass=False, e2_pass=False
+        )
+        self.assertEqual(assessment, "SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT")
+        self.assertIn("RERUN_FORMAL_FROM_F4D", next_step)
+
+        expected = {
+            (True, False): "E1_PASS_ENCODER_CODE_BOTTLENECK",
+            (False, True): "E2_PASS_CODE_DECODER_COADAPTATION_BOTTLENECK",
+            (False, False): "E1_E2_FAIL_GLOBAL_CODE_DECODER_CAPACITY_UNPROVEN",
+        }
+        for (e1_pass, e2_pass), expected_assessment in expected.items():
+            with self.subTest(e1_pass=e1_pass, e2_pass=e2_pass):
+                assessment, _ = root_cause_assessment(
+                    smoke=False, e1_pass=e1_pass, e2_pass=e2_pass
+                )
+                self.assertEqual(assessment, expected_assessment)
+
     def test_fixed_config_has_exact_parameter_and_two_stage_contract(self) -> None:
         path = Path(__file__).resolve().parents[1] / "configs/posterior_capacity_autodecoder.json"
         config = json.loads(path.read_text(encoding="utf-8"))
