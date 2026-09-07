@@ -2,12 +2,12 @@
 
 最后更新：2026-09-07
 
-状态：修复后的G8 smoke run
-`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608`
-已通过完整工程审计：F4D复现与F4E授权、4 motion/80 windows/800 fixtures、25,620,323参数、固定初始化、
-双seed、encoder隔离、训练身份、checkpoint读回及marker全部正确。`quality_pass=false`符合2-step smoke
-语义。当前唯一下一步是从同一F4D源独立执行T129 smoke；两支smoke均通过前不得启动正式
-15k训练。禁止追加F4E步数、修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
+状态：G8与T129两个2-step smoke均已通过工程审计。T129 run为
+`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_smoke_20260907_182754`：
+4 motion/80 windows/800 fixtures、`[80,129,16]`共享code、25,625,059总参数、双seed、encoder隔离、
+逐step训练身份与best/last checkpoint读回均正确。两支smoke的训练身份SHA256逐step相同；
+`quality_pass=false`符合随机code只训练2步的smoke语义。当前唯一下一步是从F4D源独立执行G8正式
+15k训练，不加载任何smoke或F4E权重。禁止追加F4E步数、修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 已知事实与实验问题

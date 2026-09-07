@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：F4F G8 smoke已在run`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608`通过完整工程审计。源码`478f479bb3345697ff5c7da14583c9c3e13be193`包含optimizer键名修复；F4D复现、F4E授权、80 windows/800 fixtures、25,620,323参数、初始化与双seed、encoder零调用/零梯度、训练身份、checkpoint读回和唯一smoke marker全部正确。当前唯一下一步是从同一F4D源独立执行T129 2-step smoke；其通过后才允许正式15k。继续禁止F4E追加、32-motion、R128和KL。
+当前阶段：F4F G8与T129两个2-step smoke均已通过工程审计。T129 run为`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_smoke_20260907_182754`，源码同为`478f479bb3345697ff5c7da14583c9c3e13be193`；80 windows/800 fixtures、`[80,129,16]`共享code、25,625,059参数、初始化与双seed、encoder零调用/零梯度、训练身份、checkpoint读回和唯一smoke marker均正确。当前唯一下一步是从同一F4D源独立执行G8正式15k，不加载smoke或F4E权重。继续禁止F4E追加、32-motion、R128和KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -559,8 +559,9 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | I-F4F Windows实现 | READY | N/A | `302cb594c3e1c828256946110f6ba0aece36d8de` | G8/T129各2-step smoke入口与固定15k正式入口 | — | — | — | — | — | 尚无Ubuntu marker | 总参数25,620,323/25,625,059；60项posterior相关测试PASS，全发现116项PASS且3项仅缺h5py；先执行G8 smoke |
 | F4F G8 smoke v1 | ENGINEERING_FAIL | 路径尚未回传 | 修复前`302cb594…` | 0 optimizer step；构造optimizer时报`KeyError: topology_learning_rate` | — | — | — | — | — | `cvae.failed`应由Shell生成，待路径核验 | 配置键不一致；无模型结论，使用`774c3ac…`重新smoke |
 | F4F G8 smoke v2 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608` | `478f479bb3345697ff5c7da14583c9c3e13be193` | 2 step；best step0/score2321.019 | 1.464988 | 1.779843 | 23.210190 | 94.725% | zero/cross-window/cross-motion `1.042/0.998/1.042` | `cvae_posterior_latent_topology_smoke.ok` | 工程合同全PASS；随机code两步质量无结论，执行T129 smoke |
-| F4F G8 formal | PENDING | — | 已实现、未运行 | 固定15k | — | — | — | — | — | — | 仅两支smoke审计通过后运行 |
-| F4F T129 smoke/formal | PENDING | — | 已实现、未运行 | smoke 2 step；formal固定15k | — | — | — | — | — | — | G8 smoke后执行T129 smoke；两支正式run完成后显式比较 |
+| F4F T129 smoke | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_smoke_20260907_182754` | `478f479bb3345697ff5c7da14583c9c3e13be193` | 2 step；随机code质量值不作容量判断 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 工程依赖检查PASS | `cvae_posterior_latent_topology_smoke.ok` | T129参数、身份、隔离及读回全PASS；执行G8正式15k |
+| F4F G8 formal | PENDING | — | 已实现、未运行 | 固定15k | — | — | — | — | — | — | 两支smoke均已通过；当前唯一训练动作 |
+| F4F T129 formal | PENDING | — | 已实现、未运行 | 固定15k | — | — | — | — | — | — | 仅G8正式完成并回传后执行；两支正式run完成后显式比较 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
 | K1 | PENDING | — | 尚未实现；从R128 `last.pt` model-only初始化 | — | — | — | — | — | — | — | 32 motion、T128、beta线性预热与三路径正式对照 |
@@ -613,6 +614,16 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 - 初始化与隔离：seed/subseed为20260832/20260833，code/总初始化hash为`f760b14f...`/`1d8df28d...`；训练/fixture seed为20260831/20260830。encoder/posterior/prior调用均为0，79个冻结参数无梯度；两步sample identity分别为`ce6aa126...`和`85e87a2f...`。
 - 读回：best/last checkpoint所有检查均PASS，SHA256为`299eda1f...`与`f3868860...`。训练拓扑组265,600参数包含code、slot及复用的98,688参数latent projection；它与model contract中“仅新增slot参数3,072”的统计口径不冲突。
 - 唯一下一步：从同一F4D checkpoint独立运行T129 2-step smoke；不得加载G8 checkpoint。T129合同审计通过后，才按顺序启动G8正式15k。
+
+### 2026-09-07 18:27 — F4F T129 smoke PASS（仅工程合同）
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_smoke_20260907_182754`；源码`tiny-model@478f479bb3345697ff5c7da14583c9c3e13be193`，exit code为0且仅生成`cvae_posterior_latent_topology_smoke.ok`。
+- 数据与模型：F4D八项复现检查全PASS；4 motion、T128、80 windows、800 fixtures，fixture/window hash分别为`2e97a990...`/`e740b5c1...`。code为`[80,129,16]`，共165,120参数、每window 2,064标量；总参数25,625,059，同window跨Mask共享且无per-fixture code。
+- 初始化与公平性：初始化/拓扑subseed为20260832/20260833，code与总初始化hash为`2501bcf4...`/`dc344bc3...`；训练/fixture seed为20260831/20260830。step1/2采样身份为`ce6aa126...`/`85e87a2f...`，与G8完全相同。
+- 隔离与读回：encoder/posterior/prior调用均为0，79个冻结参数无梯度；trainable topology/decoder/总参数为171,648/14,312,163/14,483,811。best/last checkpoint读回全PASS，SHA256为`6be0ca4a...`与`64a1b55a...`。
+- 授权说明：回传命令错误查询`.source.f4e_authorization`因而显示`null`；实现中的真实字段为`.source.f4e_baseline.authorization_checks`，且任一授权检查失败都会抛错并阻断本run。成功完成2步、写出summary/checkpoint及marker证明该前置合同已通过。
+- 质量边界：`quality_pass=false`不构成T129失败；smoke只验证随机code的step0与2步训练链路，未回传的质量数值不用于选择拓扑。
+- 唯一下一步：从F4D `best_progression.pt`独立启动G8正式15k；不得加载G8/T129 smoke checkpoint。G8完成并回传后才启动T129正式15k。
 
 ### 2026-09-07 — F4F G8 smoke v1 ENGINEERING_FAIL
 
