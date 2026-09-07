@@ -505,9 +505,16 @@ code ratio为95.65/94.85/119.93，证明code被强烈使用且平均重建较好
 不是encoder泄漏、code忽略或单个max-abs离群点。`full_both`最差，但其余9类也均因max abs失败。
 
 F4E只排除了“posterior encoder是唯一根因”，没有证明256维code在理论上不足。当前禁止继续追加F4E
-步数、放宽单项门禁、扩32 motion、执行R128或实现KL。下一实验固定为尚未实现的F4F等预算拓扑比较：
+步数、放宽单项门禁、扩32 motion、执行R128或实现KL。下一实验固定为F4F等预算拓扑比较：
 G8使用每window `8×256` global memory tokens（163,840 code标量），T129使用`129×16` per-time codes
 （165,120标量），差0.78%；同数据/Mask/loss/15k协议。完整合同见`Next.md`。
+
+F4F已在Windows提交`302cb594c3e1c828256946110f6ba0aece36d8de`实现。基础posterior模型新增无参数
+decoder topology接口；G8以8个带slot embedding的前缀memory token注入，T129以同时间State/Action
+共享的16维time code投影相加。两臂总参数分别为25,620,323与25,625,059，固定从F4D源开始、15k不
+早停、13k/14k/15k三点同时验收，并核对逐step训练身份。Windows posterior相关60项测试全部PASS；
+完整发现119项中116项PASS，另3项仍仅因既有Windows环境缺`h5py`导入失败。真实HDF5/CUDA尚未
+验证；必须先串行执行G8 smoke、T129 smoke并回传合同，不能把READY写成训练成功。
 
 ### 6.5 已完成 parent 训练
 
@@ -652,13 +659,16 @@ bash ./cvae_repro.sh validate-state-mask-video
 | F4E Auto-decoder smoke | `cvae_posterior_autodecoder_smoke.ok`（仅表示step0、2步code-only、评测与读回完整） |
 | F4E正式执行 | `cvae_posterior_autodecoder_execution.ok`（仅表示E1及条件触发E2完整） |
 | F4E E1/E2质量 | `cvae_posterior_autodecoder_code_only.ok` / `cvae_posterior_autodecoder_coadapt.ok` |
+| F4F拓扑smoke | `cvae_posterior_latent_topology_smoke.ok`（仅表示指定臂step0、2步、完整评测与读回完整） |
+| F4F拓扑正式执行/质量 | `cvae_posterior_latent_topology_execution.ok` / `cvae_posterior_latent_topology_progression.ok` |
+| F4F拓扑比较 | `cvae_posterior_latent_topology_comparison.ok`（仅表示双臂身份配对和固定决策完整） |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. F4E正式E1/E2均质量失败，A/B/C及F4E路线停止。当前唯一动作是按`Next.md`实现F4F等code标量预算
-   latent topology配对：G8 global memory tokens对T129 per-time codes；不得继续训练F4E或提前扩数据/KL。
+1. F4F代码已READY但Ubuntu尚未运行。当前唯一动作是按`Next.md`先执行G8 2-step smoke，再执行T129
+   2-step smoke；审核两支工程合同后才依次运行G8/T129各15k并显式比较，不得继续F4E或提前扩数据/KL。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较

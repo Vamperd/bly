@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：正式F4E已在源码`cfb6735b54f56e49977665948397f80855987d74`完成E1 5k与E2 15k，工程执行通过、质量失败。E1仅优化共享256维window code几乎无效；E2联合适配decoder后将score从2048.60降至20.94并形成强code依赖，但最终worst State/Action RMSE仍为0.02978/0.02047、max abs 0.20941，且19.679%的masked连续元素超过1e-2。失败不是encoder泄漏、code未被使用或稀疏离群点，也不能靠只放宽max-abs解释。当前停止追加F4E步数、32-motion、R128和KL；唯一下一步是F4F等code标量预算的8个global memory token与129个per-time latent对照，区分单token广播瓶颈与更一般的decoder/目标瓶颈。该接口尚未实现。
+当前阶段：正式F4E已在源码`cfb6735b54f56e49977665948397f80855987d74`完成E1 5k与E2 15k，工程执行通过、质量失败。F4F等预算拓扑对照已在Windows提交`302cb594c3e1c828256946110f6ba0aece36d8de`实现；G8为8个global memory token，T129为129个per-time code，两支分别为25,620,323与25,625,059总参数。Windows轻量验证通过，但尚未运行Ubuntu真实HDF5/CUDA。当前唯一下一步是先执行G8 smoke，再执行T129 smoke；两支工程合同均通过后才启动各15k正式训练。继续禁止追加F4E步数、扩32-motion、执行R128或实现KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -163,6 +163,7 @@ fixed图例必须写`Full fixed-fixture evaluation`，明确它是同一训练wi
 | F4C | 小结构条件对照 | 同F4D起点、A原损失，只新增逐层零初始化latent门控 | 条件触发10k | 与同seed的A比较，选定复核方案或停止 |
 | F4R | 训练顺序复核 | 仍从F4D起点，fixture seed不变；优化seed改为20260831 | A单独10k或A/胜出改动各10k | 先取得4-motion正式通过，再更新32-motion计划 |
 | F4E | Auto-decoder根因诊断 | F4D原A decoder；每window共享一个可学习256维code，以十个q均值质心初始化 | E1 5k code-only；失败才E2最多15k code+decoder | 按encoder形成、协同优化或code+decoder容量三分结论 |
+| F4F | 等code预算latent拓扑对照 | 均从F4D开始；G8=`8×256` global memory，T129=`129×16` per-time | 每臂固定15k，不早停；比较13k/14k/15k | 选择8-token posterior、层级CVAE或直接输出记忆上限诊断 |
 | R128 | 动态随机Mask与16-slot held-out验收 | 32 motion、T=128，从F128 `last.pt` model-only warm-start | 50k，每2,500 step验收 | 冻结KL=0结果并开始K0代码实现 |
 | K0 | KL三路径工程smoke | 仅在L128/F128/R128全部PASS后新增入口；从R128 `last.pt` model-only初始化 | 2 step、单个确定性窗口 | K1 |
 | K1 | 32-motion KL三路径正式实验 | 32 motion、T=128，从R128 `last.pt` model-only初始化 | 50k，每2,500 step三路径验收 | 按KL判断表确定唯一下一步 |
@@ -555,7 +556,9 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4E smoke v1 | REPORTING_FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_114405` | `5cf48cac8b4289b75d44c148b26513f1d2510c21` | 2 step，execution complete | 未回传 | 未回传 | 未回传 | 未回传 | 未回传 | `cvae_posterior_autodecoder_smoke.ok`（由Shell成功返回确认） | 工程链路通过，但根因字段误报正式失败；结果只作smoke，修复后重跑 |
 | F4E smoke v2 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_115809` | `dffc0bf25aa0db21e06126e7e3dafba9689e4230` | E1 2 step | 工程诊断 | 工程诊断 | 工程诊断 | 工程诊断 | 无容量结论 | `cvae_posterior_autodecoder_smoke.ok` | 源复现、80/800身份、共享code、encoder隔离与checkpoint读回通过；允许正式F4E |
 | F4E正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_20260907_120414` | `cfb6735b54f56e49977665948397f80855987d74` | E1 5k + E2 15k；best step20k；score20.9413 | 0.029776 worst / 0.008951 global | 0.020474 worst / 0.007856 global | 0.209413 | 100% | zero/cross-window/cross-motion `95.65/94.85/119.93` | `cvae_posterior_autodecoder_execution.ok` + `cvae.failed` | E1/E2均FAIL；19.679%元素超阈值；单256维共享code+当前decoder容量未获证明 |
-| F4F latent topology A/B | PLANNED | — | 尚未实现 | 8×256 global tokens 对 129×16 per-time codes；各15k | — | — | — | — | — | — | code标量预算仅差0.78%，固定同数据/Mask/loss/decoder训练合同；不改变门禁 |
+| I-F4F Windows实现 | READY | N/A | `302cb594c3e1c828256946110f6ba0aece36d8de` | G8/T129各2-step smoke入口与固定15k正式入口 | — | — | — | — | — | 尚无Ubuntu marker | 总参数25,620,323/25,625,059；60项posterior相关测试PASS，全发现116项PASS且3项仅缺h5py；先执行G8 smoke |
+| F4F G8 smoke/formal | PENDING | — | 已实现、未运行 | smoke 2 step；formal固定15k | — | — | — | — | — | — | G8先smoke，审核后才允许正式15k |
+| F4F T129 smoke/formal | PENDING | — | 已实现、未运行 | smoke 2 step；formal固定15k | — | — | — | — | — | — | G8 smoke后执行T129 smoke；两支正式run完成后显式比较 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
 | K1 | PENDING | — | 尚未实现；从R128 `last.pt` model-only初始化 | — | — | — | — | — | — | — | 32 motion、T128、beta线性预热与三路径正式对照 |
@@ -598,6 +601,15 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-07 — I-F4F Windows实现 READY
+
+- 代码：实现提交为`tiny-model@302cb594c3e1c828256946110f6ba0aece36d8de`；新增固定配置、独立训练/比较模块及三个Shell入口，未修改F4D/F4E checkpoint或Ubuntu run。
+- 模型：新增无参数`decode_from_latent_topology`。G8使用`[80,8,256]`共享window code、原256→384投影和8个slot embedding，总参数25,620,323；T129使用`[80,129,16]`纯时间code及16→384投影，总参数25,625,059。两者每window code标量差0.78%，总参数差0.019%。
+- 训练：两臂都严格从F4D `best_progression.pt`开始，不读取F4E权重；code初始化seed20260832、loader seed20260831，micro4×累积16，A损失，拓扑/decoder LR分别`3e-4/3e-5`，固定15k且不早停。
+- 评测与产物：step0及每1k重评800个fixed fixture，13k/14k/15k必须逐点通过；同时记录全局保护、10类Mask、97 feature、zero/cross-window/cross-motion整组code依赖、逐step采样hash、checkpoint读回及训练/gate/optimizer/Mask/code依赖SVG。execution、quality与comparison marker相互独立。
+- Windows验证：posterior相关60项测试全部PASS；完整发现119项中116项PASS，3个既有模块仅因Windows缺`h5py`无法导入。全部config JSON、Python compile、CLI help、Shell语法和diff check通过；真实HDF5/CUDA尚未执行，因此只能标记READY。
+- 唯一下一步：用户预先同步代码后，在Ubuntu只执行G8 2-step smoke；回传summary、marker、source commit、初始化/checkpoint hash及step0/step2指标并审核。G8 smoke通过后才执行T129 smoke，不并行启动正式训练。
 
 ### 2026-09-07 15:00 — F4E正式 FAIL（execution PASS）
 

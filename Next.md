@@ -2,10 +2,10 @@
 
 最后更新：2026-09-07
 
-状态：F4E正式run已execution PASS、quality FAIL。一个共享256维window code联合decoder训练后，全局
-RMSE低于1e-2且code donor依赖超过94倍，但worst State/Action RMSE、max abs及19.679%逐元素误差仍未
-通过。当前唯一下一步是实现F4F：在相同code标量预算下比较8个global memory token与129个per-time
-latent，禁止追加F4E步数、修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
+状态：F4E正式run已execution PASS、quality FAIL。F4F已在Windows提交
+`302cb594c3e1c828256946110f6ba0aece36d8de`实现并通过轻量验证，Ubuntu真实HDF5/CUDA尚未运行。
+当前唯一下一步是依次执行G8 smoke与T129 smoke并审计工程合同；在两支smoke均通过前不得启动正式
+15k训练。禁止追加F4E步数、修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 已知事实与实验问题
@@ -43,12 +43,13 @@ smoke，核验相同window/fixture/sample identity、encoder零调用/零梯度�
 
 正式训练仅优化code与F4E E2相同decoder allowlist；A的State MSE、Action MSE、contact BCE等权，FP32，
 micro-batch4、累积16、effective batch64。code LR `3e-4→1e-5`、decoder LR `3e-5→1e-6`、warmup250、
-clip1.0；每臂固定15k，每1k完整评测，连续3次progression PASS可早停。两个正式run必须独立从相同源和
+clip1.0；每臂固定15k，每1k完整评测，不提前停止。两个正式run必须独立从相同源和
 随机初始化开始，不相互warm-start；诊断不得消耗训练RNG。
 
 继续计算worst/global State/Action RMSE、max abs、contact、超1e-2比例、10类Mask、97 feature，以及
 zero/cross-window/cross-motion整组code donor。progression门禁保持原值；不删除`full_both`，exact仍只作
-诊断。主比较固定使用13k/14k/15k的配对中位数，若早停则使用导致早停的最后三个完整评测点。
+诊断。主比较固定使用13k/14k/15k三个配对点，三点必须全部通过；同时记录三点中位数用于诊断，但
+不得用中位数替代逐点门禁。
 
 ## 4. 固定决策表
 
@@ -65,10 +66,11 @@ zero/cross-window/cross-motion整组code donor。progression门禁保持原值�
 
 ## 5. 实现边界与执行顺序
 
-新增独立F4F模块、配置和`posterior-capacity-latent-topology[-smoke]`及compare入口；F4D/F4E代码、run与
-checkpoint保持只读兼容。先完成Windows shape、共享code、等预算、真值隔离、donor、RNG、checkpoint、
-marker及两窗口CPU过拟合测试；随后Ubuntu依次执行G8 smoke、T129 smoke、G8 15k、T129 15k和显式比较。
-在两个正式run与比较器结束前，不实现posterior encoder改造。
+独立F4F模块、固定配置和`posterior-capacity-latent-topology[-smoke]`及compare入口已实现；基础模型只
+新增无参数、向后兼容的`decode_from_latent_topology`，F4D/F4E checkpoint与历史入口不变。G8/T129
+shape、精确参数量、共享code、时间对齐、slot区分、真值隔离、encoder零调用/零梯度、整组donor、
+双臂训练身份、checkpoint、marker、比较器四分支、SVG和两窗口CPU过拟合已由测试覆盖。Ubuntu仍须按
+G8 smoke、T129 smoke、G8 15k、T129 15k、显式比较的顺序执行；在比较器结束前不实现posterior encoder改造。
 
 # 附录A：已完成的F4E Auto-Decoder合同
 
