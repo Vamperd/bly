@@ -1,12 +1,76 @@
-# 下一步实施合同：F4E Auto-Decoder 根因诊断
+# 下一步实施合同：F4F 等预算 Latent Topology 对照
 
 最后更新：2026-09-07
 
-状态：修正版Ubuntu smoke已在`dffc0bf`上通过源复现、80-code共享、encoder零调用/零梯度、checkpoint
-读回、报告语义与smoke marker合同；2步smoke不作容量判断。当前唯一下一步是从原F4D
-`best_progression.pt`重新启动正式`posterior-capacity-autodecoder`，先执行E1固定5k，只有E1失败才
-进入E2最多15k；严禁使用smoke checkpoint初始化。概览与实际结果仍以
+状态：F4E正式run已execution PASS、quality FAIL。一个共享256维window code联合decoder训练后，全局
+RMSE低于1e-2且code donor依赖超过94倍，但worst State/Action RMSE、max abs及19.679%逐元素误差仍未
+通过。当前唯一下一步是实现F4F：在相同code标量预算下比较8个global memory token与129个per-time
+latent，禁止追加F4E步数、修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
+
+## 1. 已知事实与实验问题
+
+F4E已经排除三种简单解释：encoder在auto-decoder路径中零调用且零梯度；正确code相对zero、跨window和
+跨motion donor分别改善95.65、94.85和119.93倍；E2全局State/Action RMSE为0.008951/0.007856。
+但worst RMSE仍为0.029776/0.020474，max abs为0.209413，19.679%元素超1e-2。因此code确实携带
+window身份、平均重建也足够好，失败在于从单个共享token向257个State/Action token均匀广播精确信息。
+
+单纯把latent维度从256增到1024仍会先经过同一个`latent_projection`压到一个384维decoder token，不能
+有效区分“latent数值维度”与“单token放置”瓶颈。F4F改为等code标量预算的两种拓扑，只回答：更多全局
+memory token是否足够，还是必须把信息放到对应时间位置。
+
+## 2. 固定数据、两个实验臂与公平性
+
+两个臂都固定原4 motion、32 episode、80 windows、T128、seed 20260830的10类Mask和800 fixtures。
+同一window在全部Mask下严格共享同一组code；禁止per-fixture code、motion ID、reference、RobotInfo、
+posterior/prior encoder、KL、dropout及额外auxiliary head。decoder只看到masked values、Mask、位置/类型与
+所选latent拓扑，不读取被Mask真值。
+
+| 实验臂 | window code | 注入方式 | code标量总数 |
+|---|---:|---|---:|
+| G8 | `8×256` | 8个带slot embedding的global memory token置于decoder数据token之前 | 163,840 |
+| T129 | `129×16` | 每个物理时间点一个code；同时间的State/Action token共享其投影并相加 | 165,120 |
+
+两臂每window分别有2,048与2,064个code标量，差0.78%。G8不是把更宽向量重新压成单个384维token；
+T129也不使用每State/Action fixture独立code。新增投影与slot embedding参数单独报告，比较器同时给出
+code标量匹配和总参数差异，禁止将小幅参数差异隐瞒为完全等参数。
+
+## 3. 初始化、训练与评测
+
+两臂都从同一F4D `best_progression.pt`严格加载基础A decoder，code使用同一随机seed的`N(0,0.02)`确定性
+初始化；不加载F4E code或coadapt decoder，避免某个拓扑继承单token适配优势。先各运行step0+2-step
+smoke，核验相同window/fixture/sample identity、encoder零调用/零梯度、真值隔离和checkpoint读回。
+
+正式训练仅优化code与F4E E2相同decoder allowlist；A的State MSE、Action MSE、contact BCE等权，FP32，
+micro-batch4、累积16、effective batch64。code LR `3e-4→1e-5`、decoder LR `3e-5→1e-6`、warmup250、
+clip1.0；每臂固定15k，每1k完整评测，连续3次progression PASS可早停。两个正式run必须独立从相同源和
+随机初始化开始，不相互warm-start；诊断不得消耗训练RNG。
+
+继续计算worst/global State/Action RMSE、max abs、contact、超1e-2比例、10类Mask、97 feature，以及
+zero/cross-window/cross-motion整组code donor。progression门禁保持原值；不删除`full_both`，exact仍只作
+诊断。主比较固定使用13k/14k/15k的配对中位数，若早停则使用导致早停的最后三个完整评测点。
+
+## 4. 固定决策表
+
+| 结果 | 结论 | 唯一后续 |
+|---|---|---|
+| G8 PASS | 单global token的带宽/放置是主瓶颈，多token全局表示已足够 | 保留全局语义，设计encoder输出8-token latent后重做4-motion posterior |
+| G8 FAIL、T129 PASS | 时间局部放置是必要条件 | 转为global+temporal层级latent，不再坚持单global latent |
+| 两者PASS | 两种拓扑都能记忆，优先满足原约束的G8 | 选择G8进入posterior encoder拟合 |
+| 两者均FAIL | 增加latent带宽和时间放置均未解决 | 停止latent扩展，改做decoder/训练目标的直接输出记忆上限诊断 |
+
+候选必须保持contact 100%、三类code依赖均≥10且全局State/Action RMSE不比F4E恶化10%以上。不得仅凭
+某一个max-abs点下降宣布拓扑有效；正式质量结论只由原progression PASS决定。比较器输出独立manifest、
+配对曲线、两臂身份hash与唯一决策marker。
+
+## 5. 实现边界与执行顺序
+
+新增独立F4F模块、配置和`posterior-capacity-latent-topology[-smoke]`及compare入口；F4D/F4E代码、run与
+checkpoint保持只读兼容。先完成Windows shape、共享code、等预算、真值隔离、donor、RNG、checkpoint、
+marker及两窗口CPU过拟合测试；随后Ubuntu依次执行G8 smoke、T129 smoke、G8 15k、T129 15k和显式比较。
+在两个正式run与比较器结束前，不实现posterior encoder改造。
+
+# 附录A：已完成的F4E Auto-Decoder合同
 
 ## 1. 当前问题与固定诊断
 

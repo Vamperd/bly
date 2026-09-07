@@ -495,6 +495,20 @@ Windows环境缺`h5py`而导入失败。历史smoke run保持只读；必须同�
 global RMS/max差为1.31366/10.49436，只记录为Mask依赖现象。该run的`quality_pass=false`符合2-step
 smoke语义，不是容量结论；正式F4E现已获准从原F4D checkpoint独立启动。
 
+正式F4E随后在run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_20260907_120414`完整执行，源码
+`cfb6735b54f56e49977665948397f80855987d74`；execution marker与`cvae.failed`并存，E1/E2质量均FAIL。
+E1仅训练共享256维code 5k，score仍为2048.60；E2联合decoder训练15k后best位于最后step20k，score
+20.9413，worst State/Action RMSE为0.029776/0.020474、max abs 0.209413、contact 100%，19.679%的
+masked连续元素超1e-2。全局State/Action RMSE已为0.008951/0.007856，zero/cross-window/cross-motion
+code ratio为95.65/94.85/119.93，证明code被强烈使用且平均重建较好；失败是广泛的均匀精确还原问题，
+不是encoder泄漏、code忽略或单个max-abs离群点。`full_both`最差，但其余9类也均因max abs失败。
+
+F4E只排除了“posterior encoder是唯一根因”，没有证明256维code在理论上不足。当前禁止继续追加F4E
+步数、放宽单项门禁、扩32 motion、执行R128或实现KL。下一实验固定为尚未实现的F4F等预算拓扑比较：
+G8使用每window `8×256` global memory tokens（163,840 code标量），T129使用`129×16` per-time codes
+（165,120标量），差0.78%；同数据/Mask/loss/15k协议。完整合同见`Next.md`。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -643,9 +657,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. A/B/C比较已正式停止本轮loss/gate/seed路线，修正版F4E smoke已通过。当前唯一动作是从原F4D
-   `best_progression.pt`独立运行正式`posterior-capacity-autodecoder`：E1固定5k code-only，只有E1
-   失败才执行E2最多15k code+decoder；不得使用smoke checkpoint初始化。
+1. F4E正式E1/E2均质量失败，A/B/C及F4E路线停止。当前唯一动作是按`Next.md`实现F4F等code标量预算
+   latent topology配对：G8 global memory tokens对T129 per-time codes；不得继续训练F4E或提前扩数据/KL。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较

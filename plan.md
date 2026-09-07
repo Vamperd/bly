@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：修正版F4E Ubuntu smoke已在源码`dffc0bf25aa0db21e06126e7e3dafba9689e4230`完整通过工程合同：F4D源指标复现、4 motion/80 window/800 fixture身份、80个共享256维code、decoder绕过encoder、E1 checkpoint读回及smoke marker均通过；报告正确标记为`SMOKE_EXECUTION_ONLY_NO_ROOT_CAUSE_ASSESSMENT`。`quality_pass=false`是2-step smoke的预期语义，不是容量失败。当前唯一下一步是从原F4D `best_progression.pt`重新初始化并执行正式F4E：E1固定5k code-only，只有E1未通过才执行E2最多15k code+decoder。
+当前阶段：正式F4E已在源码`cfb6735b54f56e49977665948397f80855987d74`完成E1 5k与E2 15k，工程执行通过、质量失败。E1仅优化共享256维window code几乎无效；E2联合适配decoder后将score从2048.60降至20.94并形成强code依赖，但最终worst State/Action RMSE仍为0.02978/0.02047、max abs 0.20941，且19.679%的masked连续元素超过1e-2。失败不是encoder泄漏、code未被使用或稀疏离群点，也不能靠只放宽max-abs解释。当前停止追加F4E步数、32-motion、R128和KL；唯一下一步是F4F等code标量预算的8个global memory token与129个per-time latent对照，区分单token广播瓶颈与更一般的decoder/目标瓶颈。该接口尚未实现。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -554,7 +554,8 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | I-F4E Windows实现 | READY | N/A | `c54f0ce4c6da166cfe7b70422302bdc454d805e7` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 80个共享code、质心初始化、decoder-only API、E1/E2隔离训练、三类code依赖和独立marker已实现；53项相关测试PASS，全发现106项仅3个既有h5py导入限制；先执行Ubuntu smoke |
 | F4E smoke v1 | REPORTING_FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_114405` | `5cf48cac8b4289b75d44c148b26513f1d2510c21` | 2 step，execution complete | 未回传 | 未回传 | 未回传 | 未回传 | 未回传 | `cvae_posterior_autodecoder_smoke.ok`（由Shell成功返回确认） | 工程链路通过，但根因字段误报正式失败；结果只作smoke，修复后重跑 |
 | F4E smoke v2 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_smoke_20260907_115809` | `dffc0bf25aa0db21e06126e7e3dafba9689e4230` | E1 2 step | 工程诊断 | 工程诊断 | 工程诊断 | 工程诊断 | 无容量结论 | `cvae_posterior_autodecoder_smoke.ok` | 源复现、80/800身份、共享code、encoder隔离与checkpoint读回通过；允许正式F4E |
-| F4E正式 | PENDING | — | — | — | — | — | — | — | — | — | E1固定5k；仅E1失败才E2最多15k；按三分根因结论停止或重规划 |
+| F4E正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_20260907_120414` | `cfb6735b54f56e49977665948397f80855987d74` | E1 5k + E2 15k；best step20k；score20.9413 | 0.029776 worst / 0.008951 global | 0.020474 worst / 0.007856 global | 0.209413 | 100% | zero/cross-window/cross-motion `95.65/94.85/119.93` | `cvae_posterior_autodecoder_execution.ok` + `cvae.failed` | E1/E2均FAIL；19.679%元素超阈值；单256维共享code+当前decoder容量未获证明 |
+| F4F latent topology A/B | PLANNED | — | 尚未实现 | 8×256 global tokens 对 129×16 per-time codes；各15k | — | — | — | — | — | — | code标量预算仅差0.78%，固定同数据/Mask/loss/decoder训练合同；不改变门禁 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
 | K1 | PENDING | — | 尚未实现；从R128 `last.pt` model-only初始化 | — | — | — | — | — | — | — | 32 motion、T128、beta线性预热与三路径正式对照 |
@@ -597,6 +598,17 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-07 15:00 — F4E正式 FAIL（execution PASS）
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_20260907_120414`；源码`tiny-model@cfb6735b54f56e49977665948397f80855987d74`；完成20,000 optimizer step，最终stage为E2；marker为`cvae_posterior_autodecoder_execution.ok`与内容`QUALITY_FAIL execution_complete=true E1=false E2=false`的`cvae.failed`。
+- 隔离合同：E1为5k code-only，E2为15k code+decoder；两个阶段的encoder/posterior/prior调用数均为0，79个冻结参数均无梯度。E1/E2 checkpoint读回和全部工程合同通过，失败可形成模型诊断。
+- E1：step0→5k的score仅从2067.45降至2048.60；worst State/Action RMSE最终0.39079/0.32022、max abs 20.4860、contact 99.842%、超阈值元素35.325%。只移动80个共享质心code无法让冻结F4D decoder适应该Mask不变表示。
+- E2：联合适配后best位于最后step20k，score20.9413；worst State/Action RMSE为0.029776/0.020474，continuous max abs 0.209413，contact 100%，超阈值元素19.679%。相对E1末尾，三项worst指标分别改善约92.4%、93.6%和99.0%，但仍距离progression阈值2.98×、2.05×和20.94×。
+- 平均与依赖：全局State/Action RMSE由MSE开方为0.008951/0.007856，已低于1e-2；zero、cross-window及cross-motion错误相对正确code为95.65×、94.85×及119.93×，说明decoder强烈使用并区分window code。失败集中在均匀精确还原，而不是code被忽略。
+- Mask结构：`full_both`最差，State/Action/max abs为0.029776/0.020474/0.209413；`full_state` State为0.010449。其余8类worst RMSE均低于1e-2，但10类的max abs均在0.03908–0.20941，且全局19.679%元素超阈值，所以不是单个异常点，不能只删除`full_both`或放宽一个max-abs门禁来宣称完全记忆。
+- 与F4D源比较：E2全局State/Action RMSE约改善2%–3%，max abs改善约2.9%、超阈值比例改善约6.6%，但worst State/Action RMSE反而恶化约29%/34%。F4E只排除了“posterior encoder是唯一根因”，尚不能证明单256维global code理论上不足。
+- 唯一下一步：实施F4F配对诊断。保持4 motion、80 windows、800 fixed Masks、A损失与15k预算不变，对比8×256 global memory tokens（每window 2,048 code标量）和129×16 per-time codes（每window2,064标量）；两者代码忆容量差0.78%。不再追加F4E训练，不改门禁，不进入32-motion/R128/KL。
 
 ### 2026-09-07 11:58 — F4E smoke v2 PASS（仅工程合同）
 
