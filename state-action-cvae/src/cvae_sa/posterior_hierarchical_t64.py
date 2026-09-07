@@ -176,11 +176,14 @@ def validate_source_checkpoint(
 def validate_f4g_authorization(dataset_run: Path, f4g_run: Path) -> dict[str, Any]:
     f4g_run = f4g_run.expanduser().resolve()
     summary_path = f4g_run / "manifests/posterior_direct_output_summary.json"
-    if not summary_path.is_file() or not (f4g_run / "markers/cvae_posterior_direct_output_fit.ok").is_file():
-        raise ValueError("H38/H50 requires a formal F4G fit PASS run")
+    if not summary_path.is_file():
+        raise ValueError("H38/H50 requires an F4G-O oracle summary")
     summary = load_json(summary_path)
     checks = {
         "formal": not bool(summary.get("smoke")),
+        "oracle_target_copy": bool(summary.get("oracle_target_copy")),
+        "oracle_marker": (f4g_run / "markers/cvae_posterior_direct_output_oracle.ok").is_file(),
+        "fit_marker": (f4g_run / "markers/cvae_posterior_direct_output_fit.ok").is_file(),
         "execution_pass": bool(summary.get("execution_pass")),
         "quality_pass": bool(summary.get("quality_pass")),
         "motion_count": int(summary.get("motion_count", -1)) == 32,
@@ -190,7 +193,7 @@ def validate_f4g_authorization(dataset_run: Path, f4g_run: Path) -> dict[str, An
     }
     failed = [key for key, value in checks.items() if not value]
     if failed:
-        raise ValueError(f"F4G authorization failed: {failed}")
+        raise ValueError(f"F4G-O authorization failed: {failed}")
     return {
         "run": str(f4g_run), "summary": str(summary_path),
         "summary_sha256": file_sha256(summary_path), "checks": checks,

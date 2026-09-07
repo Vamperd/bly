@@ -626,6 +626,28 @@ posterior_direct_output() {
   printf '%s\n' "$run_dir"
 }
 
+posterior_direct_output_oracle() {
+  local dataset_run="${CVAE_DATASET_RUN:-}"
+  local config="$SCRIPT_DIR/configs/posterior_direct_output_t64.json"
+  local prefix="cvae_posterior_direct_output_oracle_f4go_t64" run_dir
+  [[ -z "${CVAE_CONFIG:-}" ]] \
+    || die "posterior-direct-output-oracle uses its fixed config; unset CVAE_CONFIG"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  run_dir="$(new_run_dir "$prefix")"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" posterior_direct_output_oracle.log \
+    "$PYTHON" -m cvae_sa.posterior_direct_output_oracle \
+      --dataset-run "$dataset_run" \
+      --output-run "$run_dir" \
+      --config "$config"
+  [[ -f "$run_dir/markers/cvae_posterior_direct_output_execution.ok" ]] \
+    || die "F4G-O execution marker is missing"
+  update_latest posterior_direct_output_oracle_f4go_t64 "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 posterior_hierarchical_t64() {
   local stage="$1" smoke="$2" dataset_run="${CVAE_DATASET_RUN:-}"
   local f4g_run="${CVAE_POSTERIOR_DIRECT_OUTPUT_RUN:-}"
@@ -646,7 +668,9 @@ posterior_hierarchical_t64() {
     || die "dedicated overfit subset marker is missing: $dataset_run"
   [[ -n "$f4g_run" ]] || die "CVAE_POSTERIOR_DIRECT_OUTPUT_RUN is required"
   [[ -f "$f4g_run/markers/cvae_posterior_direct_output_fit.ok" ]] \
-    || die "formal F4G fit marker is missing: $f4g_run"
+    || die "F4G-O fit marker is missing: $f4g_run"
+  [[ -f "$f4g_run/markers/cvae_posterior_direct_output_oracle.ok" ]] \
+    || die "F4G-O oracle marker is missing: $f4g_run"
   if [[ "$stage" == "autoencode" ]]; then
     [[ -z "$init_checkpoint" ]] \
       || die "autoencode must start randomly; unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT"
@@ -1076,6 +1100,7 @@ case "${1:-}" in
   posterior-capacity-latent-topology-compare) posterior_capacity_latent_topology_compare ;;
   posterior-direct-output-smoke) posterior_direct_output true ;;
   posterior-direct-output) posterior_direct_output false ;;
+  posterior-direct-output-oracle) posterior_direct_output_oracle ;;
   posterior-hierarchical-t64-smoke) posterior_hierarchical_t64 autoencode true ;;
   posterior-hierarchical-t64-autoencode) posterior_hierarchical_t64 autoencode false ;;
   posterior-hierarchical-t64-fixed) posterior_hierarchical_t64 fixed false ;;
@@ -1090,5 +1115,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|summarize-single-tasks|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

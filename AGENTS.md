@@ -587,6 +587,7 @@ posterior忽略查询Mask bit，输出一个256维global和16个128维local late
 ```bash
 bash ./cvae_repro.sh posterior-direct-output-smoke
 bash ./cvae_repro.sh posterior-direct-output
+bash ./cvae_repro.sh posterior-direct-output-oracle
 bash ./cvae_repro.sh posterior-hierarchical-t64-smoke
 bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
 bash ./cvae_repro.sh posterior-hierarchical-t64-fixed
@@ -601,7 +602,18 @@ Windows轻量专项10项及旧posterior/F4E/F4F回归38项已通过；全量发�
 `/home/helloworld/bly/runs/cvae_posterior_direct_output_f4g_t64_smoke_20260908_012626`已完成2 step并以
 exit code 0返回；它只确认真实HDF5/CUDA/训练/评测链路，`quality_pass=false`与score 100.3528不构成
 容量失败。旧summary的下一步误写为调查loss/evaluator，Windows已修正为smoke质量门禁不适用且下一步
-为正式F4G。Ubuntu命令不再包含Git操作，用户会预先完成同步。
+为正式F4G。
+
+正式F4G run `/home/helloworld/bly/runs/cvae_posterior_direct_output_f4g_t64_20260908_013241`已用源码
+`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`跑满5k：1,504 windows、12,032 fixtures、9,634,624
+独立参数，quality FAIL且best score 110.4097。global State/Action RMSE从step0的0.9733/0.9922持续降到
+0.1686/0.07982，p99从3.3519降到0.35897，contact 100%，worst State 2.2082控制score；checkpoint
+读回PASS。每fixture平均只有`5000×256/12032≈106.4`次采样，归一化State初始max abs约42且5k后
+仍38.4，因此当前证据支持稀疏独立查表优化不足，不支持evaluator失效或H38容量失败。不得续训F4G。
+
+Windows现已新增F4G-O解析上限：把每个window真值直接写入同一答案表，0 optimizer step，在完整bank
+重复评测三次并校验metric hash。只有oracle/fit marker同时存在才允许H38。当前唯一下一步为
+`posterior-direct-output-oracle`；Ubuntu命令不再包含Git操作，用户会预先完成同步。
 
 ### 6.5 已完成 parent 训练
 
@@ -750,6 +762,7 @@ bash ./cvae_repro.sh validate-state-mask-video
 | F4F拓扑正式执行/质量 | `cvae_posterior_latent_topology_execution.ok` / `cvae_posterior_latent_topology_progression.ok` |
 | F4F拓扑比较 | `cvae_posterior_latent_topology_comparison.ok`（仅表示双臂身份配对和固定决策完整） |
 | F4G direct-output smoke/执行 | `cvae_posterior_direct_output_smoke.ok` / `cvae_posterior_direct_output_execution.ok` |
+| F4G-O解析上限 | `cvae_posterior_direct_output_oracle.ok`（另须fit marker） |
 | F4G fit质量 | `cvae_posterior_direct_output_fit.ok` |
 | H38/H50 smoke/执行 | `cvae_posterior_hierarchical_t64_smoke.ok` / `cvae_posterior_hierarchical_t64_execution.ok` |
 | H38/H50分阶段fit | `cvae_posterior_hierarchical_t64_<stage>_fit.ok`，stage为autoencode/fixed/random |
@@ -758,9 +771,9 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. F4G/H38 Windows代码已经READY，F4G smoke已通过工程验收。当前只运行正式
-   `posterior-direct-output`；F4G未取得连续三次fit PASS时禁止H38。
-2. F4G通过后依次运行H38 smoke、H38-A、H38-B、H38-R；仅F4G通过且H38-A失败时允许一次H50-A。
+1. 正式F4G已质量FAIL且不续训。当前只运行`posterior-direct-output-oracle`；解析真值复制未取得
+   三次确定性fit PASS时禁止H38。
+2. F4G-O通过后依次运行H38 smoke、H38-A、H38-B、H38-R；仅F4G-O通过且H38-A失败时允许一次H50-A。
    每步必须先回填plan.md。H38-R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
@@ -813,7 +826,7 @@ df -h /home/helloworld/bly/runs
 | 常规/fine-tune 训练 | `trainer.py`、`configs/physics_v3*.json`、`cvae_repro.sh` |
 | Exact fixture诊断 | `overfit_fixture_eval.py`、`cvae_repro.sh` |
 | 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`posterior_capacity_tail.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
-| T64 direct-output与层级posterior | `posterior_direct_output.py`、`posterior_hierarchical_t64.py`、`posterior_t64_protocol.py`、`configs/posterior_{direct_output,hierarchical}_t64*.json` |
+| T64 direct-output与层级posterior | `posterior_direct_output.py`、`posterior_direct_output_oracle.py`、`posterior_hierarchical_t64.py`、`posterior_t64_protocol.py`、`configs/posterior_{direct_output,hierarchical}_t64*.json` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

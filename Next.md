@@ -2,8 +2,7 @@
 
 最后更新：2026-09-08
 
-状态：Windows实现已在`b5f1e27fbefb68ce32d14dee3d342fa6f9011cca`完成，并由`03a16bab89a31a0ba9f175481cd86eae736ee742`锁定正式训练的固定effective batch。F4G smoke已在Ubuntu真实HDF5/CUDA上完成2 step并通过工程验收；其质量门禁不适用。当前唯一下一步是运行正式F4G；不得把
-smoke的短程质量值写成模型容量结论。历史F4D/F4E/F4F、源HDF5和checkpoint保持只读。事实结果仍以
+状态：正式F4G已在Ubuntu以源码`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`跑满5k并质量FAIL；1,504张独立答案表的指标全程单调改善，但每个fixture平均只有约106次稀疏更新，不能把该结果解释为evaluator不可达或H38容量失败。当前唯一下一步是运行已实现的F4G-O真值复制解析上限；不得续训F4G或启动H38。历史F4D/F4E/F4F、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 问题与顺序
@@ -12,7 +11,7 @@ smoke的短程质量值写成模型容量结论。历史F4D/F4E/F4F、源HDF5和
 和评测门禁可达，再检验层级posterior结构。固定顺序为：
 
 ```text
-F4G direct-output ceiling
+F4G-O analytic target-copy ceiling
 → H38 smoke
 → H38-A full-both autoencoding
 → H38-B fixed physical Masks
@@ -43,19 +42,41 @@ R阶段按同一八类语义动态训练；评测使用独立seed `20260835`，�
 出现两次并使用独立start/length。禁止element、feature和semantic Mask。所有mask只覆盖valid位置，
 位图和窗口身份均写SHA256。
 
-## 3. F4G直接输出上限
+## 3. F4G直接输出诊断与F4G-O解析上限
 
-F4G为每个window学习一份完整`State[:68]`、contact logits和Action输出表；同一window的八种Mask严格
-共享该表。模型没有encoder、latent或decoder，Mask只决定loss中哪些坐标有效。因此：
+F4G为每个window学习一份完整`State[:68]`、contact logits和Action输出表；同一window的八种Mask严格共享该表。模型没有encoder、latent或decoder，Mask只决定loss中哪些坐标有效。
+
+正式run `/home/helloworld/bly/runs/cvae_posterior_direct_output_f4g_t64_20260908_013241`已完成：1,504 windows、12,032 fixtures、9,634,624参数，5k步质量FAIL。step0到5k的global State/Action RMSE从`0.973343/0.992225`降到`0.168638/0.079822`，p99从`3.351939`降到`0.358968`，contact为100%；worst State `2.208194`控制score `110.409677`。checkpoint读回PASS，marker为execution加`cvae.failed`。
+
+该结果的固定解释是：
+
+- 所有主要指标持续改善，证明索引、Mask、loss和梯度路径有效；
+- `5000×256/12032≈106.4`，每个fixture的平均更新暴露很少；
+- 独立答案表没有跨window共享参数，和H38共享权重的训练条件不同；
+- State初始max abs约42，5k后仍约38.4，符合从零开始累计更新位移不足；
+- 禁止续训F4G或据此宣称H38表达能力失败。
+
+F4G-O使用相同1,504 windows、12,032 fixtures、Mask seed、loss、evaluator和门禁，但把每个canonical window真值逐位复制到共享输出表，不执行optimizer：
+
+- 连续State/Action必须逐位等于数据目标；contact写为符号正确的`±30` logits；
+- 保存目标tensor、参数tensor及初始化SHA256，并要求二者一致；
+- 完整评测重复三次，核心metric fingerprint必须完全一致；
+- 三次均须通过fit、strict-memory与legacy-exact；
+- 通过时生成oracle、execution、fit、strict和exact marker；失败只保留execution与`cvae.failed`。
+
+F4G-O通过表示loss/Mask/evaluator存在解析零误差解，并把原F4G定位为稀疏查表优化不足；H38只读验证其summary、dataset hash和fit marker后方可启动。F4G-O失败则停止H38，调查Mask target、window identity或evaluator。
+
+H38授权必须同时检查`oracle_target_copy=true`、`cvae_posterior_direct_output_oracle.ok`和`cvae_posterior_direct_output_fit.ok`，不能用旧F4G训练run或手工补单个marker绕过。
+
+原F4G训练合同仅作历史解释：
 
 - FP32、AdamW、weight decay0、LR `1e-2`、最低`1e-4`、warmup50；
 - micro-batch256、accumulation1、最多5k step、每250 step完整评测；
 - smoke只使用前2个固定window，执行step0和2个optimizer step；
 - 正式连续3次fit PASS才生成`cvae_posterior_direct_output_fit.ok`；
-- F4G失败的唯一动作是检查loss、Mask或evaluator，禁止启动H38。
+- 原F4G已经失败，不得重跑或续训。
 
-F4G参数量由实际window数决定，精确公式为`N_window × (65×70 + 64×29)`。这只是loss/evaluator
-上限，不是可部署模型。
+两种答案表参数量都由实际window数决定，精确公式为`N_window × (65×70 + 64×29)`。F4G-O只是解析loss/evaluator上限，不是训练模型或可部署模型。
 
 ## 4. H38/H50模型合同
 
@@ -115,12 +136,11 @@ export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_2
 unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
 unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT CVAE_POSTERIOR_HIERARCHICAL_PROFILE
 
-bash ./cvae_repro.sh posterior-direct-output-smoke
-# smoke已通过；当前执行：
-bash ./cvae_repro.sh posterior-direct-output
+# F4G smoke和正式5k均已完成；当前只执行解析上限：
+bash ./cvae_repro.sh posterior-direct-output-oracle
 ```
 
-F4G正式fit通过后：
+F4G-O fit通过后：
 
 ```bash
 export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/<formal_f4g_run>

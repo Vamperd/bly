@@ -14,10 +14,12 @@ from cvae_sa.posterior_direct_output import (
     DirectWindowOutput,
     assert_output_isolated,
     direct_output_next_step,
+    initialize_direct_output_from_targets,
 )
 from cvae_sa.posterior_hierarchical_t64 import (
     configure_optimizer,
     hierarchical_next_step,
+    validate_f4g_authorization,
     validate_h50_authorization,
 )
 from cvae_sa.posterior_t64_protocol import (
@@ -29,7 +31,7 @@ from cvae_sa.posterior_t64_protocol import (
     reconstruction_loss,
     render_plots,
 )
-from cvae_sa.util import load_config
+from cvae_sa.util import file_sha256, load_config
 
 
 def small_config() -> dict[str, object]:
@@ -211,6 +213,62 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
         self.assertTrue(torch.equal(output.physical_state[0], output.physical_state[1]))
         self.assertTrue(torch.equal(output.action[0], output.action[1]))
         self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 2 * (65 * 70 + 64 * 29))
+
+    def test_direct_output_oracle_copies_one_canonical_target_per_window(self) -> None:
+        torch.manual_seed(121)
+        source = batch(2)
+        items: list[dict[str, object]] = []
+        for index in range(2):
+            items.append({
+                key: (entry[index] if isinstance(entry, torch.Tensor) else entry[index])
+                for key, entry in source.items()
+            })
+        model = DirectWindowOutput(2)
+        initialization = initialize_direct_output_from_targets(model, ItemDataset(items))
+        self.assertTrue(initialization["exact_parameter_copy"])
+        self.assertEqual(initialization["target_tensor_sha256"], initialization["parameter_tensor_sha256"])
+        query = batch(2)
+        query["window_index"] = torch.tensor([0, 1])
+        state_mask, action_mask, _ = make_physical_masks(query, 456)
+        output = model(query, state_mask, action_mask)
+        self.assertTrue(torch.equal(output.physical_state[..., :68], source["physical_state"][..., :68]))
+        self.assertTrue(torch.equal(output.action, source["action"]))
+        predicted_contact = output.state_contact_logits.sigmoid() >= 0.5
+        target_contact = source["physical_state"][..., 68:70] >= 0.5
+        self.assertTrue(torch.equal(predicted_contact, target_contact))
+
+    def test_oracle_fit_summary_authorizes_h38(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset_run = root / "dataset"
+            f4g_run = root / "oracle"
+            (dataset_run / "manifests").mkdir(parents=True)
+            (f4g_run / "manifests").mkdir(parents=True)
+            (f4g_run / "markers").mkdir(parents=True)
+            dataset_manifest = dataset_run / "manifests/dataset_manifest.json"
+            dataset_manifest.write_text("{}\n", encoding="utf-8")
+            summary = {
+                "format_version": "sonic_posterior_direct_output_t64_oracle_summary_v1",
+                "smoke": False,
+                "oracle_target_copy": True,
+                "execution_pass": True,
+                "quality_pass": True,
+                "motion_count": 32,
+                "window_transitions": 64,
+                "dataset_run": str(dataset_run.resolve()),
+                "dataset_manifest_sha256": file_sha256(dataset_manifest),
+            }
+            (f4g_run / "manifests/posterior_direct_output_summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+            (f4g_run / "markers/cvae_posterior_direct_output_fit.ok").write_text(
+                "PASS\n", encoding="utf-8"
+            )
+            (f4g_run / "markers/cvae_posterior_direct_output_oracle.ok").write_text(
+                "PASS\n", encoding="utf-8"
+            )
+            authorization = validate_f4g_authorization(dataset_run, f4g_run)
+            self.assertTrue(all(authorization["checks"].values()))
 
     def test_optimizer_partition_and_plot_contract(self) -> None:
         model = HierarchicalPosteriorTransformer(small_config())

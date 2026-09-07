@@ -8,19 +8,20 @@
 
 当前已确认：
 
-- F4G direct-output smoke 已在 Ubuntu 真实 HDF5/CUDA 环境完成，说明数据读取、训练、评测、checkpoint 和 marker 链路可以运行；两步 smoke 的误差没有实验意义。
-- 正式 F4G 尚未运行，因此目前还不知道当前 loss、Mask 和 evaluator 能否在 32 motion、T64 上达到 `fit` 门禁。
+- F4G direct-output smoke 已完成；两步误差没有实验意义。
+- 正式 F4G 已在1,504个T64窗口、12,032个fixtures上跑满5k，但`fit`质量FAIL。所有主要指标持续单调改善，说明索引、Mask和loss确实产生有效梯度；失败不能归因于encoder、latent或decoder。
+- 5k只让每个fixture平均被采样约106次。答案表从零初始化，而State存在绝对值约42的归一化目标；当前LR累计位移不足，最坏State仍主导门禁。因此该run更直接反映“独立查表参数的稀疏优化不足”，尚不能据此判定evaluator上限不可达。
 - H38、H50、H38-A/B/R 均尚未产生质量结果；不能写成已通过或已失败。
 - conditional prior、latent 随机采样和 KL 尚未实现到当前 H38 路线；不能声称项目已经进入完整 CVAE 阶段。
 
-当前唯一下一步：运行正式 `posterior-direct-output`。只有它连续三次通过 `fit` 门禁并生成 `cvae_posterior_direct_output_fit.ok`，才允许启动 H38 smoke。
+当前唯一下一步：运行独立F4G-O解析上限。它把每个窗口真值直接复制到共享答案表，不进行optimizer step，并对同一12,032-fixture bank重复评测三次。只有三次确定性结果同时通过才生成fit marker并允许启动H38 smoke。
 
 当前Windows文档与F4G smoke报告语义修复提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`；正式Ubuntu run仍以其自身`source_commit.txt`为准。
 
 固定推进顺序：
 
 ```text
-F4G 正式 direct-output 上限
+F4G-O 真值复制解析上限
 → H38 smoke
 → H38-A 完整序列重建
 → H38-B 固定物理 Mask
@@ -75,7 +76,7 @@ S0, A0, S1, A1, ..., A(T-1), ST
 | F4E auto-decoder | 每个 window 直接学习一个共享256维 code，绕过 encoder | 80×256 code + 原 decoder | 区分 encoder 问题与 code/decoder 问题 |
 | F4F-G8 | 每个 window 学8个256维 memory token | 每窗口2,048个 code 标量 | 检查多个全局 token 是否更易广播信息 |
 | F4F-T129 | 每个 window 的每个时间位置学习16维 code | 每窗口2,064个 code 标量 | 检查时间局部注入是否更合适 |
-| F4G direct output | 每个 window 直接学习完整 State/Action/contact 输出 | 无 encoder、latent、decoder | 验证 loss、Mask、evaluator 的可达上限 |
+| F4G / F4G-O direct output | 每个 window 对应完整 State/Action/contact 输出；F4G梯度学习，F4G-O直接复制真值 | 无 encoder、latent、decoder | 分开验证稀疏查表优化和解析 evaluator 上限 |
 | H38 hierarchical | 独立 posterior/condition encoder + global/local latent + cross-attention/FiLM decoder | 37,574,883 | 当前目标模型，处理32 motion、T64 |
 | H50 fallback | H38 同结构，宽度扩大到448 | 51,005,283 | 仅在 F4G PASS、H38-A FAIL 时复核一次 |
 
@@ -208,7 +209,8 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 
 | ID | 数据与结构 | 预算/门禁 | 当前状态 | 通过后的唯一动作 |
 |---|---|---|---|---|
-| F4G | 32 motion、T64；每window直接学习完整输出表 | 最多5k，每250评测；连续3次fit PASS | `PENDING formal`；smoke工程通过 | H38 smoke |
+| F4G | 32 motion、T64；1,504张独立答案表从零优化 | 5k，每250评测 | `FAIL quality`；best score `110.4097` | 不续训；执行F4G-O |
+| F4G-O | 将1,504个window真值直接复制到共享答案表 | 0 optimizer step；完整bank重复评测3次 | 代码READY、Ubuntu待运行 | PASS进H38 smoke；FAIL调查Mask/evaluator |
 | H38 smoke | 前2个window、层级37.57M模型 | 2 step，仅工程合同 | PENDING | H38-A |
 | H38-A | 32 motion、T64、full-both posterior autoencoding | 最多20k，每1k评测 | PENDING | PASS进H38-B；FAIL仅允许H50-A |
 | H38-B | 从A的best_fit model-only初始化，8类固定物理Mask | 最多60k，每2k评测 | PENDING | H38-R |
@@ -233,7 +235,8 @@ source commit只用于复现实验，不用于替代run内的dataset、fixture�
 | F4E正式 | `cfb6735b54f56e49977665948397f80855987d74` |
 | F4F G8正式 | `8012b972b5d842f3196586eb995c963fb6dda06d` |
 | F4F T129及最终比较 | `6e7caed535721a5ee575b80eba138cb6e392152e` |
-| F4G/H38正式 | 尚未运行 |
+| F4G正式 | `2feab9687ee8f91d48cb9425fb4c28ed697f8bde` |
+| F4G-O / H38正式 | 尚未运行 |
 
 ## 4. 工程验收摘要
 
@@ -241,11 +244,11 @@ S0、S25、F4B A/B/C、F4E、F4F G8/T129及F4G均执行过对应smoke。有效sm
 
 历史上发现并修复了三类协议/报告问题：F1的fixed训练与评测Mask seed不一致；F4E smoke误把“质量门禁不适用”报告成根因失败；F4F G8 smoke最初使用了错误的学习率配置键。它们均已修复或隔离，不得作为模型优劣证据。
 
-Windows代码READY或测试PASS只表示接口和静态合同通过，不写入正式实验结果表。当前H38专项测试覆盖参数量、T64 token对齐、16个local chunk、posterior跨Mask一致、condition真值隔离、cross-attention/FiLM梯度、donor替换及checkpoint读回；真实质量仍必须由Ubuntu正式run决定。
+Windows代码READY或测试PASS只表示接口和静态合同通过，不写入正式实验结果表。F4G-O与posterior相关78项测试通过；全量131项中128项通过，另3项仍只是Windows缺少既有`h5py`的导入限制。当前H38专项测试覆盖参数量、T64 token对齐、16个local chunk、posterior跨Mask一致、condition真值隔离、cross-attention/FiLM梯度、donor替换及checkpoint读回；真实质量仍必须由Ubuntu正式run决定。
 
 ## 5. 当前执行与结果回填
 
-### 5.1 正式 F4G 命令
+### 5.1 F4G-O 解析上限命令
 
 命令不包含Git操作；代码同步由用户预先完成。
 
@@ -261,15 +264,25 @@ unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT
 unset CVAE_POSTERIOR_HIERARCHICAL_PROFILE
 unset CVAE_POSTERIOR_DIRECT_OUTPUT_RUN
 
-bash ./cvae_repro.sh posterior-direct-output
+bash ./cvae_repro.sh posterior-direct-output-oracle
 ```
 
-### 5.2 F4G 固定决策
+### 5.2 F4G结果与F4G-O固定决策
 
-| 正式结果 | 事实结论 | 唯一下一步 |
+正式F4G run：
+
+```text
+/home/helloworld/bly/runs/cvae_posterior_direct_output_f4g_t64_20260908_013241
+```
+
+它使用1,504个window、12,032个fixtures和9,634,624个独立输出参数。step0→5000的global State RMSE从`0.9733`降到`0.1686`，Action从`0.9922`降到`0.07982`，p99从`3.3519`降到`0.35897`，contact达到100%；worst State仍为`2.2082`并控制`110.4097`分数。曲线持续改善而非发散，checkpoint读回通过。
+
+这个结果证明梯度路径有效，但不能证明evaluator错误。按`5000×256/12032`计算，每个fixture平均只被采样约106.4次；独立答案表没有跨window参数共享，和H38每个batch都会更新共享权重的优化条件不同，因此禁止把F4G失败外推成H38表达能力失败。
+
+| F4G-O结果 | 事实结论 | 唯一下一步 |
 |---|---|---|
-| 连续3次fit PASS | loss、Mask和evaluator在32 motion、T64上可达到目标 | 设置正式F4G run路径并执行H38 smoke |
-| 跑满5k但fit FAIL | 当前训练目标或评测链路的直接查表上限仍未通过 | 停止H38，检查输出表初始化、loss聚合、Mask target与门禁实现 |
+| 三次解析评测均PASS且hash一致 | loss、Mask和evaluator在32 motion、T64上有零误差可达解；原F4G失败属于稀疏查表优化 | 设置F4G-O run路径并执行H38 smoke |
+| 真值逐位复制后仍FAIL | evaluator、Mask target或window身份存在矛盾 | 停止H38并修复协议 |
 | 工程失败 | 不能形成模型或目标函数结论 | 修复工程问题后重新smoke/正式run |
 
 ### 5.3 后续 KL 三路径边界

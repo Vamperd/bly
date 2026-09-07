@@ -335,7 +335,16 @@ F4G完全移除encoder、latent和decoder。每个T64窗口直接拥有一份可
 
 它相当于不让学生理解题目，而是直接给每道题准备一张完整答案表。若这种最直接方法仍过不了门禁，问题更可能位于loss计算、Mask target、优化设置或evaluator，而不是latent结构。
 
-当前只完成了2-step smoke，证明程序链路能运行。两步误差不具有质量意义，正式F4G尚未开始，因此现在不能判断直接输出上限是否通过。
+正式F4G随后在1,504个窗口、12,032种“窗口×Mask”组合上训练5,000步。global State/Action RMSE从约`0.973/0.992`持续降到`0.169/0.0798`，contact达到100%，说明索引、Mask、loss和梯度路径确实在工作；但最坏State RMSE仍为`2.208`，没有通过。
+
+这里不能直接得出“答案表也记不住”。5,000步、每步256个fixture，相当于每个fixture平均只出现约106次。1,504张答案表彼此独立，某个窗口未被抽到时，它的参数完全不会更新；而归一化State里存在绝对值接近42的目标，从零开始只靠约百次更新很难走到答案附近。评测曲线从头到尾都在下降，也更符合“更新量不足”，而不是loss完全接错。
+
+因此新增F4G-O解析上限：不再用梯度慢慢学习，而是把每个窗口真值直接复制进对应答案表，然后对全部12,032个fixtures重复评测三次。它像直接把标准答案印进答案卡：
+
+- 如果仍失败，Mask、窗口身份或evaluator确实存在矛盾。
+- 如果得到零连续误差并通过，说明解析上限可达，原F4G只暴露了稀疏查表的优化问题；随后可以进入H38。
+
+F4G-O当前已实现但尚未在Ubuntu运行，所以现在仍不能启动H38。
 
 ### 8.10 H38：缩短时序并使用层级latent
 
@@ -388,7 +397,8 @@ H38目前尚未正式运行。只有F4G正式通过后，才按以下阶段执�
 | F4B/F4C | tail loss或逐层global gate能否解决 | 均未解决 | 绕过encoder诊断 |
 | F4E | 显式window code+原decoder是否足够 | 未通过 | 比较latent拓扑 |
 | F4F | 多global token或逐时间code是否足够 | 两者均FAIL，G8相对较好 | 检查直接输出上限 |
-| F4G | loss/Mask/evaluator本身是否可达 | smoke通过，正式待运行 | PASS后进入H38 |
+| F4G | 从零优化独立答案表能否在5k内拟合 | 持续改善但质量FAIL | 用F4G-O拆分优化与评测问题 |
+| F4G-O | 真值直接复制后loss/Mask/evaluator是否可达 | 已实现，Ubuntu待运行 | PASS后进入H38；FAIL则修复协议 |
 | H38-A/B/R | 层级latent在32 motion、T64上是否有效 | 尚未运行 | R通过后进入KL三路径 |
 | KL三路径 | posterior与conditional prior能否对齐 | 尚未实现 | 根据三路径差异调整KL |
 
@@ -402,6 +412,6 @@ H38目前尚未正式运行。只有F4G正式通过后，才按以下阶段执�
 
 目前不能证明：模型已具备conditional prior能力、随机生成能力、新motion泛化能力或真正的State→Action/Action→State部署推理。posterior能看完整答案，这与只看剩余条件是两件事。
 
-当前最合理的下一步不是继续盲目改latent，而是先用F4G证明目标函数和评测门禁在32 motion、T64上确实可达；随后再用H38判断“缩短时序 + global/local层级latent + 独立condition encoder + 每层cross-attention/FiLM”是否能把时序细节稳定传到所有输出位置。
+当前最合理的下一步不是继续盲目改latent，也不是简单给F4G追加步数，而是用F4G-O直接复制真值，证明目标函数和评测门禁在32 motion、T64上确实存在零误差解；随后再用H38判断“缩短时序 + global/local层级latent + 独立condition encoder + 每层cross-attention/FiLM”是否能把时序细节稳定传到所有输出位置。
 
 如果H38-R最终通过，我们才有一个可信的KL=0重建基线。之后再加入概率分布和KL，并公平比较posterior mean、posterior sample与conditional prior sample，才能回答这个模型是否真正成为可用的条件CVAE。

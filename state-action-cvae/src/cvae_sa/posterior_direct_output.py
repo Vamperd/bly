@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import time
@@ -84,6 +85,62 @@ class DirectWindowOutput(nn.Module):
             action=self.action[indices],
             state_contact_logits=logits,
         )
+
+
+@torch.no_grad()
+def initialize_direct_output_from_targets(
+    model: DirectWindowOutput,
+    dataset: Dataset[dict[str, Any]],
+) -> dict[str, Any]:
+    """Copy each canonical window target into its one shared output-table row."""
+    if len(dataset) != model.window_count:
+        raise ValueError("oracle target dataset and direct-output table sizes disagree")
+    states: list[torch.Tensor] = []
+    actions: list[torch.Tensor] = []
+    for index in range(len(dataset)):
+        item = dataset[index]
+        state = torch.as_tensor(item["physical_state"], dtype=torch.float32).cpu()
+        action = torch.as_tensor(item["action"], dtype=torch.float32).cpu()
+        if tuple(state.shape) != (65, 70) or tuple(action.shape) != (64, 29):
+            raise ValueError(
+                f"oracle target {index} has unexpected shapes {tuple(state.shape)} and {tuple(action.shape)}"
+            )
+        states.append(state)
+        actions.append(action)
+    state_targets = torch.stack(states).contiguous()
+    action_targets = torch.stack(actions).contiguous()
+    contact_logits = torch.where(
+        state_targets[..., 68:70] >= 0.5,
+        torch.full_like(state_targets[..., 68:70], 30.0),
+        torch.full_like(state_targets[..., 68:70], -30.0),
+    ).contiguous()
+    model.state_continuous.copy_(state_targets[..., :68].to(model.state_continuous.device))
+    model.state_contact_logits.copy_(contact_logits.to(model.state_contact_logits.device))
+    model.action.copy_(action_targets.to(model.action.device))
+
+    def tensor_sha256(values: tuple[torch.Tensor, ...]) -> str:
+        digest = hashlib.sha256()
+        for value in values:
+            cpu = value.detach().cpu().contiguous()
+            digest.update(str(cpu.dtype).encode("utf-8"))
+            digest.update(str(tuple(cpu.shape)).encode("utf-8"))
+            digest.update(cpu.numpy().tobytes(order="C"))
+        return digest.hexdigest()
+
+    target_hash = tensor_sha256((state_targets[..., :68], contact_logits, action_targets))
+    parameter_hash = tensor_sha256(
+        (model.state_continuous, model.state_contact_logits, model.action)
+    )
+    return {
+        "method": "exact canonical target copy; no optimizer",
+        "window_count": len(dataset),
+        "state_shape": list(state_targets.shape),
+        "action_shape": list(action_targets.shape),
+        "contact_logit_magnitude": 30.0,
+        "target_tensor_sha256": target_hash,
+        "parameter_tensor_sha256": parameter_hash,
+        "exact_parameter_copy": target_hash == parameter_hash,
+    }
 
 
 def _infinite(loader: DataLoader[dict[str, Any]]) -> Iterator[dict[str, Any]]:
