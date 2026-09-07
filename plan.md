@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：F4F G8与T129两个2-step smoke均已通过工程审计。T129 run为`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_smoke_20260907_182754`，源码同为`478f479bb3345697ff5c7da14583c9c3e13be193`；80 windows/800 fixtures、`[80,129,16]`共享code、25,625,059参数、初始化与双seed、encoder零调用/零梯度、训练身份、checkpoint读回和唯一smoke marker均正确。当前唯一下一步是从同一F4D源独立执行G8正式15k，不加载smoke或F4E权重。继续禁止F4E追加、32-motion、R128和KL。
+当前阶段：F4F G8正式15k已在run`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_20260907_184707`完整执行但质量FAIL。最佳step15k的worst State/Action RMSE为0.071671/0.043046、max abs 0.710758、global State/Action RMSE为0.018158/0.013475，39.456%连续元素超1e-2；contact 100%且三类code依赖均为42.8倍以上。13k–15k持续缓慢改善但三点均FAIL，按固定预算不追加训练。当前唯一下一步是从同一F4D源独立执行T129正式15k，不加载G8或smoke权重。继续禁止32-motion、R128和KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -560,8 +560,8 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4F G8 smoke v1 | ENGINEERING_FAIL | 路径尚未回传 | 修复前`302cb594…` | 0 optimizer step；构造optimizer时报`KeyError: topology_learning_rate` | — | — | — | — | — | `cvae.failed`应由Shell生成，待路径核验 | 配置键不一致；无模型结论，使用`774c3ac…`重新smoke |
 | F4F G8 smoke v2 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_smoke_20260907_181608` | `478f479bb3345697ff5c7da14583c9c3e13be193` | 2 step；best step0/score2321.019 | 1.464988 | 1.779843 | 23.210190 | 94.725% | zero/cross-window/cross-motion `1.042/0.998/1.042` | `cvae_posterior_latent_topology_smoke.ok` | 工程合同全PASS；随机code两步质量无结论，执行T129 smoke |
 | F4F T129 smoke | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_smoke_20260907_182754` | `478f479bb3345697ff5c7da14583c9c3e13be193` | 2 step；随机code质量值不作容量判断 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 未回传；非smoke门禁 | 工程依赖检查PASS | `cvae_posterior_latent_topology_smoke.ok` | T129参数、身份、隔离及读回全PASS；执行G8正式15k |
-| F4F G8 formal | PENDING | — | 已实现、未运行 | 固定15k | — | — | — | — | — | — | 两支smoke均已通过；当前唯一训练动作 |
-| F4F T129 formal | PENDING | — | 已实现、未运行 | 固定15k | — | — | — | — | — | — | 仅G8正式完成并回传后执行；两支正式run完成后显式比较 |
+| F4F G8 formal | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_20260907_184707` | `8012b972b5d842f3196586eb995c963fb6dda06d` | 固定15k；best step15k/score71.0758 | 0.071671 worst / 0.018158 global | 0.043046 worst / 0.013475 global | 0.710758；39.456%超1e-2 | 100% | zero/cross-window/cross-motion `42.80/43.25/54.69` | `cvae_posterior_latent_topology_execution.ok` + `cvae.failed` | 有效质量失败；13k/14k/15k均FAIL，不追加步数，执行T129正式15k |
+| F4F T129 formal | PENDING | — | 已实现、未运行 | 固定15k | — | — | — | — | — | — | 当前唯一训练动作；完成后显式比较双臂 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
 | K1 | PENDING | — | 尚未实现；从R128 `last.pt` model-only初始化 | — | — | — | — | — | — | — | 32 motion、T128、beta线性预热与三路径正式对照 |
@@ -604,6 +604,16 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-07 18:47 — F4F G8正式 FAIL（execution PASS）
+
+- Run：`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_20260907_184707`；源码`tiny-model@8012b972b5d842f3196586eb995c963fb6dda06d`，完成固定15,000 step、exit code 0。marker为`cvae_posterior_latent_topology_execution.ok`与内容`QUALITY_FAIL execution_complete=true arm=G8 last_three=false`的`cvae.failed`。
+- 最佳及最后点：step15k、score71.075785；worst State/Action RMSE为0.071671/0.043046，continuous max abs为0.710758，global State/Action RMSE为0.018158/0.013475，contact 100%，39.456%连续元素超1e-2。
+- 主比较三点：13k/14k/15k score为75.341/72.953/71.076，max abs为0.7534/0.7295/0.7108，超阈值比例为40.374%/39.849%/39.456%。方向持续改善但远未接近门禁，不得以趋势追加预算。
+- Mask与依赖：`full_both`最差（State/Action 0.071671/0.043046、max abs 0.710758）；其余九类max abs也全部高于1e-2。zero/cross-window/cross-motion依赖为42.80/43.25/54.69，证明code被强烈使用，失败不是code忽略；但这不证明G8拓扑在更长预算下理论上不可能拟合。
+- 工程完整性：15,000个训练身份均已记录，step1/15k SHA256为`ce6aa126...`/`6dfe514f...`；best/last checkpoint读回全PASS，SHA256为`0a1838c9...`/`8e547c36...`，五张SVG均已生成。回传中global limit为`null`是查询字段顺序写反，manifest实际字段为`global_state_limit/global_action_limit`，不影响quality gate计算。
+- 相对F4E：G8的全局、worst和max-abs指标均差于F4E正式E2结果；在当前固定初始化与15k协议下，多global token没有恢复已见80窗口的精确记忆能力。该结论仍不涉及posterior encoder、conditional prior、新Mask或未见motion。
+- 唯一下一步：从同一F4D源、相同seed和训练顺序独立执行T129正式15k，不加载G8 checkpoint；T129结束后才运行显式比较器。
 
 ### 2026-09-07 18:16 — F4F G8 smoke v2 PASS（仅工程合同）
 
