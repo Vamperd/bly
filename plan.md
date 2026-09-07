@@ -6,6 +6,7 @@
 
 ## 0. 2026-09-08 — I-F4G/H38 Windows实现 READY
 
+- 实现提交：外层`tiny-model@b5f1e27fbefb68ce32d14dee3d342fa6f9011cca`；提交后工作树只保留两个既有未跟踪嵌套仓库目录，未修改SONIC或IsaacLab。
 - 路线：`F4G direct output → H38 smoke → H38-A full-both → H38-B fixed physical Mask → H38-R held-out physical Mask → KL三路径`。仅F4G通过而H38-A失败时允许一次H50-A，不再建立其他参数阶梯。
 - 模型：新增独立`physics_hierarchical_posterior_transformer`。H38为37,574,883参数，H50为51,005,283参数；posterior encoder 6层、独立condition encoder 4层、decoder 8层，latent为`1×256 global + 16×128 local`。decoder每层都有self-attention、condition+latent cross-attention、共享FiLM和FFN。
 - 隔离：posterior读取完整序列且Mask bit恒为0，同一窗口latent对所有Mask逐位一致；condition只读取masked value和Mask；decoder query只来自物理时间与State/Action类型。当前没有prior、logvar、sampling或KL接口，也不输入RobotInfo、reference、motion ID或window identity。
@@ -573,7 +574,7 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4F G8 formal | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_20260907_184707` | `8012b972b5d842f3196586eb995c963fb6dda06d` | 固定15k；best step15k/score71.0758 | 0.071671 worst / 0.018158 global | 0.043046 worst / 0.013475 global | 0.710758；39.456%超1e-2 | 100% | zero/cross-window/cross-motion `42.80/43.25/54.69` | `cvae_posterior_latent_topology_execution.ok` + `cvae.failed` | 有效质量失败；13k/14k/15k均FAIL，不追加步数，执行T129正式15k |
 | F4F T129 formal | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123` | `6e7caed535721a5ee575b80eba138cb6e392152e` | 固定15k；best step15k/score290.9683 | 0.117395 worst / 0.040533 global | 0.065137 worst / 0.025330 global | 2.909683；53.122%超1e-2 | 100% | zero/cross-window/cross-motion `18.94/16.58/20.97` | `cvae_posterior_latent_topology_execution.ok` + `cvae.failed` | 有效质量失败且全面差于G8；运行显式双臂比较器 |
 | F4F topology compare | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708` | `6e7caed535721a5ee575b80eba138cb6e392152e` | 只读比较13k/14k/15k；18项身份检查PASS | G8中位0.073426；T129中位0.118866 | G8中位0.044032；T129中位0.065852 | G8中位0.729531；T129中位2.956917 | 两臂100% | 两臂均满足依赖≥10 | `cvae_posterior_latent_topology_comparison.ok` | `BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`；停止latent拓扑扩展 |
-| I-F4G/H38 Windows实现 | READY | N/A | 当前Windows工作树，提交待本轮收尾 | 37,574,883 H38 / 51,005,283 H50 | — | — | — | — | — | N/A | 10项T64专项PASS；全发现129项中126项PASS、3项仅缺既有h5py；执行F4G smoke |
+| I-F4G/H38 Windows实现 | READY | N/A | `b5f1e27fbefb68ce32d14dee3d342fa6f9011cca` | 37,574,883 H38 / 51,005,283 H50 | — | — | — | — | — | N/A | 10项T64专项PASS；全发现129项中126项PASS、3项仅缺既有h5py；执行F4G smoke |
 | F4G direct-output ceiling | PENDING | — | 代码READY、Ubuntu未运行 | 最多5k，每250评测 | — | — | — | — | N/A | 待生成 | 当前唯一实验；正式fit通过后才允许H38 smoke |
 | H38 smoke | PENDING | — | 代码READY、等待F4G | 前2 window、2 step | — | — | — | — | — | 待生成 | 只验证HDF5/CUDA/结构/隔离/checkpoint工程链路 |
 | H38-A | PENDING | — | 代码READY、等待smoke | full-both，最多20k | — | — | — | — | — | 待生成 | PASS进入H38-B；FAIL仅允许H50-A |
