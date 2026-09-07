@@ -516,6 +516,12 @@ decoder topology接口；G8以8个带slot embedding的前缀memory token注入�
 完整发现119项中116项PASS，另3项仍仅因既有Windows环境缺`h5py`导入失败。真实HDF5/CUDA尚未
 验证；必须先串行执行G8 smoke、T129 smoke并回传合同，不能把READY写成训练成功。
 
+首次Ubuntu G8 smoke在optimizer构造前工程失败：固定配置使用`code_learning_rate`与
+`code_minimum_learning_rate`，训练器错误读取`topology_*`键并抛出`KeyError`；没有执行optimizer step，
+不得形成拓扑容量结论。Windows提交`774c3ac9bcd285f73ef3336ec48d63eaa055d198`已修复读取并新增真实
+optimizer/scheduler构造测试。失败run绝对路径与marker尚待回传；下一步必须同步该修复后从F4D重新
+创建G8 smoke，不能复用失败目录或直接执行T129/formal。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -667,8 +673,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. F4F代码已READY但Ubuntu尚未运行。当前唯一动作是按`Next.md`先执行G8 2-step smoke，再执行T129
-   2-step smoke；审核两支工程合同后才依次运行G8/T129各15k并显式比较，不得继续F4E或提前扩数据/KL。
+1. F4F首个G8 smoke在step0之后、optimizer构造前因配置键名工程失败；修复提交为`774c3ac9...`。
+   当前唯一动作是同步修复后从F4D新建G8 2-step smoke；审核通过后才执行T129 smoke，不得直接formal。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较

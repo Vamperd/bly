@@ -2,9 +2,10 @@
 
 最后更新：2026-09-07
 
-状态：F4E正式run已execution PASS、quality FAIL。F4F已在Windows提交
-`302cb594c3e1c828256946110f6ba0aece36d8de`实现并通过轻量验证，Ubuntu真实HDF5/CUDA尚未运行。
-当前唯一下一步是依次执行G8 smoke与T129 smoke并审计工程合同；在两支smoke均通过前不得启动正式
+状态：F4F首个G8 smoke在optimizer构造阶段因配置键名不一致工程失败，未执行任何optimizer step，不能
+形成模型结论。该问题已由Windows提交`774c3ac9bcd285f73ef3336ec48d63eaa055d198`修复，并新增真实构造
+两组optimizer/scheduler的回归测试。当前唯一下一步是从F4D重新运行全新的G8 smoke；通过后再执行
+T129 smoke并审计工程合同。在两支smoke均通过前不得启动正式
 15k训练。禁止追加F4E步数、修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
