@@ -35,7 +35,9 @@ from .util import (
 )
 
 
-def direct_output_next_step(quality_pass: bool) -> str:
+def direct_output_next_step(quality_pass: bool, *, smoke: bool = False) -> str:
+    if smoke:
+        return "REVIEW_SMOKE_ARTIFACTS_THEN_RUN_FORMAL_F4G"
     return "RUN_H38_ENGINEERING_SMOKE" if quality_pass else "INVESTIGATE_LOSS_MASK_EVALUATOR"
 
 
@@ -298,6 +300,7 @@ def run_experiment(
         "experiment": "F4G",
         "execution_pass": True,
         "smoke": smoke,
+        "quality_gate_applicable": not smoke,
         "quality_pass": quality_pass,
         "strict_memory_pass": strict_pass,
         "legacy_exact_pass": legacy_pass,
@@ -325,7 +328,7 @@ def run_experiment(
         "checkpoint_readback": readback,
         "plots": render_plots(output_run, records, best),
         "scope": "loss/evaluator ceiling only; no encoder, latent, decoder, prior, or generalization claim",
-        "unique_next_step": direct_output_next_step(quality_pass),
+        "unique_next_step": direct_output_next_step(quality_pass, smoke=smoke),
     }
     atomic_write_json(output_run / "manifests/posterior_direct_output_summary.json", summary)
     marker = "cvae_posterior_direct_output_smoke.ok" if smoke else "cvae_posterior_direct_output_execution.ok"

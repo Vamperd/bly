@@ -262,6 +262,10 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
         self.assertIn("cross_motion_local", diagnostics["ratios_to_correct"])
 
     def test_fixed_decision_table(self) -> None:
+        self.assertEqual(
+            direct_output_next_step(False, smoke=True),
+            "REVIEW_SMOKE_ARTIFACTS_THEN_RUN_FORMAL_F4G",
+        )
         self.assertEqual(direct_output_next_step(False), "INVESTIGATE_LOSS_MASK_EVALUATOR")
         self.assertEqual(direct_output_next_step(True), "RUN_H38_ENGINEERING_SMOKE")
         self.assertEqual(

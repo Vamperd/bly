@@ -1,8 +1,16 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-08
-当前阶段：F4F显式比较已经收尾；新的32-motion、T64层级latent容量协议已在Windows实现并通过轻量测试，但尚未在Ubuntu真实HDF5/CUDA执行。当前唯一下一步为F4G direct-output smoke；其正式fit通过前禁止启动H38。H38-R通过前不实现conditional prior、采样或KL。
+当前阶段：F4G direct-output smoke已在Ubuntu真实HDF5/CUDA上完成工程验收；两步smoke不适用质量门禁。当前唯一下一步为正式F4G direct-output ceiling；其正式fit通过前禁止启动H38。H38-R通过前不实现conditional prior、采样或KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
+
+## 0A. 2026-09-08 — F4G direct-output smoke PASS（仅工程验收）
+
+- Ubuntu run：`/home/helloworld/bly/runs/cvae_posterior_direct_output_f4g_t64_smoke_20260908_012626`；完成2个optimizer step，Shell以exit code 0返回，`best_fit_score=100.35278157987474`。
+- 结论：真实overfit HDF5、T64窗口选择、8类物理Mask、direct-output训练、完整评测、checkpoint与smoke marker链路已执行完成。两步后的`quality_pass=false`和约100倍fit残余只是随机/短训练诊断，不是F4G容量失败。
+- 报告修复：旧summary把smoke的预期`quality_pass=false`误套入正式失败决策，因而输出`INVESTIGATE_LOSS_MASK_EVALUATOR`。代码现显式记录`quality_gate_applicable=false`，smoke下一步固定为`REVIEW_SMOKE_ARTIFACTS_THEN_RUN_FORMAL_F4G`；训练、loss、Mask与门禁数值均未修改。
+- 尚待回传：该Ubuntu run的`source_commit.txt`、完整summary/checkpoint readback和marker列表；当前不得臆测其值。Shell成功返回已经足以确认smoke执行完成，但台账保留这些审计项为空。
+- 唯一下一步：用户同步报告修复后，运行正式`posterior-direct-output`（最多5k、每250 step完整评测）；只有连续三次fit PASS并生成`cvae_posterior_direct_output_fit.ok`才允许启动H38 smoke。
 
 ## 0. 2026-09-08 — I-F4G/H38 Windows实现 READY
 
@@ -575,7 +583,8 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4F T129 formal | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123` | `6e7caed535721a5ee575b80eba138cb6e392152e` | 固定15k；best step15k/score290.9683 | 0.117395 worst / 0.040533 global | 0.065137 worst / 0.025330 global | 2.909683；53.122%超1e-2 | 100% | zero/cross-window/cross-motion `18.94/16.58/20.97` | `cvae_posterior_latent_topology_execution.ok` + `cvae.failed` | 有效质量失败且全面差于G8；运行显式双臂比较器 |
 | F4F topology compare | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708` | `6e7caed535721a5ee575b80eba138cb6e392152e` | 只读比较13k/14k/15k；18项身份检查PASS | G8中位0.073426；T129中位0.118866 | G8中位0.044032；T129中位0.065852 | G8中位0.729531；T129中位2.956917 | 两臂100% | 两臂均满足依赖≥10 | `cvae_posterior_latent_topology_comparison.ok` | `BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`；停止latent拓扑扩展 |
 | I-F4G/H38 Windows实现 | READY | N/A | `03a16bab89a31a0ba9f175481cd86eae736ee742`（主体`b5f1e27…`） | 37,574,883 H38 / 51,005,283 H50 | — | — | — | — | — | N/A | 10项T64专项PASS；全发现129项中126项PASS、3项仅缺既有h5py；执行F4G smoke |
-| F4G direct-output ceiling | PENDING | — | 代码READY、Ubuntu未运行 | 最多5k，每250评测 | — | — | — | — | N/A | 待生成 | 当前唯一实验；正式fit通过后才允许H38 smoke |
+| F4G direct-output smoke | PASS | `/home/helloworld/bly/runs/cvae_posterior_direct_output_f4g_t64_smoke_20260908_012626` | 待回传 | 2 step；best fit score 100.3528仅作诊断 | 非质量验收 | 非质量验收 | 非质量验收 | 非质量验收 | N/A | Shell成功返回确认smoke marker | HDF5/CUDA/训练/评测链路通过；旧next-step误报已修正 |
+| F4G direct-output ceiling | PENDING | — | 代码READY、smoke已通过 | 最多5k，每250评测 | — | — | — | — | N/A | 待生成 | 当前唯一实验；正式fit通过后才允许H38 smoke |
 | H38 smoke | PENDING | — | 代码READY、等待F4G | 前2 window、2 step | — | — | — | — | — | 待生成 | 只验证HDF5/CUDA/结构/隔离/checkpoint工程链路 |
 | H38-A | PENDING | — | 代码READY、等待smoke | full-both，最多20k | — | — | — | — | — | 待生成 | PASS进入H38-B；FAIL仅允许H50-A |
 | H38-B | PENDING | — | 代码READY、等待H38-A | 8 fixed physical Mask，最多60k | — | — | — | — | — | 待生成 | PASS进入H38-R；FAIL定位condition融合 |

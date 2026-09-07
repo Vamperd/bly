@@ -597,7 +597,11 @@ bash ./cvae_repro.sh posterior-hierarchical-t64-random
 held-out Mask，不再使用element/feature/semantic Mask。fit门禁与H50触发规则必须以Next.md为准。
 Windows轻量专项10项及旧posterior/F4E/F4F回归38项已通过；全量发现129项中126项通过，另3项仅为
 既有Windows环境缺`h5py`的导入限制。真实HDF5/CUDA尚未运行，因此不得将
-`READY`表述为F4G或H38质量PASS。Ubuntu命令不再包含Git操作，用户会预先完成同步。
+`READY`表述为F4G或H38质量PASS。F4G smoke run
+`/home/helloworld/bly/runs/cvae_posterior_direct_output_f4g_t64_smoke_20260908_012626`已完成2 step并以
+exit code 0返回；它只确认真实HDF5/CUDA/训练/评测链路，`quality_pass=false`与score 100.3528不构成
+容量失败。旧summary的下一步误写为调查loss/evaluator，Windows已修正为smoke质量门禁不适用且下一步
+为正式F4G。Ubuntu命令不再包含Git操作，用户会预先完成同步。
 
 ### 6.5 已完成 parent 训练
 
@@ -754,8 +758,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. F4G/H38 Windows代码已经READY。当前只运行`posterior-direct-output-smoke`；审核summary、marker、
-   source commit与两步checkpoint读回后，才运行正式F4G。F4G未取得连续三次fit PASS时禁止H38。
+1. F4G/H38 Windows代码已经READY，F4G smoke已通过工程验收。当前只运行正式
+   `posterior-direct-output`；F4G未取得连续三次fit PASS时禁止H38。
 2. F4G通过后依次运行H38 smoke、H38-A、H38-B、H38-R；仅F4G通过且H38-A失败时允许一次H50-A。
    每步必须先回填plan.md。H38-R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
