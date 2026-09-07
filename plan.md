@@ -1,7 +1,7 @@
 # 最简 Transformer CVAE Posterior 容量实验计划与结果台账
 
 最后更新：2026-09-07
-当前阶段：F4C 2-step smoke已在真实HDF5/CUDA环境execution PASS。step0完整复现F4D；触发comparison及其A/B输入均通过哈希和重算决定；8层共3,072个gate从严格全零开始，全部获得梯度并在step2后全部非零；25,456,483参数及checkpoint读回全部通过。`quality_pass=false`是smoke固定语义，不是质量失败。当前唯一下一步是从原F4D `best_progression.pt`重新初始化并执行C正式10k；不得从smoke checkpoint续训，也不得先运行第二seed、R128或KL。
+当前阶段：F4C正式10k已execution PASS但quality FAIL，8k/9k/10k均未通过progression；最佳为step10k，State/Action worst RMSE 0.019039/0.013908、max abs 0.171898、17.379%连续目标超阈值。gate训练和checkpoint读回正常。人工配对复核显示C/A三点中位数`R_p≈0.94117`但`R_a≈1.25945`，且worst State约恶化19.12%，不满足20%双指标改善和保护条件；这尚不能替代正式manifest。当前唯一下一步是运行显式A/B/C比较器取得冻结决定；不得继续C到20k或启动第二seed、R128、KL。
 本文是本轮 posterior-only 研究的概览、实验结果与后续决策的唯一台账；当前下一步的完整实施合同见[Next.md](Next.md)。每次实验结束后必须先更新本文，再启动下一项实验。
 
 ## 1. 研究问题、成功声明与边界
@@ -200,7 +200,7 @@ masked元素或5%的fixture，判定为`tail_objective_mismatch`，下一步只�
 
 ### 3.2 F4B-v2 / F4C / F4R受控改进路线
 
-状态：A/B工程与正式10k及比较均已完成，比较器输出`IMPLEMENT_F4C`；C结构、授权、迁移、真实HDF5/CUDA smoke、gate梯度/更新和checkpoint读回均已通过。当前等待C正式10k。详细合同、源路径、公式、接口和测试见[Next.md](Next.md)。
+状态：A/B及C正式10k均已完成；C execution通过但quality失败，且人工配对不满足复核条件。当前只等待A/B/C比较器生成正式冻结决定。详细合同、源路径、公式、接口和测试见[Next.md](Next.md)。
 F4A的21.077%是跨全部fixed fixtures的masked元素出现次数比例，不是独立原始数据点的比例。
 当前只检验有限预算下的优化与条件注入机制，不把平均误差达标直接归因为loss错误。
 
@@ -463,7 +463,7 @@ bash ./cvae_repro.sh posterior-capacity-ab-compare
 
 正式比较run为
 `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429`，其marker、全部配对检查和
-`IMPLEMENT_F4C`决定均已回传，C smoke也已完成。以下smoke命令保留为历史记录，当前执行同一固定环境下的正式C 10k：
+`IMPLEMENT_F4C`决定、C smoke与C正式10k均已回传。以下训练命令保留为历史记录；当前只运行显式A/B/C比较器：
 
 ```bash
 export CVAE_POSTERIOR_AB_TRIGGER_COMPARISON=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429
@@ -471,13 +471,17 @@ export CVAE_POSTERIOR_OPTIMIZER_SEED=20260830
 unset CVAE_CONFIG CVAE_RUN_DIR CVAE_POSTERIOR_AB_INITIAL_COMPARISON
 
 # 已完成：CVAE_POSTERIOR_AB_ARM=C bash ./cvae_repro.sh posterior-capacity-ab-smoke
+# 已完成：CVAE_POSTERIOR_AB_ARM=C bash ./cvae_repro.sh posterior-capacity-ab
 
-CVAE_POSTERIOR_AB_ARM=C bash ./cvae_repro.sh posterior-capacity-ab
+export CVAE_POSTERIOR_AB_RUN_A=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634
+export CVAE_POSTERIOR_AB_RUN_B=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_20260906_203844
+export CVAE_POSTERIOR_AB_RUN_C=/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_20260907_004301
+unset CVAE_POSTERIOR_AB_INITIAL_COMPARISON CVAE_RUN_DIR
+bash ./cvae_repro.sh posterior-capacity-ab-compare
 ```
 
-C smoke已证明触发manifest及A/B summary哈希有效、step0源指标复现、8个gate初始全零且训练后3,072个
-参数全部非零、全部gate梯度存在、25,456,483参数、checkpoint readback及smoke marker成立。正式C必须
-从同一F4D源重新初始化，固定跑满10k，不从smoke checkpoint续训；完成回填前不运行A/B/C比较器。
+C正式run已从同一F4D源重新初始化并跑满10k；gate与checkpoint协议全部通过。比较器必须重验A/B/C的
+逐step训练身份和固定合同，并由manifest正式输出复核或停止决定；人工比例不能代替这一动作。
 
 正式run即使质量失败也应正常完成并同时保留`cvae_posterior_ab_execution.ok`与内容为
 `QUALITY_FAIL`的`cvae.failed`；只有最后8k/9k/10k均通过progression才生成既有quality marker。
@@ -542,7 +546,7 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4B-v2 A/B比较 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429` | `c1ae5f79111bf61ddace32073df8122dbbefec95` | `IMPLEMENT_F4C` | — | — | `R_p=1.11982` / `R_a=0.95902` | guards PASS | — | `cvae_posterior_ab_comparison.ok` | 13项配对检查全PASS；B不满足progression/50%规则，授权实现C |
 | I-F4C Windows实现 | PASS | N/A | `c965487a5291ada3919db74b017900a3a04eb6ab` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 8层零初始化gate、触发授权、严格迁移、诊断与比较兼容已由Ubuntu smoke验证 |
 | F4C smoke | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_smoke_20260907_003414` | `443f4782c823fc7adaa8730e7513cd7671b630e6` | step 2 / progression score 21.560766（仅smoke诊断） | 0.023020 | 0.015263 | 0.215608 | 100% | 110.241 | `cvae_posterior_ab_smoke.ok` | execution-only：step0、触发、gate梯度/更新和checkpoint读回全部通过；执行C正式10k |
-| F4C正式 | PENDING | — | 从原F4D源重新初始化 | — | — | — | — | — | — | — | A原损失与逐层latent门控，10k；完成后运行A/B/C比较 |
+| F4C正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_20260907_004301` | `163be1f4c40c46bbd5c680b7ac1711e87f382e97` | step 10000 / progression score 17.1898 | 0.019039 worst / 0.008196 global | 0.013908 worst / 0.007330 global | 0.171898 | 100% | 123.268 | `cvae_posterior_ab_execution.ok` + `cvae.failed` | 8k/9k/10k均FAIL；17.379%元素超阈值；运行A/B/C比较器 |
 | F4R | PENDING | — | 等待A/B及可选C结论 | — | — | — | — | — | — | — | fixture seed不变，优化seed改20260831；A单独10k或配对20k |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
 | K0 | PENDING | — | 尚未实现；强制等待L128/F128/R128全部PASS | — | — | — | — | — | — | — | KL三路径单窗口2-step工程smoke |
@@ -586,6 +590,15 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 3. `cvae_posterior_capacity_smoke.ok` 只证明工程管线；不得填入正式质量指标结论。
 4. 质量失败目录和 `cvae.failed` 必须保留，不删除、不复用；`best_exact.pt` 仍作为诊断资产。
 5. 每次更新后同步修改本文“最后更新”和“当前阶段”，并在 AGENTS.md 记录新的已验证事实。
+
+### 2026-09-07 — F4C正式10k FAIL（quality）
+
+- 运行：`/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_20260907_004301`；源码`tiny-model@163be1f4c40c46bbd5c680b7ac1711e87f382e97`，完成10,000 steps；`execution_pass=true`、`quality_pass=false`，保留`cvae_posterior_ab_execution.ok`与`QUALITY_FAIL`。源码状态仅含两个既有嵌套仓库未跟踪项。
+- 最佳/最后点：step 10000，score 17.189798；worst State/Action RMSE 0.0190393/0.0139081，max abs 0.171898，global State/Action RMSE 0.00819649/0.00732956，17.3789%连续目标超`1e-2`，contact 100%、zero ratio 123.268。
+- 正式决策点：8k/9k/10k score依次17.4278/17.2959/17.1898，均FAIL；超阈值比例17.6342%/17.4665%/17.3789%，仍缓慢下降但远离完整门禁。所有gate梯度存在，3,072个参数全部非零，最终总L2为0.019783；故失败不是gate未更新。
+- 完整性：checkpoint readback全部通过，last SHA256为`bb3bdc6b2a6686b89c0e39cfa8e9e598417b5aee183954cb90c658ebed8a1e2f`。
+- 人工配对诊断：以三点中位数计算，C/A为`R_p≈0.941171`、`R_a≈1.259446`；超阈值比例仅改善5.88%，max abs反而恶化25.94%。worst State中位数为A的1.1912倍，超过110%保护线；因此按冻结规则预期不具备复核资格，但最终决定必须由比较manifest给出。
+- 边界与唯一下一步：只运行显式A/B/C比较器，核验全部身份并生成唯一决定；不得把缓慢下降当作追加20k的授权。
 
 ### 2026-09-07 — F4C smoke PASS（execution）
 
