@@ -573,7 +573,8 @@ source、F4E、fixture/window/motion、完整训练身份、optimizer、初始�
 F4F比较已经以`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`收尾。当前活动合同已切换到[Next.md](Next.md)：
 先用F4G direct-output查表证明loss/Mask/evaluator上限，再运行H38层级posterior。不得追加F4F步数，
 不得在H38-R通过前实现prior、logvar、采样或KL。
-Windows实现提交为`b5f1e27fbefb68ce32d14dee3d342fa6f9011cca`；Ubuntu执行前读取实际HEAD，不得为匹配该值reset。
+Windows主体实现提交为`b5f1e27fbefb68ce32d14dee3d342fa6f9011cca`，固定effective-batch收尾为
+`03a16bab89a31a0ba9f175481cd86eae736ee742`；Ubuntu执行前读取实际HEAD，不得为匹配这些值reset。
 
 新增模型kind `physics_hierarchical_posterior_transformer`，H38精确37,574,883参数，唯一fallback H50
 精确51,005,283参数。T64的129个token使用独立posterior encoder和condition encoder；canonical

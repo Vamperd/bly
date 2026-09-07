@@ -2,7 +2,7 @@
 
 最后更新：2026-09-08
 
-状态：Windows实现已在`b5f1e27fbefb68ce32d14dee3d342fa6f9011cca`完成，Ubuntu真实HDF5/CUDA尚未执行。当前唯一下一步是先运行F4G smoke；不得把
+状态：Windows实现已在`b5f1e27fbefb68ce32d14dee3d342fa6f9011cca`完成，并由`03a16bab89a31a0ba9f175481cd86eae736ee742`锁定正式训练的固定effective batch。Ubuntu真实HDF5/CUDA尚未执行。当前唯一下一步是先运行F4G smoke；不得把
 代码测试PASS写成模型质量PASS。历史F4D/F4E/F4F、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
