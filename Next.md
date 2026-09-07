@@ -2,13 +2,13 @@
 
 最后更新：2026-09-07
 
-状态：G8正式15k run
-`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_20260907_184707`
-已完整执行但质量FAIL。最佳及最后点均为step15k：worst State/Action RMSE为0.071671/0.043046、
-max abs 0.710758、global State/Action RMSE为0.018158/0.013475，39.456%连续元素超1e-2；contact
-100%且zero/cross-window/cross-motion code依赖为42.80/43.25/54.69。13k至15k仍缓慢改善，但按固定
-预算不得追加G8步数。当前唯一下一步是从同一F4D源独立执行T129正式15k，不加载G8或smoke权重。
-禁止修改loss/门禁或进入32-motion/R128/KL。概览与实际结果仍以
+状态：G8与T129两个正式15k run均完整执行但质量FAIL。T129 run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123`
+最佳step15k的worst State/Action RMSE为0.117395/0.065137、max abs 2.909683、global State/Action
+RMSE为0.040533/0.025330，53.122%连续元素超1e-2；三类code依赖仍为16.58–20.97倍。它在所有核心
+连续误差上均差于G8，两臂13k/14k/15k全部FAIL，且训练身份逐step一致。当前唯一下一步是不启动
+训练，只运行显式G8/T129比较器，固化双臂身份与`BOTH_FAIL`决策。禁止追加步数、修改loss/门禁或
+进入32-motion/R128/KL。概览与实际结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 已知事实与实验问题

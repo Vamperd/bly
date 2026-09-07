@@ -548,6 +548,16 @@ Mask的max abs均高于1e-2。execution marker、质量失败marker、15k训练�
 均完整，因此这是有效质量失败。code确实被使用，但当前G8协议比F4E基线更差；不得追加G8步数。
 唯一下一步是从F4D独立执行T129正式15k，完成后显式比较双臂。
 
+T129正式run
+`/home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123`
+也已完成固定15k且工程PASS、质量FAIL，源码`6e7caed535721a5ee575b80eba138cb6e392152e`。
+最佳step15k的worst State/Action RMSE为0.117395/0.065137、max abs 2.909683、global State/Action
+RMSE为0.040533/0.025330、contact 100%、53.122%元素超1e-2，zero/cross-window/cross-motion依赖
+为18.94/16.58/20.97。13k/14k/15k score为306.470/295.692/290.968，三点均FAIL；全部10类Mask
+的max abs均高于1e-2。15k训练身份、best/last读回、F4E授权及五张图均完整；step1与15k身份hash
+和G8完全一致。T129全部核心连续误差均差于G8，当前唯一下一步是只读运行显式双臂比较器；
+不得追加训练或进入32-motion/R128/KL。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -699,8 +709,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. G8正式15k已完整执行但质量FAIL。当前唯一动作是从同一F4D源独立执行T129正式15k；不得
-   加载G8、smoke或F4E checkpoint。T129完成并回传后才运行显式比较或决定后续结构。
+1. G8与T129正式15k均已完整执行且质量FAIL。当前唯一动作是只读运行显式双臂比较器，核验完整
+   配对身份并固化决策；比较完成前后均不得追加训练或提前进入其他结构实验。
 2. 只有重新取得32-motion fixed progression PASS后才执行R128 held-out Mask；R128通过并冻结基线后
    才实现最小KL三路径CVAE，posterior与不读取目标真值的conditional prior必须分开报告。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
