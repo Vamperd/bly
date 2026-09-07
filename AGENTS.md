@@ -473,8 +473,8 @@ F4E auto-decoder根因诊断现已在Windows实现、待Ubuntu smoke。新增
 donor ratio均至少10。F4E允许window identity，仅用于已见80窗口容量诊断，不能进入部署接口或证明prior、
 新Mask、未见motion及真实State与Action推理。Windows posterior/F4E相关53项测试全部PASS；完整发现
 106项中103项PASS，另3个仍仅因既有Windows环境缺`h5py`而导入失败。Python compile、全部JSON、
-CLI help、Shell语法和diff check通过；源码commit须在提交后回填，真实HDF5/CUDA未运行，不得将当前
-READY写成实验PASS。
+CLI help、Shell语法和diff check通过；实现提交为
+`c54f0ce4c6da166cfe7b70422302bdc454d805e7`，真实HDF5/CUDA未运行，不得将当前READY写成实验PASS。
 
 ### 6.5 已完成 parent 训练
 

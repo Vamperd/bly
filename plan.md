@@ -551,7 +551,7 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 | F4C正式 | FAIL | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_20260907_004301` | `163be1f4c40c46bbd5c680b7ac1711e87f382e97` | step 10000 / progression score 17.1898 | 0.019039 worst / 0.008196 global | 0.013908 worst / 0.007330 global | 0.171898 | 100% | 123.268 | `cvae_posterior_ab_execution.ok` + `cvae.failed` | 8k/9k/10k均FAIL；17.379%元素超阈值；后续比较器已终止本路线 |
 | F4B-v2 A/B/C比较 | PASS | `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260907_102553` | `8fbe327c487c66482ba4ece6912c8f76bab3720b` | `STOP_LOSS_LATENT_SEED_SEARCH` | — | — | B `1.11982/0.95902`；C `0.94117/1.25945` | B PASS；C FAIL | — | `cvae_posterior_ab_comparison.ok` | B/C均不满足受保护20%改善；终止当前loss/gate/seed路线 |
 | F4R | SUPERSEDED | — | 未运行 | — | — | — | — | — | — | — | 正式比较未授权任何第二seed分支 |
-| I-F4E Windows实现 | READY | N/A | 当前工作树，待提交 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 80个共享code、质心初始化、decoder-only API、E1/E2隔离训练、三类code依赖和独立marker已实现；53项相关测试PASS，全发现106项仅3个既有h5py导入限制；先执行Ubuntu smoke |
+| I-F4E Windows实现 | READY | N/A | `c54f0ce4c6da166cfe7b70422302bdc454d805e7` | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 80个共享code、质心初始化、decoder-only API、E1/E2隔离训练、三类code依赖和独立marker已实现；53项相关测试PASS，全发现106项仅3个既有h5py导入限制；先执行Ubuntu smoke |
 | F4E smoke | PENDING | — | — | — | — | — | — | — | — | — | 2-step code-only，仅作真实HDF5/CUDA工程验收 |
 | F4E正式 | PENDING | — | — | — | — | — | — | — | — | — | E1固定5k；仅E1失败才E2最多15k；按三分根因结论停止或重规划 |
 | R128 | PENDING | — | — | — | — | — | — | — | — | — | 仅F128 PASS后训练动态Mask并验收held-out Mask；通过后才允许实现KL接口 |
@@ -599,7 +599,7 @@ K0/K1完成后除上述字段外，还必须追加以下KL专用字段：
 
 ### 2026-09-07 — I-F4E Windows实现 READY
 
-- 范围：新增独立F4E训练器、固定配置和两个Shell入口；posterior模型只增加向后兼容的decoder-only方法，原`forward()`、F4D/F4A/F4B checkpoint与入口不变。
+- 范围：实现提交为`c54f0ce4c6da166cfe7b70422302bdc454d805e7`；新增独立F4E训练器、固定配置和两个Shell入口；posterior模型只增加向后兼容的decoder-only方法，原`forward()`、F4D/F4A/F4B checkpoint与入口不变。
 - 固定诊断：4 motion、T128、80 windows、800 fixed fixtures；从F4D加载原A结构，以每window十个Mask-conditioned posterior mean的质心初始化一个共享256维code，明确拒绝per-fixture code。
 - 两阶段：E1仅训练20,480个code参数5k；失败才执行E2 code+decoder侧最多15k，并用不同seed重置loader、optimizer与scheduler；encoder及q/p头通过参数allowlist、调用计数和梯度状态三重隔离。
 - 验收：保留原progression/exact、全局与尾部、97 feature、10 Mask、固定速度案例；新增zero/cross-window/cross-motion code依赖均至少10的质量门禁，execution/E1/E2 marker相互独立。
