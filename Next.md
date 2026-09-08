@@ -2,7 +2,7 @@
 
 最后更新：2026-09-08
 
-状态：H38-A已从随机初始化跑满30k，`quality_pass=false`、best fit score `2.4948489`；分项门禁尚未回传。A是全遮挡latent压力测试，比目标物理部分Mask缺少更多可见信息，因此不再作为B的硬门槛。当前先审计A完整结果，再修正B的checkpoint准入；不得按旧summary直接运行H50。历史run、源HDF5和checkpoint保持只读。事实结果仍以
+状态：H38-A已从随机初始化跑满30k并质量FAIL。最佳global State/Action为`0.024948/0.017838`，worst State/Action为`0.041763/0.025360`，p99为`0.075243`，contact和latent依赖通过。即使采用用户提出的宽松门禁，p99、global State和worst State仍分别超阈值25.4%、24.7%和4.4%，最后三次均未通过。A是全遮挡latent压力测试，因此不再作为B的硬门槛。当前修正B的checkpoint准入；不得按旧summary直接运行H50。历史run、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 问题与顺序

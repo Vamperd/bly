@@ -625,8 +625,12 @@ optimizer step并返回execution PASS；`quality_pass=false`和score 122.0155没
 
 H38-A正式run
 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633`已从随机初始化
-跑满30k，Shell返回execution PASS但`quality_pass=false`，best fit score为`2.4948489166611454`；完整
-分项、source commit和marker尚未回传。旧代码输出`RUN_SINGLE_H50_AUTOENCODE_REPLICATION`，但经目标复审
+跑满30k，源码`a0a7f7e0efce25f1184fc522536c15eabe6e3b5b`，Shell返回execution PASS但`quality_pass=false`，
+best step30000、fit score`2.4948489166611454`。最佳global State/Action为`0.024948/0.017838`，worst
+State/Action为`0.041763/0.025360`，p99/max abs为`0.075243/0.784172`，contact 100%，三种latent ratio
+为`46.69/50.64/57.85`；checkpoint读回PASS，marker为execution和`cvae.failed`。按用户提出的宽松门禁
+`global≤0.02、worst≤0.04、p99≤0.06、max仅报告`重算仍FAIL，控制项p99为阈值1.254倍，global State和
+worst State为1.247/1.044倍，最后三次均未通过。旧代码输出`RUN_SINGLE_H50_AUTOENCODE_REPLICATION`，但经目标复审
 该决策无效：A为全遮挡latent压力测试，信息少于目标物理部分Mask，A失败不能推出B失败。当前不得启动
 H50；先审计A，再允许其有效best checkpoint初始化H38-B。只有A/B均失败后才讨论一次H50复核。
 

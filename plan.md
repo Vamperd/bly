@@ -13,11 +13,12 @@
 - 5k只让每个fixture平均被采样约106次。答案表从零初始化，而State存在绝对值约42的归一化目标；当前LR累计位移不足，最坏State仍主导门禁。因此该run更直接反映“独立查表参数的稀疏优化不足”，尚不能据此判定evaluator上限不可达。
 - F4G-O已在相同1,504个T64窗口、12,032个fixtures上以0 optimizer step取得`quality_pass=true`、`best_fit_score=1.0`。这证明数据身份、Mask target、loss和evaluator存在解析可达解；原F4G失败被定位为稀疏独立查表优化不足。
 - H38工程smoke已在前2个window上完成2步前向、反向、评测和checkpoint链路；`quality_pass=false`与score不构成容量结论。
-- H38-A已在32 motion、T64上从随机初始化跑满30k，`quality_pass=false`、best fit score为`2.4948489`；完整分项指标尚未回传，不能猜测具体由哪项门禁控制。
+- H38-A已在32 motion、T64上从随机初始化跑满30k，`quality_pass=false`、best fit score为`2.4948489`。最佳global State/Action RMSE为`0.024948/0.017838`，worst-window为`0.041763/0.025360`，p99/max abs为`0.075243/0.784172`，contact 100%，zero/cross-window/cross-motion latent ratio为`46.69/50.64/57.85`。
+- 事后按更宽松的`0.02/0.02 global、0.04/0.04 worst、0.06 p99、max仅报告`重算，最佳点仍FAIL：p99、global State和worst State分别是阈值的`1.254/1.247/1.044`倍；最后三次也均未通过。Action、contact和latent依赖全部通过。
 - H38-B/H38-R/H50均尚未产生质量结果；不能写成已通过或已失败。
 - conditional prior、latent 随机采样和 KL 尚未实现到当前 H38 路线；不能声称项目已经进入完整 CVAE 阶段。
 
-当前唯一下一步：先回传H38-A完整summary、最后三点评测、marker和checkpoint审计；随后修正旧的A→H50硬门槛，使执行完整且checkpoint有效的A无论质量是否通过都可初始化H38-B。当前不得按旧`unique_next_step`启动H50。
+当前唯一下一步：修正旧的A→H50硬门槛，使execution完整且checkpoint读回通过的A无论质量是否通过都可初始化H38-B。当前不得按旧`unique_next_step`启动H50。
 
 当前Windows文档与F4G smoke报告语义修复提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`；正式Ubuntu run仍以其自身`source_commit.txt`为准。
 
@@ -213,7 +214,7 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 | F4G | 32 motion、T64；1,504张独立答案表从零优化 | 5k，每250评测 | `FAIL quality`；best score `110.4097` | 不续训；执行F4G-O |
 | F4G-O | 将1,504个window真值直接复制到共享答案表 | 0 optimizer step；完整bank重复评测3次 | `PASS fit`；best score `1.0` | H38 smoke |
 | H38 smoke | 前2个window、层级37.57M模型 | 2 step，仅工程合同 | `PASS engineering` | H38-A |
-| H38-A | 32 motion、T64、full-both posterior autoencoding | 30k，每1k评测 | `FAIL quality`；best score `2.49485`，分项待回传 | 无论质量结果均进入H38-B |
+| H38-A | 32 motion、T64、full-both posterior autoencoding | 30k，每1k评测 | `FAIL quality`；best global S/A `0.02495/0.01784`，worst S/A `0.04176/0.02536`，p99 `0.07524` | 无论质量结果均进入H38-B |
 | H38-B | 从A的best checkpoint model-only初始化，8类固定物理Mask | 最多60k，每2k评测 | PENDING；入口准入待修正 | PASS进H38-R；FAIL与A联合诊断 |
 | H38-R | 从B初始化，动态物理Mask训练，固定held-out Mask评测 | 30k，每2k评测 | PENDING | 冻结KL=0基线，设计KL三路径 |
 | H50复核 | 与H38同结构但约51M | 最多一次 | 未授权；至少等A/B均失败 | 由A/B分项结果决定复核阶段 |
@@ -239,7 +240,7 @@ source commit只用于复现实验，不用于替代run内的dataset、fixture�
 | F4G正式 | `2feab9687ee8f91d48cb9425fb4c28ed697f8bde` |
 | F4G-O | 未回传 |
 | H38 smoke | 未回传 |
-| H38-A正式 | 未回传 |
+| H38-A正式 | `a0a7f7e0efce25f1184fc522536c15eabe6e3b5b` |
 
 ## 4. 工程验收摘要
 
@@ -251,20 +252,17 @@ Windows代码READY或测试PASS只表示接口和静态合同通过，不写入�
 
 ## 5. 当前执行与结果回填
 
-### 5.1 H38-A 结果审计命令
+### 5.1 H38-A 正式结果
 
-H38-A已执行完成。当前先回传分项结果，不启动H50或H38-B：
+Run：
 
-```bash
-RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633
-jq '{execution_pass,quality_pass,completed_optimizer_steps,best_optimizer_step,best_fit_score,
-     best:.best_evaluation,last_three:.last_three_evaluations,
-     checkpoint_readback,unique_next_step}' \
-  "$RUN/manifests/posterior_hierarchical_t64_summary.json"
-cat "$RUN/manifests/source_commit.txt"
-find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
-ls -lh "$RUN/checkpoints"
+```text
+/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633
 ```
+
+源码为`a0a7f7e0efce25f1184fc522536c15eabe6e3b5b`。训练跑满30k，最佳点为step30000；execution marker和checkpoint读回通过，质量marker为`cvae.failed`，没有autoencode fit marker。最后三次所有指标仍缓慢改善，但原fit门禁均FAIL。
+
+按用户提出的宽松诊断门禁重算，最后三次的global State为`0.025264/0.025064/0.024948`，worst State为`0.042324/0.041974/0.041763`，p99为`0.076167/0.075578/0.075243`，因此三次均FAIL。最佳点的Action、contact和三种latent依赖通过；max abs `0.784172`只报告不参与该诊断结论。
 
 ### 5.2 F4G结果与F4G-O固定决策
 
