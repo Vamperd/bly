@@ -675,11 +675,11 @@ posterior_hierarchical_t64() {
     [[ -z "$init_checkpoint" ]] \
       || die "autoencode must start randomly; unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT"
     if [[ "$profile" == "H50" ]]; then
-      [[ -n "$h38_failed_run" ]] || die "CVAE_POSTERIOR_H38_FAILED_RUN is required for H50-A"
+      [[ -n "$h38_failed_run" ]] || die "CVAE_POSTERIOR_H38_FAILED_RUN must point to failed H38-B for H50-A"
       [[ -f "$h38_failed_run/manifests/posterior_hierarchical_t64_summary.json" ]] \
-        || die "formal failed H38-A summary is missing: $h38_failed_run"
+        || die "formal failed H38-B summary is missing: $h38_failed_run"
       [[ -f "$h38_failed_run/markers/cvae.failed" ]] \
-        || die "formal failed H38-A quality marker is missing: $h38_failed_run"
+        || die "formal failed H38-B quality marker is missing: $h38_failed_run"
     fi
   else
     [[ -n "$init_checkpoint" ]] \

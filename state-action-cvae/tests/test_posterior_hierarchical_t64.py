@@ -21,6 +21,7 @@ from cvae_sa.posterior_hierarchical_t64 import (
     hierarchical_next_step,
     validate_f4g_authorization,
     validate_h50_authorization,
+    validate_source_checkpoint,
 )
 from cvae_sa.posterior_t64_protocol import (
     PHYSICAL_MASK_NAMES,
@@ -335,12 +336,12 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
         self.assertEqual(direct_output_next_step(True), "RUN_H38_ENGINEERING_SMOKE")
         self.assertEqual(
             hierarchical_next_step("H38", "autoencode", False),
-            "RUN_SINGLE_H50_AUTOENCODE_REPLICATION",
+            "RUN_HIERARCHICAL_FIXED_PHYSICAL_MASKS_FROM_BEST_CHECKPOINT",
         )
         self.assertEqual(hierarchical_next_step("H50", "autoencode", False), "STOP_MODEL_SCALING")
         self.assertEqual(
             hierarchical_next_step("H38", "fixed", False),
-            "STOP_AND_DIAGNOSE_CONDITION_FUSION",
+            "REVIEW_A_B_FAILURES_BEFORE_SINGLE_H50_REPLICATION",
         )
         self.assertEqual(
             hierarchical_next_step("H38", "random", False),
@@ -360,9 +361,123 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "protected source"):
                 assert_output_isolated(protected / "child", [protected])
 
-    def test_h50_requires_a_formal_failed_h38_autoencode_run(self) -> None:
-        with self.assertRaisesRegex(ValueError, "formal failed H38-A"):
+    def test_failed_formal_autoencode_checkpoint_is_admitted_only_to_fixed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary) / "h38-a"
+            (run / "checkpoints").mkdir(parents=True)
+            (run / "manifests").mkdir()
+            (run / "markers").mkdir()
+            model_config = dict(small_config())
+            model_config.update({"profile": "H38", "parameter_count": 123})
+            signature_keys = (
+                "kind", "profile", "d_model", "posterior_encoder_layers",
+                "condition_encoder_layers", "decoder_layers", "heads", "ffn_dim",
+                "global_latent_dim", "local_latent_dim", "local_chunks",
+                "chunk_transitions", "max_state_steps", "state_dim",
+            )
+            checkpoint = {
+                "format_version": "sonic_posterior_hierarchical_t64_checkpoint_v1",
+                "stage": "autoencode",
+                "optimizer_step": 30000,
+                "dataset_manifest_sha256": "dataset-hash",
+                "selected_windows_sha256": "window-hash",
+                "model_signature": {key: model_config.get(key) for key in signature_keys},
+                "parameter_count": 123,
+                "model": {},
+            }
+            checkpoint_path = run / "checkpoints/best_fit.pt"
+            torch.save(checkpoint, checkpoint_path)
+            summary = {
+                "profile": "H38", "stage": "autoencode", "smoke": False,
+                "execution_pass": True, "quality_pass": False,
+                "dataset_manifest_sha256": "dataset-hash",
+                "selected_windows_sha256": "window-hash",
+                "best_optimizer_step": 30000,
+            }
+            (run / "manifests/posterior_hierarchical_t64_summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+            (run / "markers/cvae_posterior_hierarchical_t64_execution.ok").write_text(
+                "PASS\n", encoding="utf-8"
+            )
+            (run / "markers/cvae.failed").write_text(
+                "QUALITY_FAIL execution_complete=true stage=autoencode fit=false\n",
+                encoding="utf-8",
+            )
+            _, initialization = validate_source_checkpoint(
+                checkpoint_path, stage="fixed", dataset_hash="dataset-hash",
+                window_hash="window-hash", config={"model": model_config},
+            )
+            self.assertEqual(initialization["admission"], "completed_autoencode_best_checkpoint")
+            self.assertFalse(initialization["source_quality_pass"])
+            with self.assertRaisesRegex(ValueError, "source_stage"):
+                validate_source_checkpoint(
+                    checkpoint_path, stage="random", dataset_hash="dataset-hash",
+                    window_hash="window-hash", config={"model": model_config},
+                )
+            model_config["profile"] = "H50"
+            checkpoint["model_signature"]["profile"] = "H50"
+            torch.save(checkpoint, checkpoint_path)
+            summary["profile"] = "H50"
+            (run / "manifests/posterior_hierarchical_t64_summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "source_fit_marker"):
+                validate_source_checkpoint(
+                    checkpoint_path, stage="fixed", dataset_hash="dataset-hash",
+                    window_hash="window-hash", config={"model": model_config},
+                )
+
+    def test_h50_requires_formal_failed_a_and_b_chain(self) -> None:
+        with self.assertRaisesRegex(ValueError, "failed H38-B"):
             validate_h50_authorization(Path("dataset"), None)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "dataset"
+            dataset.mkdir()
+            run_a = root / "h38-a"
+            run_b = root / "h38-b"
+            for run in (run_a, run_b):
+                (run / "manifests").mkdir(parents=True)
+                (run / "markers").mkdir()
+            summary_a = {
+                "profile": "H38", "stage": "autoencode", "smoke": False,
+                "execution_pass": True, "quality_pass": False,
+                "dataset_run": str(dataset.resolve()),
+            }
+            (run_a / "manifests/posterior_hierarchical_t64_summary.json").write_text(
+                json.dumps(summary_a), encoding="utf-8"
+            )
+            (run_a / "markers/cvae.failed").write_text(
+                "QUALITY_FAIL execution_complete=true stage=autoencode fit=false\n",
+                encoding="utf-8",
+            )
+            (run_a / "markers/cvae_posterior_hierarchical_t64_execution.ok").write_text(
+                "PASS\n", encoding="utf-8"
+            )
+            summary_b = {
+                "profile": "H38", "stage": "fixed", "smoke": False,
+                "execution_pass": True, "quality_pass": False,
+                "dataset_run": str(dataset.resolve()),
+                "initialization": {
+                    "source_run": str(run_a.resolve()), "source_stage": "autoencode",
+                    "source_quality_pass": False,
+                },
+            }
+            (run_b / "manifests/posterior_hierarchical_t64_summary.json").write_text(
+                json.dumps(summary_b), encoding="utf-8"
+            )
+            (run_b / "markers/cvae.failed").write_text(
+                "QUALITY_FAIL execution_complete=true stage=fixed fit=false\n",
+                encoding="utf-8",
+            )
+            (run_b / "markers/cvae_posterior_hierarchical_t64_execution.ok").write_text(
+                "PASS\n", encoding="utf-8"
+            )
+            authorization = validate_h50_authorization(dataset, run_b)
+            self.assertTrue(all(authorization["checks"].values()))
+            self.assertEqual(authorization["failed_autoencode_run"], str(run_a.resolve()))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@
 - H38-B/H38-R/H50均尚未产生质量结果；不能写成已通过或已失败。
 - conditional prior、latent 随机采样和 KL 尚未实现到当前 H38 路线；不能声称项目已经进入完整 CVAE 阶段。
 
-当前唯一下一步：修正旧的A→H50硬门槛，使execution完整且checkpoint读回通过的A无论质量是否通过都可初始化H38-B。当前不得按旧`unique_next_step`启动H50。
+当前唯一下一步：从H38-A的`best_fit.pt`做model-only初始化并运行H38-B。A→B准入已改为要求正式execution、summary/checkpoint身份和质量marker一致，不再要求A fit；H38-R仍严格要求B fit。当前不得启动H50。
 
 当前Windows文档与F4G smoke报告语义修复提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`；正式Ubuntu run仍以其自身`source_commit.txt`为准。
 
@@ -80,7 +80,7 @@ S0, A0, S1, A1, ..., A(T-1), ST
 | F4F-T129 | 每个 window 的每个时间位置学习16维 code | 每窗口2,064个 code 标量 | 检查时间局部注入是否更合适 |
 | F4G / F4G-O direct output | 每个 window 对应完整 State/Action/contact 输出；F4G梯度学习，F4G-O直接复制真值 | 无 encoder、latent、decoder | 分开验证稀疏查表优化和解析 evaluator 上限 |
 | H38 hierarchical | 独立 posterior/condition encoder + global/local latent + cross-attention/FiLM decoder | 37,574,883 | 当前目标模型，处理32 motion、T64 |
-| H50 fallback | H38 同结构，宽度扩大到448 | 51,005,283 | 仅在 F4G-O PASS、H38-A FAIL 时复核一次 |
+| H50 fallback | H38 同结构，宽度扩大到448 | 51,005,283 | 仅在 H38-A与H38-B均FAIL 后复核一次 |
 
 H38 的 latent 为一个 256 维 global code 加 16 个 128 维 local code；每个 local code覆盖4个 transition。decoder 的每一层都能读取条件和17个 latent token，并再次接收 global/local FiLM 条件，避免所有时序细节只通过一个输入 token 传播。
 
@@ -215,7 +215,7 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 | F4G-O | 将1,504个window真值直接复制到共享答案表 | 0 optimizer step；完整bank重复评测3次 | `PASS fit`；best score `1.0` | H38 smoke |
 | H38 smoke | 前2个window、层级37.57M模型 | 2 step，仅工程合同 | `PASS engineering` | H38-A |
 | H38-A | 32 motion、T64、full-both posterior autoencoding | 30k，每1k评测 | `FAIL quality`；best global S/A `0.02495/0.01784`，worst S/A `0.04176/0.02536`，p99 `0.07524` | 无论质量结果均进入H38-B |
-| H38-B | 从A的best checkpoint model-only初始化，8类固定物理Mask | 最多60k，每2k评测 | PENDING；入口准入待修正 | PASS进H38-R；FAIL与A联合诊断 |
+| H38-B | 从A的best checkpoint model-only初始化，8类固定物理Mask | 最多60k，每2k评测 | READY；A execution准入已实现 | PASS进H38-R；FAIL与A联合诊断 |
 | H38-R | 从B初始化，动态物理Mask训练，固定held-out Mask评测 | 30k，每2k评测 | PENDING | 冻结KL=0基线，设计KL三路径 |
 | H50复核 | 与H38同结构但约51M | 最多一次 | 未授权；至少等A/B均失败 | 由A/B分项结果决定复核阶段 |
 
@@ -252,7 +252,27 @@ Windows代码READY或测试PASS只表示接口和静态合同通过，不写入�
 
 ## 5. 当前执行与结果回填
 
-### 5.1 H38-A 正式结果
+### 5.1 H38-B 启动合同
+
+H38-B使用H38-A最佳checkpoint做model-only初始化，重置optimizer、scheduler、loader和RNG。A的质量失败被记录但不阻止B；B使用原正式fit门禁，未采用事后宽松诊断门禁。
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+
+unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
+unset CVAE_POSTERIOR_H38_FAILED_RUN
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727
+export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H38
+export CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633/checkpoints/best_fit.pt
+
+test -f "/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633/markers/cvae_posterior_hierarchical_t64_execution.ok"
+test -f "$CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT"
+bash ./cvae_repro.sh posterior-hierarchical-t64-fixed
+```
+
+### 5.2 H38-A 正式结果
 
 Run：
 
@@ -264,7 +284,7 @@ Run：
 
 按用户提出的宽松诊断门禁重算，最后三次的global State为`0.025264/0.025064/0.024948`，worst State为`0.042324/0.041974/0.041763`，p99为`0.076167/0.075578/0.075243`，因此三次均FAIL。最佳点的Action、contact和三种latent依赖通过；max abs `0.784172`只报告不参与该诊断结论。
 
-### 5.2 F4G结果与F4G-O固定决策
+### 5.3 F4G结果与F4G-O固定决策
 
 正式F4G与F4G-O run：
 
@@ -285,7 +305,7 @@ F4G-O随后以0 optimizer step获得`quality_pass=true`和`best_fit_score=1.0`�
 | 真值逐位复制后仍FAIL | evaluator、Mask target或window身份存在矛盾 | 停止H38并修复协议 |
 | 工程失败 | 不能形成模型或目标函数结论 | 修复工程问题后重新smoke/正式run |
 
-### 5.3 后续 KL 三路径边界
+### 5.4 后续 KL 三路径边界
 
 只有H38/H50-R正式通过并冻结KL=0基线后，才实现：
 
@@ -297,7 +317,7 @@ F4G-O随后以0 optimizer step获得`quality_pass=true`和`best_fit_score=1.0`�
 
 三条路径必须使用同一窗口、同一Mask和配对随机噪声。KL是否合适要同时看posterior mean是否保持、posterior sample退化和prior sample差距，不能只看KL数值。
 
-### 5.4 每个正式run的精简回填模板
+### 5.5 每个正式run的精简回填模板
 
 ```markdown
 ### <日期> — <实验ID> <PASS|FAIL|INVALID|BLOCKED>

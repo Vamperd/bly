@@ -414,6 +414,6 @@ H38-A随后从随机初始化正式训练30k步，但没有通过fit门禁，最
 
 目前不能证明：模型已具备conditional prior能力、随机生成能力、新motion泛化能力或真正的State→Action/Action→State部署推理。posterior能看完整答案，这与只看剩余条件是两件事。
 
-F4G-O已经证明目标函数和评测门禁存在解析可达解；H38-A则表明层级latent独自重建整段序列在30k预算内仍未达标。由于目标任务保留部分物理条件，当前最合理的下一步是修正A→B checkpoint准入后运行H38-B，而不是直接扩到H50。
+F4G-O已经证明目标函数和评测门禁存在解析可达解；H38-A则表明层级latent独自重建整段序列在30k预算内仍未达标。A→B准入现已修正，当前从A的最佳权重运行具有可见物理条件的H38-B，而不是直接扩到H50。
 
 如果H38-R最终通过，我们才有一个可信的KL=0重建基线。之后再加入概率分布和KL，并公平比较posterior mean、posterior sample与conditional prior sample，才能回答这个模型是否真正成为可用的条件CVAE。

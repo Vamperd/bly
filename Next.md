@@ -2,7 +2,7 @@
 
 最后更新：2026-09-08
 
-状态：H38-A已从随机初始化跑满30k并质量FAIL。最佳global State/Action为`0.024948/0.017838`，worst State/Action为`0.041763/0.025360`，p99为`0.075243`，contact和latent依赖通过。即使采用用户提出的宽松门禁，p99、global State和worst State仍分别超阈值25.4%、24.7%和4.4%，最后三次均未通过。A是全遮挡latent压力测试，因此不再作为B的硬门槛。当前修正B的checkpoint准入；不得按旧summary直接运行H50。历史run、源HDF5和checkpoint保持只读。事实结果仍以
+状态：H38-A已从随机初始化跑满30k并质量FAIL。A是全遮挡latent压力测试，因此不再作为B的硬门槛。A→B准入现要求正式execution、summary/checkpoint身份及质量marker一致，但允许A质量失败；B→R仍必须fit PASS。当前唯一下一步是从A的`best_fit.pt`做model-only初始化运行H38-B；不得启动H50。历史run、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 问题与顺序
@@ -138,17 +138,28 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 ls -lh "$RUN/checkpoints"
 ```
 
-完成A→B准入修正后，B应从A的最佳checkpoint做model-only初始化；A不需要fit marker。B通过后才执行R：
+当前运行B；它从A的最佳checkpoint做model-only初始化，A不需要fit marker。B通过后才执行R：
 
 ```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+
+unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
+unset CVAE_POSTERIOR_H38_FAILED_RUN
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727
+export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H38
 export CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633/checkpoints/best_fit.pt
+
+test -f "/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633/markers/cvae_posterior_hierarchical_t64_execution.ok"
+test -f "$CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT"
 bash ./cvae_repro.sh posterior-hierarchical-t64-fixed
 
 export CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT=/home/helloworld/bly/runs/<h38_b_run>/checkpoints/best_fit.pt
 bash ./cvae_repro.sh posterior-hierarchical-t64-random
 ```
 
-当前代码尚未完成A→B准入修正，因此现在不得直接执行上述B命令。H50也未获授权；至少要等B正式结果后再决定。
+H50尚未获授权；只有A/B均失败且链路身份完整时才允许一次复核。上面的R命令仅在B生成fixed fit marker后使用。
 
 每次run结束后先回传summary、最后三个evaluation、marker列表、checkpoint列表和`source_commit.txt`，
 再把实际路径、hash、指标、结论与唯一下一步写回plan.md。smoke checkpoint不得用于正式初始化。

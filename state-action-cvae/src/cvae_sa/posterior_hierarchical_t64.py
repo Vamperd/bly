@@ -53,9 +53,14 @@ def hierarchical_next_step(profile: str, stage: str, quality_pass: bool) -> str:
             "fixed": "RUN_HIERARCHICAL_RANDOM_HELDOUT_MASKS",
             "random": "FREEZE_KL0_BASELINE_THEN_IMPLEMENT_KL_THREE_PATHS",
         }[stage]
+    if stage == "autoencode":
+        return (
+            "RUN_HIERARCHICAL_FIXED_PHYSICAL_MASKS_FROM_BEST_CHECKPOINT"
+            if profile == "H38"
+            else "STOP_MODEL_SCALING"
+        )
     return {
-        "autoencode": "RUN_SINGLE_H50_AUTOENCODE_REPLICATION" if profile == "H38" else "STOP_MODEL_SCALING",
-        "fixed": "STOP_AND_DIAGNOSE_CONDITION_FUSION",
+        "fixed": "REVIEW_A_B_FAILURES_BEFORE_SINGLE_H50_REPLICATION",
         "random": "STOP_AND_DIAGNOSE_RANDOM_MASK_COVERAGE",
     }[stage]
 
@@ -158,7 +163,38 @@ def validate_source_checkpoint(
         "model_state": isinstance(checkpoint.get("model"), dict),
     }
     run = path.parents[1]
-    checks["source_fit_marker"] = (run / f"markers/cvae_posterior_hierarchical_t64_{expected_source_stage}_fit.ok").is_file()
+    summary_path = run / "manifests/posterior_hierarchical_t64_summary.json"
+    summary = load_json(summary_path) if summary_path.is_file() else {}
+    execution_marker = run / "markers/cvae_posterior_hierarchical_t64_execution.ok"
+    fit_marker = run / f"markers/cvae_posterior_hierarchical_t64_{expected_source_stage}_fit.ok"
+    failure_marker = run / "markers/cvae.failed"
+    source_quality_pass = bool(summary.get("quality_pass"))
+    failure_marker_matches = bool(
+        failure_marker.is_file()
+        and failure_marker.read_text(encoding="utf-8").strip()
+        == f"QUALITY_FAIL execution_complete=true stage={expected_source_stage} fit=false"
+    )
+    checks.update({
+        "source_summary": bool(summary),
+        "source_summary_stage": summary.get("stage") == expected_source_stage,
+        "source_summary_profile": summary.get("profile") == config["model"]["profile"],
+        "source_formal": not bool(summary.get("smoke", True)),
+        "source_execution_pass": bool(summary.get("execution_pass")),
+        "source_execution_marker": execution_marker.is_file(),
+        "source_dataset_hash": summary.get("dataset_manifest_sha256") == dataset_hash,
+        "source_window_hash": summary.get("selected_windows_sha256") == window_hash,
+        "source_best_checkpoint_step": int(checkpoint.get("optimizer_step", -1))
+        == int(summary.get("best_optimizer_step", -2)),
+        "source_quality_marker_consistent": (
+            fit_marker.is_file() if source_quality_pass else failure_marker_matches
+        ),
+    })
+    # H38-A is a harder full-both latent stress test, so H38-B accepts either a
+    # quality-passed or quality-failed but fully completed A checkpoint. H38-R and
+    # every H50 continuation still require their source stage to pass quality.
+    relaxed_h38_autoencode = stage == "fixed" and config["model"]["profile"] == "H38"
+    if not relaxed_h38_autoencode:
+        checks["source_fit_marker"] = fit_marker.is_file() and source_quality_pass
     failed = [key for key, value in checks.items() if not value]
     if failed:
         raise ValueError(f"hierarchical model-only source checkpoint failed: {failed}")
@@ -167,6 +203,15 @@ def validate_source_checkpoint(
         "checkpoint_sha256": file_sha256(path),
         "source_run": str(run),
         "source_stage": expected_source_stage,
+        "source_summary": str(summary_path),
+        "source_summary_sha256": file_sha256(summary_path),
+        "source_quality_pass": source_quality_pass,
+        "source_fit_marker": fit_marker.is_file(),
+        "admission": (
+            "completed_autoencode_best_checkpoint"
+            if relaxed_h38_autoencode
+            else f"quality_passed_{expected_source_stage}_best_checkpoint"
+        ),
         "checks": checks,
         "model_only": True,
         "optimizer_scheduler_rng_restored": False,
@@ -204,30 +249,62 @@ def validate_h50_authorization(
     dataset_run: Path, h38_failed_run: Path | None
 ) -> dict[str, Any]:
     if h38_failed_run is None:
-        raise ValueError("H50-A requires the formal failed H38-A run")
+        raise ValueError("H50-A requires the formal failed H38-B run after failed H38-A")
     run = h38_failed_run.expanduser().resolve()
     summary_path = run / "manifests/posterior_hierarchical_t64_summary.json"
     failure_path = run / "markers/cvae.failed"
+    execution_path = run / "markers/cvae_posterior_hierarchical_t64_execution.ok"
     if not summary_path.is_file() or not failure_path.is_file():
-        raise ValueError("H50-A authorization is missing H38-A summary or quality-failure marker")
+        raise ValueError("H50-A authorization is missing H38-B summary or quality-failure marker")
     summary = load_json(summary_path)
+    source_run_value = summary.get("initialization", {}).get("source_run")
+    source_run = Path(str(source_run_value)).expanduser().resolve() if source_run_value else None
+    source_summary_path = (
+        source_run / "manifests/posterior_hierarchical_t64_summary.json"
+        if source_run is not None else None
+    )
+    source_summary = (
+        load_json(source_summary_path)
+        if source_summary_path is not None and source_summary_path.is_file() else {}
+    )
     checks = {
         "profile": summary.get("profile") == "H38",
-        "stage": summary.get("stage") == "autoencode",
+        "stage": summary.get("stage") == "fixed",
         "formal": not bool(summary.get("smoke")),
         "execution_pass": bool(summary.get("execution_pass")),
+        "execution_marker": execution_path.is_file(),
         "quality_failed": not bool(summary.get("quality_pass")),
         "failure_marker": failure_path.read_text(encoding="utf-8").strip()
-        == "QUALITY_FAIL execution_complete=true stage=autoencode fit=false",
+        == "QUALITY_FAIL execution_complete=true stage=fixed fit=false",
         "dataset_path": Path(str(summary.get("dataset_run", ""))).resolve()
         == dataset_run.expanduser().resolve(),
+        "source_was_failed_autoencode": (
+            summary.get("initialization", {}).get("source_stage") == "autoencode"
+            and summary.get("initialization", {}).get("source_quality_pass") is False
+        ),
+        "source_summary": bool(source_summary),
+        "source_profile": source_summary.get("profile") == "H38",
+        "source_stage": source_summary.get("stage") == "autoencode",
+        "source_formal": not bool(source_summary.get("smoke", True)),
+        "source_execution_pass": bool(source_summary.get("execution_pass")),
+        "source_quality_failed": source_summary.get("quality_pass") is False,
+        "source_failure_marker": bool(
+            source_run is not None and (source_run / "markers/cvae.failed").is_file()
+        ),
+        "source_execution_marker": bool(
+            source_run is not None
+            and (source_run / "markers/cvae_posterior_hierarchical_t64_execution.ok").is_file()
+        ),
     }
     failed = [key for key, value in checks.items() if not value]
     if failed:
         raise ValueError(f"H50-A authorization failed: {failed}")
     return {
         "run": str(run), "summary": str(summary_path),
-        "summary_sha256": file_sha256(summary_path), "checks": checks,
+        "summary_sha256": file_sha256(summary_path),
+        "failed_autoencode_run": str(source_run),
+        "failed_autoencode_summary": str(source_summary_path),
+        "checks": checks,
     }
 
 

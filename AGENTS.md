@@ -632,7 +632,12 @@ State/Action为`0.041763/0.025360`，p99/max abs为`0.075243/0.784172`，contact
 `global≤0.02、worst≤0.04、p99≤0.06、max仅报告`重算仍FAIL，控制项p99为阈值1.254倍，global State和
 worst State为1.247/1.044倍，最后三次均未通过。旧代码输出`RUN_SINGLE_H50_AUTOENCODE_REPLICATION`，但经目标复审
 该决策无效：A为全遮挡latent压力测试，信息少于目标物理部分Mask，A失败不能推出B失败。当前不得启动
-H50；先审计A，再允许其有效best checkpoint初始化H38-B。只有A/B均失败后才讨论一次H50复核。
+H50；A审计已完成，现以其有效best checkpoint初始化H38-B。只有A/B均失败后才讨论一次H50复核。
+
+Windows现已修正阶段准入：H38-B允许使用正式execution完整但质量失败的H38-A `best_fit.pt`，并严格
+校验source summary、dataset/window hash、best step、execution marker及fit/failed marker一致性；smoke
+checkpoint仍拒绝。H38-R没有放宽，仍必须由质量PASS且存在fixed fit marker的H38-B初始化。程序化
+`hierarchical_next_step`现令H38-A无论质量结果都进入B；H50授权则要求A/B均为正式质量失败链。
 
 ### 6.5 已完成 parent 训练
 
@@ -791,7 +796,7 @@ bash ./cvae_repro.sh validate-state-mask-video
 ## 10. 下一步优先级
 
 1. H38-A已跑满30k并质量FAIL；当前只回传其完整分项、source、marker和checkpoint审计。
-2. 修正A→B准入后运行H38-B；A不再是B的质量硬门槛，只有A/B均失败后才讨论一次H50复核。
+2. 当前从H38-A `best_fit.pt`运行H38-B；A不再是B的质量硬门槛，只有A/B均失败后才讨论一次H50复核。
    每步必须先回填plan.md。H38-R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
