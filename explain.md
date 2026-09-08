@@ -378,13 +378,11 @@ global latent像整段录像的总摘要；16个local latent像16个章节摘要
 
 decoder不再把被Mask序列本身当作主要query，而是从时间位置和State/Action类型建立query，并在每一层主动读取条件和latent。这是针对“长序列信息难以从单个token均匀广播”设计的结构性改进。
 
-H38尚未正式训练。F4G-O解析上限和H38两步工程smoke都已通过，因此现在按以下阶段执行：
+H38-A随后从随机初始化正式训练30k步，但没有通过fit门禁，最佳总分约为`2.495`。完整分项尚未回传，因此目前只能说“全遮挡latent压力测试未过”，不能断言具体是哪类误差或latent依赖失败。
 
-1. H38-A：随机初始化训练最多30k步；全序列遮挡，只检查层级latent能否重建完整答案。
-2. H38-B：训练8类固定物理Mask，检查condition融合。
-3. H38-R：训练随机物理Mask并评测未训练Mask，检查Mask查询能力。
+接下来仍应执行H38-B：A把所有输入遮住，要求latent独自还原整段序列；B保留物理上有用的State/Action条件，因此A失败并不推出B也会失败。若B通过，说明层级latent结合可见条件足以完成目标任务；只有A/B都失败后才讨论扩大模型。
 
-如果F4G-O通过而H38-A失败，才允许把相同结构扩大到约51M的H50做一次复核。H50仍失败就停止扩模，而不是建立无止境的参数阶梯。
+旧计划在A失败时直接转向约51M的H50，这个决策过严，现已停止采用。H50至少要等B也失败并结合两者分项指标后再决定，不建立无止境的参数阶梯。
 
 ## 9. 完整实验时间线
 
@@ -400,7 +398,8 @@ H38尚未正式训练。F4G-O解析上限和H38两步工程smoke都已通过，�
 | F4F | 多global token或逐时间code是否足够 | 两者均FAIL，G8相对较好 | 检查直接输出上限 |
 | F4G | 从零优化独立答案表能否在5k内拟合 | 持续改善但质量FAIL | 用F4G-O拆分优化与评测问题 |
 | F4G-O | 真值直接复制后loss/Mask/evaluator是否可达 | score 1.0，质量PASS | 进入H38工程smoke |
-| H38-A/B/R | 层级latent在32 motion、T64上是否有效 | 尚未运行 | R通过后进入KL三路径 |
+| H38-A | 层级latent能否独自重建32 motion、T64 | 30k后FAIL，best score约2.495 | 仍运行更贴近目标的H38-B |
+| H38-B/R | 可见物理条件下的固定/随机Mask补全 | 尚未运行 | R通过后进入KL三路径 |
 | KL三路径 | posterior与conditional prior能否对齐 | 尚未实现 | 根据三路径差异调整KL |
 
 ## 10. 当前最客观的结论
@@ -413,6 +412,6 @@ H38尚未正式训练。F4G-O解析上限和H38两步工程smoke都已通过，�
 
 目前不能证明：模型已具备conditional prior能力、随机生成能力、新motion泛化能力或真正的State→Action/Action→State部署推理。posterior能看完整答案，这与只看剩余条件是两件事。
 
-F4G-O已经证明目标函数和评测门禁在32 motion、T64上存在解析可达解，H38 smoke也已确认工程链路可运行。当前最合理的下一步是用30k上限运行H38-A，判断“缩短时序 + global/local层级latent + 独立condition encoder + 每层cross-attention/FiLM”是否能把时序细节稳定传到所有输出位置。
+F4G-O已经证明目标函数和评测门禁存在解析可达解；H38-A则表明层级latent独自重建整段序列在30k预算内仍未达标。由于目标任务保留部分物理条件，当前最合理的下一步是审计A分项后运行H38-B，而不是直接扩到H50。
 
 如果H38-R最终通过，我们才有一个可信的KL=0重建基线。之后再加入概率分布和KL，并公平比较posterior mean、posterior sample与conditional prior sample，才能回答这个模型是否真正成为可用的条件CVAE。

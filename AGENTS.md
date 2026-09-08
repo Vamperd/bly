@@ -623,6 +623,13 @@ optimizer step并返回execution PASS；`quality_pass=false`和score 122.0155没
 加载该smoke checkpoint，固定从seed控制的随机初始化开始。用户选择把H38-A上限由20k增至30k，仍每1k
 完整评测且连续3次fit PASS提前停止；模型、数据、loss、门禁与后续B/R合同不变。
 
+H38-A正式run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633`已从随机初始化
+跑满30k，Shell返回execution PASS但`quality_pass=false`，best fit score为`2.4948489166611454`；完整
+分项、source commit和marker尚未回传。旧代码输出`RUN_SINGLE_H50_AUTOENCODE_REPLICATION`，但经目标复审
+该决策无效：A为全遮挡latent压力测试，信息少于目标物理部分Mask，A失败不能推出B失败。当前不得启动
+H50；先审计A，再允许其有效best checkpoint初始化H38-B。只有A/B均失败后才讨论一次H50复核。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -779,8 +786,8 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 ## 10. 下一步优先级
 
-1. F4G-O与H38工程smoke均已通过。当前只运行30k上限的`posterior-hierarchical-t64-autoencode`。
-2. H38-A后依次运行H38-B、H38-R；仅F4G-O通过且H38-A失败时允许一次H50-A。
+1. H38-A已跑满30k并质量FAIL；当前只回传其完整分项、source、marker和checkpoint审计。
+2. 修正A→B准入后运行H38-B；A不再是B的质量硬门槛，只有A/B均失败后才讨论一次H50复核。
    每步必须先回填plan.md。H38-R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。

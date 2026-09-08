@@ -13,24 +13,25 @@
 - 5k只让每个fixture平均被采样约106次。答案表从零初始化，而State存在绝对值约42的归一化目标；当前LR累计位移不足，最坏State仍主导门禁。因此该run更直接反映“独立查表参数的稀疏优化不足”，尚不能据此判定evaluator上限不可达。
 - F4G-O已在相同1,504个T64窗口、12,032个fixtures上以0 optimizer step取得`quality_pass=true`、`best_fit_score=1.0`。这证明数据身份、Mask target、loss和evaluator存在解析可达解；原F4G失败被定位为稀疏独立查表优化不足。
 - H38工程smoke已在前2个window上完成2步前向、反向、评测和checkpoint链路；`quality_pass=false`与score不构成容量结论。
-- H38、H50、H38-A/B/R 均尚未产生质量结果；不能写成已通过或已失败。
+- H38-A已在32 motion、T64上从随机初始化跑满30k，`quality_pass=false`、best fit score为`2.4948489`；完整分项指标尚未回传，不能猜测具体由哪项门禁控制。
+- H38-B/H38-R/H50均尚未产生质量结果；不能写成已通过或已失败。
 - conditional prior、latent 随机采样和 KL 尚未实现到当前 H38 路线；不能声称项目已经进入完整 CVAE 阶段。
 
-当前唯一下一步：从随机初始化正式运行H38-A 30k上限。它只使用full-both posterior autoencoding，每1k完整评测，连续3次fit PASS即可提前停止；不得加载smoke checkpoint。
+当前唯一下一步：先回传H38-A完整summary、最后三点评测、marker和checkpoint审计；随后修正旧的A→H50硬门槛，使执行完整且checkpoint有效的A无论质量是否通过都可初始化H38-B。当前不得按旧`unique_next_step`启动H50。
 
 当前Windows文档与F4G smoke报告语义修复提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`；正式Ubuntu run仍以其自身`source_commit.txt`为准。
 
 固定推进顺序：
 
 ```text
-H38-A 完整序列重建（30k上限）
-→ H38-B 固定物理 Mask
+H38-A 完整序列重建（已FAIL，仅作latent压力诊断）
+→ H38-B 固定物理 Mask（仍需执行）
 → H38-R 随机物理 Mask
 → 冻结 KL=0 基线
 → posterior mean / posterior sample / conditional prior sample 三路径 KL 对照
 ```
 
-若 F4G-O 通过而 H38-A 失败，只允许一次 H50-A 复核；不再建立更多参数量阶梯。
+H38-A不再是H38-B的硬门槛：A的全遮挡任务信息更少，只用于latent压力诊断。仅当A与B都失败时，才根据两者分项结果决定是否执行一次H50复核；不再建立更多参数量阶梯。
 
 ## 2. 固定研究合同
 
@@ -212,10 +213,10 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 | F4G | 32 motion、T64；1,504张独立答案表从零优化 | 5k，每250评测 | `FAIL quality`；best score `110.4097` | 不续训；执行F4G-O |
 | F4G-O | 将1,504个window真值直接复制到共享答案表 | 0 optimizer step；完整bank重复评测3次 | `PASS fit`；best score `1.0` | H38 smoke |
 | H38 smoke | 前2个window、层级37.57M模型 | 2 step，仅工程合同 | `PASS engineering` | H38-A |
-| H38-A | 32 motion、T64、full-both posterior autoencoding | 最多30k，每1k评测 | PENDING | PASS进H38-B；FAIL仅允许H50-A |
-| H38-B | 从A的best_fit model-only初始化，8类固定物理Mask | 最多60k，每2k评测 | PENDING | H38-R |
+| H38-A | 32 motion、T64、full-both posterior autoencoding | 30k，每1k评测 | `FAIL quality`；best score `2.49485`，分项待回传 | 无论质量结果均进入H38-B |
+| H38-B | 从A的best checkpoint model-only初始化，8类固定物理Mask | 最多60k，每2k评测 | PENDING；入口准入待修正 | PASS进H38-R；FAIL与A联合诊断 |
 | H38-R | 从B初始化，动态物理Mask训练，固定held-out Mask评测 | 30k，每2k评测 | PENDING | 冻结KL=0基线，设计KL三路径 |
-| H50-A | 与H38同结构但约51M | 仅一次20k | 未授权 | PASS后以H50继续B/R；FAIL停止扩模 |
+| H50复核 | 与H38同结构但约51M | 最多一次 | 未授权；至少等A/B均失败 | 由A/B分项结果决定复核阶段 |
 
 ### 3.6 正式结果源码审计
 
@@ -238,7 +239,7 @@ source commit只用于复现实验，不用于替代run内的dataset、fixture�
 | F4G正式 | `2feab9687ee8f91d48cb9425fb4c28ed697f8bde` |
 | F4G-O | 未回传 |
 | H38 smoke | 未回传 |
-| H38正式 | 尚未运行 |
+| H38-A正式 | 未回传 |
 
 ## 4. 工程验收摘要
 
@@ -250,26 +251,19 @@ Windows代码READY或测试PASS只表示接口和静态合同通过，不写入�
 
 ## 5. 当前执行与结果回填
 
-### 5.1 H38-A 正式30k命令
+### 5.1 H38-A 结果审计命令
 
-命令不包含Git操作；代码同步由用户预先完成。
+H38-A已执行完成。当前先回传分项结果，不启动H50或H38-B：
 
 ```bash
-cd /home/helloworld/bly/state-action-cvae
-source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
-
-export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
-export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727
-export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H38
-
-unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT
-unset CVAE_POSTERIOR_WARM_START
-unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT
-
-test -f "$CVAE_POSTERIOR_DIRECT_OUTPUT_RUN/markers/cvae_posterior_direct_output_oracle.ok"
-test -f "$CVAE_POSTERIOR_DIRECT_OUTPUT_RUN/markers/cvae_posterior_direct_output_fit.ok"
-
-bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
+RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633
+jq '{execution_pass,quality_pass,completed_optimizer_steps,best_optimizer_step,best_fit_score,
+     best:.best_evaluation,last_three:.last_three_evaluations,
+     checkpoint_readback,unique_next_step}' \
+  "$RUN/manifests/posterior_hierarchical_t64_summary.json"
+cat "$RUN/manifests/source_commit.txt"
+find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
+ls -lh "$RUN/checkpoints"
 ```
 
 ### 5.2 F4G结果与F4G-O固定决策

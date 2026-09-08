@@ -2,7 +2,7 @@
 
 最后更新：2026-09-08
 
-状态：正式F4G已质量FAIL，F4G-O解析上限已质量PASS，H38工程smoke也已完成且只证明链路可运行。当前唯一下一步是从随机初始化运行H38-A full-both autoencoding，预算上限30k、每1k完整评测、连续3次fit PASS提前停止；不得加载smoke checkpoint。历史F4D/F4E/F4F、源HDF5和checkpoint保持只读。事实结果仍以
+状态：H38-A已从随机初始化跑满30k，`quality_pass=false`、best fit score `2.4948489`；分项门禁尚未回传。A是全遮挡latent压力测试，比目标物理部分Mask缺少更多可见信息，因此不再作为B的硬门槛。当前先审计A完整结果，再修正B的checkpoint准入；不得按旧summary直接运行H50。历史run、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 问题与顺序
@@ -11,14 +11,15 @@
 和评测门禁可达，再检验层级posterior结构。固定顺序为：
 
 ```text
-H38-A full-both autoencoding（30k上限）
-→ H38-B fixed physical Masks
+H38-A full-both autoencoding（已FAIL，仅作诊断）
+→ H38-B fixed physical Masks（仍需执行）
 → H38-R held-out random physical Masks
 → 冻结KL=0基线后再实现KL三路径
 ```
 
-只有F4G-O通过而H38-A失败时允许一次H50-A；不得继续建立参数阶梯。H38-A通过而B失败定位为condition
-融合问题，B通过而R失败定位为随机Mask覆盖问题。R之前不实现prior、logvar、采样或KL。
+H38-A不再是H38-B的硬门槛。A失败而B通过表示latent不能独立还原全部细节，但结合可见条件足以完成
+目标任务；A通过而B失败才明确指向condition融合。只有A/B均失败后才讨论一次H50复核。R之前不实现
+prior、logvar、采样或KL。
 
 ## 2. 固定数据与Mask合同
 
@@ -105,10 +106,10 @@ scheduler、loader与RNG。
 | 阶段 | 训练/评测 | 成功后的唯一动作 |
 |---|---|---|
 | H38 smoke | 前2 window、step0+2 step、full-both | 工程PASS；不形成质量结论 |
-| H38-A | full-both，随机初始化，最多30k，每1k评测 | 进入H38-B |
+| H38-A | full-both，随机初始化，30k，每1k评测 | 已质量FAIL；仍进入H38-B |
 | H38-B | 从A `best_fit.pt` model-only；8 fixed Mask，最多60k，每2k | 进入H38-R |
 | H38-R | 从B `best_fit.pt` model-only；动态Mask30k，每2k held-out评测 | 冻结KL0基线 |
-| H50-A | 仅F4G-O PASS且H38-A FAIL；随机20k | PASS后以H50继续B/R；FAIL停止扩模 |
+| H50复核 | 至少等H38-A/B均FAIL后才授权 | 根据A/B分项结果确定复核阶段 |
 
 fit门禁必须连续三次完整评测同时满足：global State/Action RMSE各`≤1e-2`；每类Mask的worst-window
 State/Action RMSE各`≤2e-2`；continuous p99 absolute error `≤5e-2`；contact accuracy精确100%；
@@ -127,40 +128,27 @@ execution marker只表示流程完整；质量失败保留`cvae.failed`且不伪
 Ubuntu命令不包含任何Git操作，默认用户已经完成同步：
 
 ```bash
-cd /home/helloworld/bly/state-action-cvae
-source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
-
-export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
-unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
-unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT CVAE_POSTERIOR_HIERARCHICAL_PROFILE
-
-# F4G-O与H38 smoke均已通过工程授权；当前执行正式H38-A：
-export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727
-export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H38
-unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT
-test -f "$CVAE_POSTERIOR_DIRECT_OUTPUT_RUN/markers/cvae_posterior_direct_output_oracle.ok"
-test -f "$CVAE_POSTERIOR_DIRECT_OUTPUT_RUN/markers/cvae_posterior_direct_output_fit.ok"
-bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
+RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633
+jq '{execution_pass,quality_pass,completed_optimizer_steps,best_optimizer_step,best_fit_score,
+     best:.best_evaluation,last_three:.last_three_evaluations,
+     checkpoint_readback,unique_next_step}' \
+  "$RUN/manifests/posterior_hierarchical_t64_summary.json"
+cat "$RUN/manifests/source_commit.txt"
+find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
+ls -lh "$RUN/checkpoints"
 ```
 
-H38-A通过后执行B，B通过后执行R：
+完成A→B准入修正后，B应从A的最佳checkpoint做model-only初始化；A不需要fit marker。B通过后才执行R：
 
 ```bash
-export CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT=/home/helloworld/bly/runs/<h38_a_run>/checkpoints/best_fit.pt
+export CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633/checkpoints/best_fit.pt
 bash ./cvae_repro.sh posterior-hierarchical-t64-fixed
 
 export CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT=/home/helloworld/bly/runs/<h38_b_run>/checkpoints/best_fit.pt
 bash ./cvae_repro.sh posterior-hierarchical-t64-random
 ```
 
-若且仅若H38-A质量失败，清空初始化并执行唯一H50-A：
-
-```bash
-export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H50
-export CVAE_POSTERIOR_H38_FAILED_RUN=/home/helloworld/bly/runs/<failed_h38_a_run>
-unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT
-bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
-```
+当前代码尚未完成A→B准入修正，因此现在不得直接执行上述B命令。H50也未获授权；至少要等B正式结果后再决定。
 
 每次run结束后先回传summary、最后三个evaluation、marker列表、checkpoint列表和`source_commit.txt`，
 再把实际路径、hash、指标、结论与唯一下一步写回plan.md。smoke checkpoint不得用于正式初始化。
