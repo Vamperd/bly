@@ -357,18 +357,33 @@ def validate_h50_continuation_source(
     run = resume_run.expanduser().resolve()
     summary_path = run / "manifests/posterior_hierarchical_t64_summary.json"
     checkpoint_path = run / "checkpoints/last.pt"
+    metrics_path = run / "logs/metrics.jsonl"
     execution_path = run / "markers/cvae_posterior_hierarchical_t64_execution.ok"
     failure_path = run / "markers/cvae.failed"
-    if not summary_path.is_file() or not checkpoint_path.is_file():
-        raise ValueError("H50-A continuation source is missing its summary or last.pt")
+    if not summary_path.is_file() or not checkpoint_path.is_file() or not metrics_path.is_file():
+        raise ValueError("H50-A continuation source is missing its summary, metrics, or last.pt")
     summary = load_json(summary_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     contract = config["training"].get("continuation", {})
     source_step = int(contract.get("source_optimizer_step", -1))
     maximum_score = float(contract.get("maximum_source_fit_score", -1.0))
     last_three = summary.get("last_three_evaluations", [])
-    last_steps = [int(row.get("optimizer_step", -1)) for row in last_three]
     scores = [float(row.get("fit_gate", {}).get("score", math.inf)) for row in last_three]
+    log_evaluations: list[dict[str, Any]] = []
+    with metrics_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("phase") == "evaluation":
+                log_evaluations.append(row)
+                if len(log_evaluations) > 3:
+                    log_evaluations.pop(0)
+    last_steps = [int(row.get("optimizer_step", -1)) for row in log_evaluations]
+    log_scores = [
+        float(row.get("metrics", {}).get("fit_gate", {}).get("score", math.inf))
+        for row in log_evaluations
+    ]
     expected_last_steps = [source_step - 2000, source_step - 1000, source_step]
     source_sha256 = file_sha256(checkpoint_path)
     source_authorization = summary.get("h50_authorization", {})
@@ -397,6 +412,10 @@ def validate_h50_continuation_source(
         "source_completed_step": int(summary.get("completed_optimizer_steps", -1)) == source_step,
         "source_best_at_last": int(summary.get("best_optimizer_step", -1)) == source_step,
         "last_three_steps": last_steps == expected_last_steps,
+        "last_three_log_summary_match": len(log_scores) == len(scores) == 3 and all(
+            math.isclose(log_score, summary_score, rel_tol=1e-12, abs_tol=1e-12)
+            for log_score, summary_score in zip(log_scores, scores, strict=True)
+        ),
         "last_three_failed": len(last_three) == 3 and all(
             not bool(row.get("fit_gate", {}).get("passed", True)) for row in last_three
         ),
@@ -432,6 +451,8 @@ def validate_h50_continuation_source(
         "source_run": str(run),
         "source_summary": str(summary_path),
         "source_summary_sha256": file_sha256(summary_path),
+        "source_metrics": str(metrics_path),
+        "source_metrics_sha256": file_sha256(metrics_path),
         "source_checkpoint": str(checkpoint_path),
         "source_checkpoint_sha256": source_sha256,
         "source_optimizer_step": source_step,

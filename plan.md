@@ -260,6 +260,8 @@ S0、S25、F4B A/B/C、F4E、F4F G8/T129、F4G及H38均执行过对应smoke。H3
 
 历史上发现并修复了三类协议/报告问题：F1的fixed训练与评测Mask seed不一致；F4E smoke误把“质量门禁不适用”报告成根因失败；F4F G8 smoke最初使用了错误的学习率配置键。它们均已修复或隔离，不得作为模型优劣证据。
 
+H50续训首次启动在训练前被准入检查拦截：旧summary的末三点评测对象没有稳定携带step字段，step实际位于`metrics.jsonl`外层。现改为从源JSONL核对`28000/29000/30000`并校验其score与summary一致；该次没有执行optimizer step，不形成模型结论。
+
 Windows代码READY或测试PASS只表示接口和静态合同通过，不写入正式实验结果表。posterior相关82项测试通过；全量135项中132项通过，另3项仍只是Windows缺少既有`h5py`的导入限制。当前专项测试覆盖参数量、T64 token与local chunk、真值隔离、latent donor、checkpoint读回、续训准入、源指标复现和低LR尾段scheduler；真实质量仍必须由Ubuntu正式run决定。
 
 ## 5. 当前执行与结果回填

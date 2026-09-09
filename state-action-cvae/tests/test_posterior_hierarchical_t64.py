@@ -377,6 +377,7 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
             (run / "manifests").mkdir(parents=True)
             (run / "checkpoints").mkdir()
             (run / "markers").mkdir()
+            (run / "logs").mkdir()
             model_config = dict(small_config())
             model_config.update({"profile": "H50", "parameter_count": 123})
             thresholds = {
@@ -448,6 +449,14 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
             }
             summary_path = run / "manifests/posterior_hierarchical_t64_summary.json"
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            (run / "logs/metrics.jsonl").write_text(
+                "".join(
+                    json.dumps({"phase": "evaluation", "optimizer_step": row["optimizer_step"], "metrics": row})
+                    + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
             (run / "markers/cvae_posterior_hierarchical_t64_execution.ok").write_text(
                 "PASS\n", encoding="utf-8"
             )

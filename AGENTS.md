@@ -672,6 +672,10 @@ slow/fast `3e-6/1e-5`，随后余弦降回`1e-6`。旧v1 checkpoint未保存Data
 所以样本顺序以seed`20260836`确定性重启，不能称为逐bit无缝续跑。续训连续三次fit PASS后进入
 H50-B；15k仍FAIL则停止扩模，不允许第二次续训或H64。
 
+续训首次Ubuntu启动在任何训练step前被`last_three_steps`准入检查拦截。原因是v1 summary的
+`last_three_evaluations`指标对象不稳定携带step，真实step位于`logs/metrics.jsonl`外层。Windows已
+修复为从源JSONL核对28k/29k/30k，并同时要求日志score与summary逐项一致；该失败run无模型意义。
+
 ### 6.5 已完成 parent 训练
 
 ```text
