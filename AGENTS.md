@@ -629,8 +629,9 @@ H38-A正式run
 best step30000、fit score`2.4948489166611454`。最佳global State/Action为`0.024948/0.017838`，worst
 State/Action为`0.041763/0.025360`，p99/max abs为`0.075243/0.784172`，contact 100%，三种latent ratio
 为`46.69/50.64/57.85`；checkpoint读回PASS，marker为execution和`cvae.failed`。按用户提出的宽松门禁
-`global≤0.02、worst≤0.04、p99≤0.06、max仅报告`重算仍FAIL，控制项p99为阈值1.254倍，global State和
-worst State为1.247/1.044倍，最后三次均未通过。旧代码输出`RUN_SINGLE_H50_AUTOENCODE_REPLICATION`，但经目标复审
+旧宽松门禁`global≤0.02、worst≤0.04、p99≤0.06、max仅报告`重算仍FAIL。2026-09-09用户将正式fit
+门禁调整为global≤0.02、每类worst≤0.04、p99≤0.08、max仅报告、contact 100%且latent ratio≥10；
+按新门禁H38-A仍FAIL，score 1.247由global State控制，worst State也为阈值1.044倍。旧代码输出`RUN_SINGLE_H50_AUTOENCODE_REPLICATION`，但经目标复审
 该决策无效：A为全遮挡latent压力测试，信息少于目标物理部分Mask，A失败不能推出B失败。当前不得启动
 H50；A审计已完成，现以其有效best checkpoint初始化H38-B。只有A/B均失败后才讨论一次H50复核。
 
@@ -645,14 +646,14 @@ H38-B正式run
 execution PASS但quality FAIL，best位于step60000、fit score`2.4990567`。最佳global State/Action
 为`0.024991/0.016406`，worst State/Action为`0.047077/0.025066`，p99/max abs为
 `0.081572/1.611736`，contact 100%，zero/cross-window/cross-motion整组latent ratio为
-`18.83/21.42/24.47`。事后宽松门禁也FAIL，score`1.35954`由p99控制；global State和worst State
-分别为宽松阈值1.250/1.177倍。
+`18.83/21.42/24.47`。按新fit门禁重算仍FAIL，score`1.24953`由global State控制；worst State和p99
+分别为新阈值1.177/1.020倍。
 
 B相对A的global Action改善约8.0%，global State几乎不变，worst State/p99恶化约12.7%/8.4%；
 A只评full-both而B评8类物理Mask，因此不是严格配对比较。B中`state_rollout`最难，worst State
 `0.047077`、max abs`1.611736`。这证明可见物理条件没有在既定预算内消除State时序瓶颈，但不能
 证明condition一定有害或理论容量绝对不足。H38-R因B无fit marker而BLOCKED。A/B失败链现授权唯一
-一次H50-A：51,005,283参数、full-both、随机初始化20k；H38失败run只作授权，不加载其权重。
+一次H50-A：51,005,283参数、full-both、随机初始化30k；H38失败run只作授权，不加载其权重。
 
 ### 6.5 已完成 parent 训练
 
@@ -812,7 +813,7 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 1. H38-A与H38-B已分别跑满30k/60k并质量FAIL；两者都主要卡在State，B的Action有所改善但
    `state_rollout`仍最难。H38-R当前不得启动。
-2. 当前唯一下一步是随机初始化执行一次H50-A 20k规模复核；若FAIL则停止扩模，若PASS才以H50
+2. 当前唯一下一步是随机初始化执行一次H50-A 30k规模复核；若FAIL则停止扩模，若PASS才以H50
    继续fixed/random。每步必须先回填plan.md；R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。

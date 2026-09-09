@@ -14,15 +14,16 @@
 - F4G-O已在相同1,504个T64窗口、12,032个fixtures上以0 optimizer step取得`quality_pass=true`、`best_fit_score=1.0`。这证明数据身份、Mask target、loss和evaluator存在解析可达解；原F4G失败被定位为稀疏独立查表优化不足。
 - H38工程smoke已在前2个window上完成2步前向、反向、评测和checkpoint链路；`quality_pass=false`与score不构成容量结论。
 - H38-A已在32 motion、T64上从随机初始化跑满30k，`quality_pass=false`、best fit score为`2.4948489`。最佳global State/Action RMSE为`0.024948/0.017838`，worst-window为`0.041763/0.025360`，p99/max abs为`0.075243/0.784172`，contact 100%，zero/cross-window/cross-motion latent ratio为`46.69/50.64/57.85`。
-- 事后按更宽松的`0.02/0.02 global、0.04/0.04 worst、0.06 p99、max仅报告`重算，最佳点仍FAIL：p99、global State和worst State分别是阈值的`1.254/1.247/1.044`倍；最后三次也均未通过。Action、contact和latent依赖全部通过。
+- 新fit门禁现固定为global State/Action≤`0.02`、每类worst-window State/Action≤`0.04`、p99≤`0.08`、max abs只报告、contact 100%、latent ratio≥10。历史summary与marker保持原样，仅作事后重算。
+- H38-A按新门禁仍FAIL，score `1.24742`由global State控制；worst State也为阈值`1.044`倍，p99已通过。Action、contact和latent依赖通过。
 - H38-B已从H38-A的`best_fit.pt`做model-only初始化，在1,504个T64窗口、12,032个固定物理Mask fixture上跑满60k；execution PASS但质量FAIL，最佳点仍为最后step60000，fit score为`2.4990567`。
 - H38-B最佳global State/Action RMSE为`0.024991/0.016406`，worst-window为`0.047077/0.025066`，p99/max abs为`0.081572/1.611736`，contact 100%，zero/cross-window/cross-motion latent ratio为`18.83/21.42/24.47`。官方门禁由global State的2.499倍控制。
-- 同一宽松诊断仍FAIL，score为`1.35954`并由p99控制；global State和worst State也分别为宽松阈值的`1.250/1.177`倍。Action、contact和三种latent依赖通过。
+- H38-B按新门禁仍FAIL，score为`1.24953`并由global State控制；worst State和p99分别为新阈值的`1.177/1.020`倍。Action、contact和三种latent依赖通过。
 - H38-B相对H38-A的global Action改善约8.0%，但global State几乎不变，worst State和p99分别恶化约12.7%和8.4%。A与B的Mask分布不同，因此该比例只作结构诊断，不能当作严格配对优劣。B中`state_rollout`最难，worst State `0.047077`、max abs `1.611736`。
 - H38-R当前BLOCKED；H50尚无质量结果。
 - conditional prior、latent 随机采样和 KL 尚未实现到当前 H38 路线；不能声称项目已经进入完整 CVAE 阶段。
 
-当前唯一下一步：执行一次H50-A autoencode参数规模复核。它必须从随机初始化开始，并用正式失败的H38-B run重验A/B失败链；不得继承H38权重。H38-R仍严格要求同profile的B fit，因此当前不得运行R或实现KL。
+当前唯一下一步：执行一次H50-A autoencode参数规模复核，预算已固定为30k。它必须从随机初始化开始，并用正式失败的H38-B run重验A/B失败链；不得继承H38权重。H38-R仍严格要求同profile的B fit，因此当前不得运行R或实现KL。
 
 当前Windows文档与F4G smoke报告语义修复提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`；正式Ubuntu run仍以其自身`source_commit.txt`为准。
 
@@ -125,7 +126,7 @@ State continuous MSE + Action MSE + contact BCE
 
 | 门禁 | State/Action要求 | 尾部要求 | contact/latent | 用途 |
 |---|---|---|---|---|
-| `fit` | global RMSE≤`1e-2`；每类 worst-window RMSE≤`2e-2` | p99 abs≤`5e-2` | contact 100%；H38 latent ratio≥10 | 当前规模推进 |
+| `fit` | global RMSE≤`2e-2`；每类 worst-window RMSE≤`4e-2` | p99 abs≤`8e-2`；max只报告 | contact 100%；H38/H50 latent ratio≥10 | 当前规模推进 |
 | `strict_memory` | worst RMSE≤`1e-2` | max abs≤`1e-2` | contact 100%；latent ratio≥10 | 更严格诊断 |
 | `legacy_exact` | worst RMSE≤`1e-4` | max abs≤`1e-3` | contact 100%；latent ratio≥10 | 历史近无损标准 |
 
@@ -222,7 +223,7 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 | H38-A | 32 motion、T64、full-both posterior autoencoding | 30k，每1k评测 | `FAIL quality`；best global S/A `0.02495/0.01784`，worst S/A `0.04176/0.02536`，p99 `0.07524` | 无论质量结果均进入H38-B |
 | H38-B | 从A的best checkpoint model-only初始化，8类固定物理Mask | 60k，每2k评测 | `FAIL quality`；best global S/A `0.02499/0.01641`，worst S/A `0.04708/0.02507`，p99 `0.08157` | 一次H50-A规模复核 |
 | H38-R | 从同profile的B初始化，动态物理Mask训练，固定held-out Mask评测 | 30k，每2k评测 | BLOCKED；H38-B无fit marker | 仅B质量PASS后冻结KL=0基线 |
-| H50-A复核 | H38同结构扩至51.01M；full-both、随机初始化 | 20k，每1k评测；只执行一次 | AUTHORIZED；A/B失败链完整 | PASS才以H50继续B/R；FAIL则停止扩模 |
+| H50-A复核 | H38同结构扩至51.01M；full-both、随机初始化 | 30k，每1k评测；只执行一次 | AUTHORIZED；A/B失败链完整 | PASS才以H50继续B/R；FAIL则停止扩模 |
 
 ### 3.6 正式结果源码审计
 
@@ -260,7 +261,7 @@ Windows代码READY或测试PASS只表示接口和静态合同通过，不写入�
 
 ### 5.1 H50-A 启动合同
 
-H38-A/B均已正式质量失败，因此允许一次H50-A复核。H50-A必须随机初始化51,005,283参数模型，只把H38-B run作为失败链授权，不读取其模型权重；仍使用原正式fit门禁。以下命令不包含Git操作：
+H38-A/B均已正式质量失败，因此允许一次H50-A复核。H50-A必须随机初始化51,005,283参数模型，只把H38-B run作为失败链授权，不读取其模型权重；使用新的fit门禁并训练最多30k。以下命令不包含Git操作：
 
 ```bash
 cd /home/helloworld/bly/state-action-cvae
@@ -288,7 +289,7 @@ Run：
 
 源码为`a0a7f7e0efce25f1184fc522536c15eabe6e3b5b`。训练跑满30k，最佳点为step30000；execution marker和checkpoint读回通过，质量marker为`cvae.failed`，没有autoencode fit marker。最后三次所有指标仍缓慢改善，但原fit门禁均FAIL。
 
-按用户提出的宽松诊断门禁重算，最后三次的global State为`0.025264/0.025064/0.024948`，worst State为`0.042324/0.041974/0.041763`，p99为`0.076167/0.075578/0.075243`，因此三次均FAIL。最佳点的Action、contact和三种latent依赖通过；max abs `0.784172`只报告不参与该诊断结论。
+按新fit门禁重算，最后三次的global State为`0.025264/0.025064/0.024948`，均高于`0.02`，因此三次仍FAIL；最佳score为`1.24742`。worst State最后为`0.041763`，p99最后为`0.075243`且已通过新`0.08`阈值。最佳点的Action、contact和三种latent依赖通过；max abs `0.784172`只报告。
 
 ### 5.3 H38-B 正式结果
 
@@ -300,7 +301,7 @@ Run：
 
 源码为`c5932690f43b478fb05687ccf58e6834b0243a32`。训练跑满60k，最佳点为step60000；exit code 0、execution marker和checkpoint完整，质量marker为`cvae.failed`，没有fixed fit marker。最后三次仍缓慢改善，但全部质量FAIL。
 
-最佳global State/Action为`0.024991/0.016406`，worst State/Action为`0.047077/0.025066`，p99/max abs为`0.081572/1.611736`，contact 100%，三种整组latent依赖为`18.83/21.42/24.47`。宽松诊断score仍为`1.35954`，由p99控制；global State与worst State也未过。Mask分项显示`state_rollout`最难，随后是`state_gap_4/16`；Action gap均接近或低于官方worst阈值，只有`full_action`仍为`0.025066`。
+最佳global State/Action为`0.024991/0.016406`，worst State/Action为`0.047077/0.025066`，p99/max abs为`0.081572/1.611736`，contact 100%，三种整组latent依赖为`18.83/21.42/24.47`。按新门禁score仍为`1.24953`，由global State控制；worst State与p99也未过。Mask分项显示`state_rollout`最难，随后是`state_gap_4/16`；Action各项均通过新门禁。
 
 与H38-A相比，B的global Action改善约8.0%，global State仅变化+0.17%，worst State和p99分别恶化12.7%和8.4%。由于A只评full-both而B评8类物理Mask，两者不是同fixture配对，不能据此声称condition一定有害；但结果明确表明可见Action和边界State没有消除State时序重建瓶颈。60k末端仍改善，不等于已证明理论容量不足；只是按固定预算和门禁失败。
 

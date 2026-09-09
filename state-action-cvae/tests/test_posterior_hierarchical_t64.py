@@ -98,12 +98,30 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
             del model
             gc.collect()
 
-    def test_h38_autoencode_budget_is_locked_to_30k(self) -> None:
+    def test_hierarchical_fit_contract_and_autoencode_budgets_are_locked(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        config = load_config(root / "configs/posterior_hierarchical_t64_h38.json")
-        autoencode = config["training"]["stages"]["autoencode"]
-        self.assertEqual(autoencode["max_optimizer_steps"], 30000)
-        self.assertEqual(autoencode["validation_interval"], 1000)
+        for config_name in (
+            "posterior_hierarchical_t64_h38.json",
+            "posterior_hierarchical_t64_h50.json",
+        ):
+            config = load_config(root / "configs" / config_name)
+            training = config["training"]
+            autoencode = training["stages"]["autoencode"]
+            self.assertEqual(autoencode["max_optimizer_steps"], 30000)
+            self.assertEqual(autoencode["validation_interval"], 1000)
+            self.assertEqual(
+                training["fit_thresholds"],
+                {
+                    "global_state_rmse": 0.02,
+                    "global_action_rmse": 0.02,
+                    "worst_mask_state_rmse": 0.04,
+                    "worst_mask_action_rmse": 0.04,
+                    "continuous_p99_abs": 0.08,
+                    "contact_accuracy": 1.0,
+                    "latent_ratio": 10.0,
+                },
+            )
+            self.assertNotIn("continuous_max_abs", training["fit_thresholds"])
 
     def test_shapes_chunk_boundaries_and_canonical_mask_invariance(self) -> None:
         torch.manual_seed(10)
