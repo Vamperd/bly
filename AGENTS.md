@@ -568,7 +568,7 @@ source、F4E、fixture/window/motion、完整训练身份、optimizer、初始�
 `RUN_DIRECT_OUTPUT_MEMORY_CEILING_FOR_DECODER_AND_OBJECTIVE`。不得继续F4F训练、选择相对较好的G8
 推进或进入32-motion/R128/KL；先设计独立的直接输出记忆上限合同。
 
-### 6.4.1 32-motion、T64层级posterior：H38 A/B质量失败，H50-A待执行
+### 6.4.1 32-motion、T64层级posterior：H50-A近门槛失败，待受控续训
 
 F4F比较已经以`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`收尾。当前活动合同已切换到[Next.md](Next.md)：
 先用F4G direct-output查表证明loss/Mask/evaluator上限，再运行H38层级posterior。不得追加F4F步数，
@@ -596,8 +596,9 @@ bash ./cvae_repro.sh posterior-hierarchical-t64-random
 
 固定Mask仅为物理State gap、State rollout、Action gap、Full Action和短joint gap；R阶段使用相同语义的
 held-out Mask，不再使用element/feature/semantic Mask。fit门禁与H50触发规则必须以Next.md为准。
-Windows轻量专项10项及旧posterior/F4E/F4F回归38项已通过；全量发现129项中126项通过，另3项仅为
-既有Windows环境缺`h5py`的导入限制。后续Ubuntu F4G、F4G-O及H38 A/B已实际运行；它们各自的
+当前Windows posterior相关82项通过；全量发现135项中132项通过，另3项仅为既有Windows环境缺
+`h5py`的导入限制。新增覆盖H50续训准入、源指标复现、AdamW恢复和低LR尾段scheduler。后续Ubuntu
+F4G、F4G-O及H38/H50实验已实际运行；它们各自的
 execution与quality语义必须按下述run事实区分。F4G smoke run
 `/home/helloworld/bly/runs/cvae_posterior_direct_output_f4g_t64_smoke_20260908_012626`已完成2 step并以
 exit code 0返回；它只确认真实HDF5/CUDA/训练/评测链路，`quality_pass=false`与score 100.3528不构成
@@ -654,6 +655,22 @@ A只评full-both而B评8类物理Mask，因此不是严格配对比较。B中`st
 `0.047077`、max abs`1.611736`。这证明可见物理条件没有在既定预算内消除State时序瓶颈，但不能
 证明condition一定有害或理论容量绝对不足。H38-R因B无fit marker而BLOCKED。A/B失败链现授权唯一
 一次H50-A：51,005,283参数、full-both、随机初始化30k；H38失败run只作授权，不加载其权重。
+
+H50-A正式run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_20260909_120934`已从随机初始化
+跑满30k，源码`fd7928f26b1a12dfa6e01218c7defd9d5ffe2166`。execution PASS但quality FAIL，best位于
+step30000、fit score`1.0370688`。global State/Action为`0.020202/0.015074`，worst State/Action为
+`0.041483/0.022078`，p99/max abs为`0.060677/0.715894`，contact 100%，zero/cross-window/cross-motion
+latent ratio为`56.32/62.06/70.89`。最后三次score为`1.06244/1.04331/1.03707`，仍单调改善；只剩
+global State超1.01%和worst State超3.71%。相对同任务H38-A，global State/Action与p99改善约
+19.0%/15.5%/19.4%，worst State只改善0.67%；最差feature均属于29维joint velocity。
+
+用户据此授权唯一一次H50-A尾段续训，最多额外15k。新入口
+`posterior-hierarchical-t64-continue`只接受上述正式run；校验summary、hash、末三点评测、checkpoint
+SHA、AdamW和原scheduler后，从`last.pt`恢复模型与AdamW动量。尾段scheduler用250步从`1e-6`升至
+slow/fast `3e-6/1e-5`，随后余弦降回`1e-6`。旧v1 checkpoint未保存DataLoader generator状态，
+所以样本顺序以seed`20260836`确定性重启，不能称为逐bit无缝续跑。续训连续三次fit PASS后进入
+H50-B；15k仍FAIL则停止扩模，不允许第二次续训或H64。
 
 ### 6.5 已完成 parent 训练
 
@@ -805,16 +822,17 @@ bash ./cvae_repro.sh validate-state-mask-video
 | F4G-O解析上限 | `cvae_posterior_direct_output_oracle.ok`（另须fit marker） |
 | F4G fit质量 | `cvae_posterior_direct_output_fit.ok` |
 | H38/H50 smoke/执行 | `cvae_posterior_hierarchical_t64_smoke.ok` / `cvae_posterior_hierarchical_t64_execution.ok` |
+| H50-A尾段续训执行 | `cvae_posterior_hierarchical_t64_continuation_execution.ok`（另以autoencode fit marker判断质量） |
 | H38/H50分阶段fit | `cvae_posterior_hierarchical_t64_<stage>_fit.ok`，stage为autoencode/fixed/random |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. H38-A与H38-B已分别跑满30k/60k并质量FAIL；两者都主要卡在State，B的Action有所改善但
-   `state_rollout`仍最难。H38-R当前不得启动。
-2. 当前唯一下一步是随机初始化执行一次H50-A 30k规模复核；若FAIL则停止扩模，若PASS才以H50
-   继续fixed/random。每步必须先回填plan.md；R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
+1. H38-A/B均质量FAIL；H50-A 30k只差global/worst State 1.01%/3.71%且末段仍改善。当前唯一
+   下一步是从其`last.pt`执行一次最多15k的低LR尾段续训；不得启动H38-R或重复扩模。
+2. H50续训PASS才以H50继续fixed/random；FAIL则停止扩模并诊断joint velocity与最差State窗口。
+   每步先回填plan.md；R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。

@@ -17,10 +17,13 @@ from cvae_sa.posterior_direct_output import (
     initialize_direct_output_from_targets,
 )
 from cvae_sa.posterior_hierarchical_t64 import (
+    compare_continuation_reproduction,
+    configure_continuation_scheduler,
     configure_optimizer,
     hierarchical_next_step,
     validate_f4g_authorization,
     validate_h50_authorization,
+    validate_h50_continuation_source,
     validate_source_checkpoint,
 )
 from cvae_sa.posterior_t64_protocol import (
@@ -122,6 +125,25 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
                 },
             )
             self.assertNotIn("continuous_max_abs", training["fit_thresholds"])
+        h50 = load_config(root / "configs/posterior_hierarchical_t64_h50.json")
+        self.assertEqual(
+            h50["training"]["continuation"],
+            {
+                "source_optimizer_step": 30000,
+                "additional_optimizer_steps": 15000,
+                "validation_interval": 1000,
+                "maximum_source_fit_score": 1.05,
+                "training_seed": 20260836,
+                "slow_peak_learning_rate": 3e-6,
+                "fast_peak_learning_rate": 1e-5,
+                "minimum_learning_rate": 1e-6,
+                "warmup_steps": 250,
+                "scheduler_policy": (
+                    "restore AdamW moments; validate the source scheduler, then use a "
+                    "conservative 3e-6/1e-5 cosine tail restart to 1e-6"
+                ),
+            },
+        )
 
     def test_shapes_chunk_boundaries_and_canonical_mask_invariance(self) -> None:
         torch.manual_seed(10)
@@ -319,6 +341,135 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
                     self.assertIn("Optimizer step", text)
             self.assertIn("Continuous feature index", Path(paths["feature_error"]).read_text())
             self.assertIn("Mask family index", Path(paths["mask_breakdown"]).read_text())
+
+    def test_continuation_tail_scheduler_is_conservative(self) -> None:
+        first = torch.nn.Parameter(torch.ones(()))
+        second = torch.nn.Parameter(torch.ones(()))
+        optimizer = torch.optim.AdamW([
+            {"params": [first], "lr": 1e-6, "name": "encoders_self_attention_ffn"},
+            {"params": [second], "lr": 1e-6, "name": "latent_cross_film_query_output"},
+        ])
+        contract = {
+            "slow_peak_learning_rate": 3e-6,
+            "fast_peak_learning_rate": 1e-5,
+            "minimum_learning_rate": 1e-6,
+            "warmup_steps": 250,
+        }
+        scheduler = configure_continuation_scheduler(optimizer, contract, 15000)
+        self.assertEqual([group["lr"] for group in optimizer.param_groups], [1e-6, 1e-6])
+        for _ in range(250):
+            optimizer.step()
+            scheduler.step()
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 3e-6, places=12)
+        self.assertAlmostEqual(optimizer.param_groups[1]["lr"], 1e-5, places=12)
+        for _ in range(14750):
+            optimizer.step()
+            scheduler.step()
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 1e-6, places=12)
+        self.assertAlmostEqual(optimizer.param_groups[1]["lr"], 1e-6, places=12)
+
+    def test_h50_continuation_admits_only_improving_near_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "dataset"
+            run = root / "h50-a"
+            dataset.mkdir()
+            (run / "manifests").mkdir(parents=True)
+            (run / "checkpoints").mkdir()
+            (run / "markers").mkdir()
+            model_config = dict(small_config())
+            model_config.update({"profile": "H50", "parameter_count": 123})
+            thresholds = {
+                "global_state_rmse": 0.02, "global_action_rmse": 0.02,
+                "worst_mask_state_rmse": 0.04, "worst_mask_action_rmse": 0.04,
+                "continuous_p99_abs": 0.08, "contact_accuracy": 1.0,
+                "latent_ratio": 10.0,
+            }
+            config = {
+                "model": model_config,
+                "training": {
+                    "fit_thresholds": thresholds,
+                    "continuation": {
+                        "source_optimizer_step": 30000,
+                        "maximum_source_fit_score": 1.05,
+                    },
+                },
+            }
+            checkpoint = {
+                "format_version": "sonic_posterior_hierarchical_t64_checkpoint_v1",
+                "stage": "autoencode", "optimizer_step": 30000,
+                "dataset_manifest_sha256": "dataset-hash",
+                "selected_windows_sha256": "window-hash",
+                "fixture_bitmap_sha256": "fixture-hash",
+                "model_signature": {
+                    key: model_config.get(key) for key in (
+                        "kind", "profile", "d_model", "posterior_encoder_layers",
+                        "condition_encoder_layers", "decoder_layers", "heads", "ffn_dim",
+                        "global_latent_dim", "local_latent_dim", "local_chunks",
+                        "chunk_transitions", "max_state_steps", "state_dim",
+                    )
+                },
+                "parameter_count": 123, "model": {},
+                "optimizer": {"state": {0: {"step": torch.tensor(30000)}}},
+                "scheduler": {"last_epoch": 30000},
+            }
+            checkpoint_path = run / "checkpoints/last.pt"
+            torch.save(checkpoint, checkpoint_path)
+
+            def evaluation(step: int, score: float) -> dict[str, object]:
+                return {
+                    "optimizer_step": step,
+                    "global_state_rmse": 0.0202,
+                    "global_action_rmse": 0.015,
+                    "worst_mask_state_rmse": 0.04 * score,
+                    "worst_mask_action_rmse": 0.022,
+                    "continuous_p99_abs": 0.061,
+                    "continuous_max_abs": 0.72,
+                    "contact_accuracy": 1.0,
+                    "fit_gate": {"passed": False, "score": score, "thresholds": thresholds},
+                    "latent_dependence": {"main_ratios": {
+                        "zero": 56.0, "cross_window": 62.0, "cross_motion": 71.0,
+                    }},
+                }
+
+            rows = [evaluation(28000, 1.062), evaluation(29000, 1.043), evaluation(30000, 1.037)]
+            summary = {
+                "profile": "H50", "stage": "autoencode", "smoke": False,
+                "execution_pass": True, "quality_pass": False,
+                "dataset_run": str(dataset.resolve()),
+                "dataset_manifest_sha256": "dataset-hash",
+                "selected_windows_sha256": "window-hash",
+                "fixture_bitmap_sha256": "fixture-hash",
+                "completed_optimizer_steps": 30000, "best_optimizer_step": 30000,
+                "best_fit_score": 1.037, "best_evaluation": rows[-1],
+                "last_three_evaluations": rows,
+                "h50_authorization": {"checks": {"failed_h38_chain": True}},
+                "checkpoint_readback": {"sha256": file_sha256(checkpoint_path)},
+            }
+            summary_path = run / "manifests/posterior_hierarchical_t64_summary.json"
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            (run / "markers/cvae_posterior_hierarchical_t64_execution.ok").write_text(
+                "PASS\n", encoding="utf-8"
+            )
+            (run / "markers/cvae.failed").write_text(
+                "QUALITY_FAIL execution_complete=true stage=autoencode fit=false\n",
+                encoding="utf-8",
+            )
+            _, initialization = validate_h50_continuation_source(
+                dataset, run, dataset_hash="dataset-hash", window_hash="window-hash",
+                fixture_hash="fixture-hash", config=config,
+            )
+            self.assertTrue(initialization["checks"]["last_three_improving"])
+            self.assertFalse(initialization["loader_rng_restored"])
+            reproduction = compare_continuation_reproduction(rows[-1], rows[-1])
+            self.assertTrue(reproduction["passed"])
+            summary["last_three_evaluations"][1]["fit_gate"]["score"] = 1.07
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "last_three_improving"):
+                validate_h50_continuation_source(
+                    dataset, run, dataset_hash="dataset-hash", window_hash="window-hash",
+                    fixture_hash="fixture-hash", config=config,
+                )
 
     def test_padding_empty_chunks_and_whole_or_partial_donor_diagnostics(self) -> None:
         torch.manual_seed(13)

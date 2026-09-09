@@ -649,10 +649,11 @@ posterior_direct_output_oracle() {
 }
 
 posterior_hierarchical_t64() {
-  local stage="$1" smoke="$2" dataset_run="${CVAE_DATASET_RUN:-}"
+  local stage="$1" smoke="$2" continuation="${3:-false}" dataset_run="${CVAE_DATASET_RUN:-}"
   local f4g_run="${CVAE_POSTERIOR_DIRECT_OUTPUT_RUN:-}"
   local init_checkpoint="${CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT:-}"
   local h38_failed_run="${CVAE_POSTERIOR_H38_FAILED_RUN:-}"
+  local resume_run="${CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN:-}"
   local profile="${CVAE_POSTERIOR_HIERARCHICAL_PROFILE:-H38}"
   local config prefix run_dir marker latest_key
   profile="${profile^^}"
@@ -671,7 +672,26 @@ posterior_hierarchical_t64() {
     || die "F4G-O fit marker is missing: $f4g_run"
   [[ -f "$f4g_run/markers/cvae_posterior_direct_output_oracle.ok" ]] \
     || die "F4G-O oracle marker is missing: $f4g_run"
-  if [[ "$stage" == "autoencode" ]]; then
+  if [[ "$continuation" == "true" ]]; then
+    [[ "$profile" == "H50" && "$stage" == "autoencode" && "$smoke" == "false" ]] \
+      || die "hierarchical continuation is restricted to formal H50 autoencode"
+    [[ -z "$init_checkpoint" ]] \
+      || die "continuation restores last.pt directly; unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT"
+    [[ -z "$h38_failed_run" ]] \
+      || die "continuation revalidates the H50 source; unset CVAE_POSTERIOR_H38_FAILED_RUN"
+    [[ -n "$resume_run" ]] \
+      || die "CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN is required for H50 continuation"
+    [[ -f "$resume_run/manifests/posterior_hierarchical_t64_summary.json" ]] \
+      || die "H50 continuation source summary is missing: $resume_run"
+    [[ -f "$resume_run/checkpoints/last.pt" ]] \
+      || die "H50 continuation source last.pt is missing: $resume_run"
+    [[ -f "$resume_run/markers/cvae_posterior_hierarchical_t64_execution.ok" ]] \
+      || die "H50 continuation source execution marker is missing: $resume_run"
+    [[ -f "$resume_run/markers/cvae.failed" ]] \
+      || die "H50 continuation requires the narrowly failed formal source: $resume_run"
+  elif [[ "$stage" == "autoencode" ]]; then
+    [[ -z "$resume_run" ]] \
+      || die "CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN is accepted only by the continuation entry"
     [[ -z "$init_checkpoint" ]] \
       || die "autoencode must start randomly; unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT"
     if [[ "$profile" == "H50" ]]; then
@@ -682,6 +702,8 @@ posterior_hierarchical_t64() {
         || die "formal failed H38-B quality marker is missing: $h38_failed_run"
     fi
   else
+    [[ -z "$resume_run" ]] \
+      || die "CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN is accepted only by the continuation entry"
     [[ -n "$init_checkpoint" ]] \
       || die "CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT is required for $stage"
     [[ -f "$init_checkpoint" ]] || die "hierarchical source checkpoint is missing: $init_checkpoint"
@@ -689,12 +711,14 @@ posterior_hierarchical_t64() {
       || die "hierarchical stage initialization must use best_fit.pt"
   fi
   prefix="cvae_posterior_hierarchical_t64_${profile,,}_${stage}"
+  [[ "$continuation" == "true" ]] && prefix="${prefix}_continue15k"
   [[ "$smoke" == "true" ]] && prefix="${prefix}_smoke"
   run_dir="$(new_run_dir "$prefix")"
   capture_environment "$run_dir"
   local extra_args=()
   [[ -n "$init_checkpoint" ]] && extra_args+=(--init-checkpoint "$init_checkpoint")
   [[ -n "$h38_failed_run" ]] && extra_args+=(--h38-failed-run "$h38_failed_run")
+  [[ -n "$resume_run" ]] && extra_args+=(--resume-run "$resume_run")
   [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
   run_logged "$run_dir" posterior_hierarchical_t64.log \
     "$PYTHON" -m cvae_sa.posterior_hierarchical_t64 \
@@ -705,9 +729,11 @@ posterior_hierarchical_t64() {
       --stage "$stage" \
       "${extra_args[@]}"
   marker="cvae_posterior_hierarchical_t64_execution.ok"
+  [[ "$continuation" == "true" ]] && marker="cvae_posterior_hierarchical_t64_continuation_execution.ok"
   [[ "$smoke" == "true" ]] && marker="cvae_posterior_hierarchical_t64_smoke.ok"
   [[ -f "$run_dir/markers/$marker" ]] || die "hierarchical T64 marker is missing: $marker"
   latest_key="posterior_hierarchical_t64_${profile,,}_${stage}"
+  [[ "$continuation" == "true" ]] && latest_key="${latest_key}_continue15k"
   [[ "$smoke" == "true" ]] && latest_key="${latest_key}_smoke"
   update_latest "$latest_key" "$run_dir"
   printf '%s\n' "$run_dir"
@@ -1103,6 +1129,7 @@ case "${1:-}" in
   posterior-direct-output-oracle) posterior_direct_output_oracle ;;
   posterior-hierarchical-t64-smoke) posterior_hierarchical_t64 autoencode true ;;
   posterior-hierarchical-t64-autoencode) posterior_hierarchical_t64 autoencode false ;;
+  posterior-hierarchical-t64-continue) posterior_hierarchical_t64 autoencode false true ;;
   posterior-hierarchical-t64-fixed) posterior_hierarchical_t64 fixed false ;;
   posterior-hierarchical-t64-random) posterior_hierarchical_t64 random false ;;
   analyze-overfit) analyze_overfit ;;
@@ -1115,5 +1142,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

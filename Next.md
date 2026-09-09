@@ -2,7 +2,7 @@
 
 最后更新：2026-09-09
 
-状态：H38-A已跑满30k并质量FAIL；H38-B也已从A的最佳权重跑满60k并质量FAIL。fit门禁现调整为global≤0.02、每类worst≤0.04、p99≤0.08、max只报告；历史A/B按新门禁重算仍FAIL。A/B失败链已授权唯一一次H50-A 30k参数规模复核；H38-R仍因B没有fit marker而阻塞。历史run、源HDF5和checkpoint保持只读。事实结果仍以
+状态：H38-A/B均质量FAIL；H50-A已随机初始化跑满30k且近门槛FAIL，best score `1.03707`。其global State与worst State只超阈值1.01%/3.71%，28k–30k仍单调改善，因此当前只允许从H50-A `last.pt`受控续训最多15k。H38-R仍因B没有fit marker而阻塞。历史run、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 问题与顺序
@@ -13,14 +13,13 @@
 ```text
 H38-A full-both autoencoding（已FAIL，仅作诊断）
 → H38-B fixed physical Masks（已FAIL）
-→ H50-A full-both autoencoding（唯一一次规模复核）
-→ 仅H50-A PASS时继续H50-B/H50-R
+→ H50-A full-both autoencoding（30k近门槛FAIL）
+→ H50-A low-LR continuation（最多15k，当前唯一下一步）
+→ 仅续训PASS时继续H50-B/H50-R
 → 冻结KL=0基线后再实现KL三路径
 ```
 
-H38-A不再是H38-B的硬门槛。现在A/B均失败：B说明加入物理可见条件后Action较好，但State rollout/
-gap仍未达到门禁。下一步只用H50-A判断增加约32%参数是否能显著降低全遮挡State误差；它不是默认
-成功路线。H50-A失败即停止扩模，PASS才以H50继续B/R。R之前不实现prior、logvar、采样或KL。
+H50-A已表明加宽显著改善global State/Action与p99，但worst State改善很小。由于最终只差3.71%且末段仍改善，原“失败即停”规则被一次明确、有限的续训例外替代：最多再15k，不再允许第二次续训或H64。续训FAIL即停止扩模；PASS才以H50继续B/R。R之前不实现prior、logvar、采样或KL。
 
 ## 2. 固定数据与Mask合同
 
@@ -110,7 +109,8 @@ scheduler、loader与RNG。
 | H38-A | full-both，随机初始化，30k，每1k评测 | 已质量FAIL；仍进入H38-B |
 | H38-B | 从A `best_fit.pt` model-only；8 fixed Mask，60k，每2k | 已质量FAIL；不进入H38-R |
 | H38-R（BLOCKED） | 从B `best_fit.pt` model-only；动态Mask30k，每2k held-out评测 | 只有B fit后才冻结KL0基线 |
-| H50-A复核 | A/B均FAIL后授权；full-both、随机初始化、30k，每1k | PASS才继续H50-B；FAIL停止扩模 |
+| H50-A复核 | A/B均FAIL后授权；full-both、随机初始化、30k，每1k | 已FAIL；score 1.03707且末段改善 |
+| H50-A续训 | 从正式H50-A `last.pt`恢复模型/AdamW，低LR尾段重启，最多15k | PASS进H50-B；FAIL停止扩模 |
 
 fit门禁必须连续三次完整评测同时满足：global State/Action RMSE各`≤2e-2`；每类Mask的worst-window
 State/Action RMSE各`≤4e-2`；continuous p99 absolute error `≤8e-2`；contact accuracy精确100%；
@@ -140,7 +140,7 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 ls -lh "$RUN/checkpoints"
 ```
 
-H38-B已完成且质量失败，以下旧B/R命令不再是当前执行入口。当前只执行H50-A；它不加载H38 checkpoint，失败的H38-B run仅用于授权审计：
+H38-B和H50-A均已完成。当前只执行H50-A续训；源run保持只读：
 
 ```bash
 cd /home/helloworld/bly/state-action-cvae
@@ -148,17 +148,21 @@ source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
 
 unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
 unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT
+unset CVAE_POSTERIOR_H38_FAILED_RUN
 export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
 export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727
 export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H50
-export CVAE_POSTERIOR_H38_FAILED_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_fixed_20260908_133755
+export CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_20260909_120934
 
-test -f "$CVAE_POSTERIOR_H38_FAILED_RUN/markers/cvae_posterior_hierarchical_t64_execution.ok"
-test -f "$CVAE_POSTERIOR_H38_FAILED_RUN/markers/cvae.failed"
-bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
+test -f "$CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN/markers/cvae_posterior_hierarchical_t64_execution.ok"
+test -f "$CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN/markers/cvae.failed"
+test -f "$CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN/checkpoints/last.pt"
+bash ./cvae_repro.sh posterior-hierarchical-t64-continue
 ```
 
-H50-A已获一次性授权并固定训练最多30k。若它FAIL，不增加H50步数或建立H64；若它PASS，再从其`best_fit.pt`按同profile运行fixed，fixed PASS后才运行random。
+续训恢复模型与AdamW动量，并验证源scheduler；新尾段scheduler在250步内从`1e-6`升至slow/fast `3e-6/1e-5`，之后余弦降回`1e-6`。每1k完整评测，连续3次fit PASS提前结束。v1 checkpoint没有保存DataLoader generator状态，因此loader顺序用独立seed `20260836`确定性重启；manifest必须写明这不是逐bit无缝续跑。
+
+H50-A正式run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_20260909_120934`，源码`fd7928f26b1a12dfa6e01218c7defd9d5ffe2166`。best step30000：global S/A `0.020202/0.015074`、worst S/A `0.041483/0.022078`、p99/max `0.060677/0.715894`、contact 100%、latent整组ratio `56.32/62.06/70.89`。末三次score `1.06244/1.04331/1.03707`。
 
 H38-B正式run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_fixed_20260908_133755`，源码`c5932690f43b478fb05687ccf58e6834b0243a32`。best step60000：global S/A `0.024991/0.016406`、worst S/A `0.047077/0.025066`、p99/max `0.081572/1.611736`、contact 100%、latent整组ratio `18.83/21.42/24.47`；原summary门禁FAIL，按新门禁重算仍FAIL、score `1.24953`。
 

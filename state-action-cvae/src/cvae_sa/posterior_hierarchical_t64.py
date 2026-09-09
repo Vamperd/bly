@@ -133,6 +133,40 @@ def configure_optimizer(
     return optimizer, scheduler, contract
 
 
+def configure_continuation_scheduler(
+    optimizer: torch.optim.Optimizer,
+    continuation: dict[str, Any],
+    additional_steps: int,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    peaks = (
+        float(continuation["slow_peak_learning_rate"]),
+        float(continuation["fast_peak_learning_rate"]),
+    )
+    minimum = float(continuation["minimum_learning_rate"])
+    warmup = int(continuation["warmup_steps"])
+    if len(optimizer.param_groups) != len(peaks):
+        raise ValueError("H50 continuation expects exactly two optimizer groups")
+    if not all(minimum <= peak for peak in peaks):
+        raise ValueError("H50 continuation peak learning rates must be at least the minimum")
+    for group, peak in zip(optimizer.param_groups, peaks, strict=True):
+        group["lr"] = peak
+        group["initial_lr"] = peak
+
+    def multiplier(step: int, peak: float) -> float:
+        minimum_ratio = minimum / peak
+        if step < warmup:
+            return minimum_ratio + (1.0 - minimum_ratio) * step / max(warmup, 1)
+        progress = min((step - warmup) / max(additional_steps - warmup, 1), 1.0)
+        return minimum_ratio + (1.0 - minimum_ratio) * 0.5 * (
+            1.0 + math.cos(math.pi * progress)
+        )
+
+    return torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        [lambda step, peak=peak: multiplier(step, peak) for peak in peaks],
+    )
+
+
 def _model_signature(config: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "kind", "profile", "d_model", "posterior_encoder_layers", "condition_encoder_layers",
@@ -308,6 +342,145 @@ def validate_h50_authorization(
     }
 
 
+def validate_h50_continuation_source(
+    dataset_run: Path,
+    resume_run: Path | None,
+    *,
+    dataset_hash: str,
+    window_hash: str,
+    fixture_hash: str,
+    config: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Admit only the completed, improving, narrowly failed formal H50-A run."""
+    if resume_run is None:
+        raise ValueError("H50-A continuation requires CVAE_POSTERIOR_HIERARCHICAL_RESUME_RUN")
+    run = resume_run.expanduser().resolve()
+    summary_path = run / "manifests/posterior_hierarchical_t64_summary.json"
+    checkpoint_path = run / "checkpoints/last.pt"
+    execution_path = run / "markers/cvae_posterior_hierarchical_t64_execution.ok"
+    failure_path = run / "markers/cvae.failed"
+    if not summary_path.is_file() or not checkpoint_path.is_file():
+        raise ValueError("H50-A continuation source is missing its summary or last.pt")
+    summary = load_json(summary_path)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    contract = config["training"].get("continuation", {})
+    source_step = int(contract.get("source_optimizer_step", -1))
+    maximum_score = float(contract.get("maximum_source_fit_score", -1.0))
+    last_three = summary.get("last_three_evaluations", [])
+    last_steps = [int(row.get("optimizer_step", -1)) for row in last_three]
+    scores = [float(row.get("fit_gate", {}).get("score", math.inf)) for row in last_three]
+    expected_last_steps = [source_step - 2000, source_step - 1000, source_step]
+    source_sha256 = file_sha256(checkpoint_path)
+    source_authorization = summary.get("h50_authorization", {})
+    authorization_checks = source_authorization.get("checks", {})
+    expected_thresholds = {
+        key: float(value) for key, value in config["training"]["fit_thresholds"].items()
+    }
+    checkpoint_scheduler = checkpoint.get("scheduler", {})
+    checks = {
+        "profile": summary.get("profile") == "H50",
+        "stage": summary.get("stage") == "autoencode",
+        "formal": not bool(summary.get("smoke", True)),
+        "execution_pass": bool(summary.get("execution_pass")),
+        "execution_marker": execution_path.is_file(),
+        "quality_failed": summary.get("quality_pass") is False,
+        "failure_marker": bool(
+            failure_path.is_file()
+            and failure_path.read_text(encoding="utf-8").strip()
+            == "QUALITY_FAIL execution_complete=true stage=autoencode fit=false"
+        ),
+        "dataset_path": Path(str(summary.get("dataset_run", ""))).resolve()
+        == dataset_run.expanduser().resolve(),
+        "dataset_hash": summary.get("dataset_manifest_sha256") == dataset_hash,
+        "window_hash": summary.get("selected_windows_sha256") == window_hash,
+        "fixture_hash": summary.get("fixture_bitmap_sha256") == fixture_hash,
+        "source_completed_step": int(summary.get("completed_optimizer_steps", -1)) == source_step,
+        "source_best_at_last": int(summary.get("best_optimizer_step", -1)) == source_step,
+        "last_three_steps": last_steps == expected_last_steps,
+        "last_three_failed": len(last_three) == 3 and all(
+            not bool(row.get("fit_gate", {}).get("passed", True)) for row in last_three
+        ),
+        "last_three_improving": len(scores) == 3 and scores[0] > scores[1] > scores[2],
+        "near_gate": len(scores) == 3 and math.isfinite(scores[-1]) and scores[-1] <= maximum_score,
+        "fit_thresholds": summary.get("best_evaluation", {}).get("fit_gate", {}).get("thresholds")
+        == expected_thresholds,
+        "h50_authorization": bool(authorization_checks) and all(authorization_checks.values()),
+        "checkpoint_format": checkpoint.get("format_version")
+        == "sonic_posterior_hierarchical_t64_checkpoint_v1",
+        "checkpoint_stage": checkpoint.get("stage") == "autoencode",
+        "checkpoint_step": int(checkpoint.get("optimizer_step", -1)) == source_step,
+        "checkpoint_dataset_hash": checkpoint.get("dataset_manifest_sha256") == dataset_hash,
+        "checkpoint_window_hash": checkpoint.get("selected_windows_sha256") == window_hash,
+        "checkpoint_fixture_hash": checkpoint.get("fixture_bitmap_sha256") == fixture_hash,
+        "checkpoint_model_signature": checkpoint.get("model_signature")
+        == _model_signature(config["model"]),
+        "checkpoint_parameter_count": int(checkpoint.get("parameter_count", -1))
+        == int(config["model"]["parameter_count"]),
+        "model_state": isinstance(checkpoint.get("model"), dict),
+        "optimizer_state": isinstance(checkpoint.get("optimizer"), dict)
+        and bool(checkpoint.get("optimizer", {}).get("state")),
+        "scheduler_state": isinstance(checkpoint_scheduler, dict),
+        "scheduler_at_source_step": int(checkpoint_scheduler.get("last_epoch", -1)) == source_step,
+        "checkpoint_readback_sha256": summary.get("checkpoint_readback", {}).get("sha256")
+        == source_sha256,
+    }
+    failed = [key for key, value in checks.items() if not value]
+    if failed:
+        raise ValueError(f"H50-A continuation source failed: {failed}")
+    return checkpoint, {
+        "mode": "resume_optimizer_tail",
+        "source_run": str(run),
+        "source_summary": str(summary_path),
+        "source_summary_sha256": file_sha256(summary_path),
+        "source_checkpoint": str(checkpoint_path),
+        "source_checkpoint_sha256": source_sha256,
+        "source_optimizer_step": source_step,
+        "source_best_fit_score": float(summary["best_fit_score"]),
+        "source_last_three_scores": scores,
+        "source_quality_pass": False,
+        "model_only": False,
+        "model_optimizer_restored": True,
+        "source_scheduler_validated_then_replaced": True,
+        "loader_rng_restored": False,
+        "loader_rng_note": (
+            "the v1 source checkpoint did not store DataLoader generator state; "
+            "the continuation restarts ordering with its separately locked seed"
+        ),
+        "checks": checks,
+    }
+
+
+def compare_continuation_reproduction(
+    actual: dict[str, Any], expected: dict[str, Any]
+) -> dict[str, Any]:
+    scalar_keys = (
+        "global_state_rmse", "global_action_rmse", "worst_mask_state_rmse",
+        "worst_mask_action_rmse", "continuous_p99_abs", "continuous_max_abs",
+        "contact_accuracy",
+    )
+    checks = {
+        key: math.isclose(
+            float(actual.get(key, math.inf)), float(expected.get(key, -math.inf)),
+            rel_tol=1e-5, abs_tol=1e-7,
+        )
+        for key in scalar_keys
+    }
+    checks["fit_score"] = math.isclose(
+        float(actual.get("fit_gate", {}).get("score", math.inf)),
+        float(expected.get("fit_gate", {}).get("score", -math.inf)),
+        rel_tol=1e-5, abs_tol=1e-7,
+    )
+    actual_ratios = actual.get("latent_dependence", {}).get("main_ratios", {})
+    expected_ratios = expected.get("latent_dependence", {}).get("main_ratios", {})
+    for name in ("zero", "cross_window", "cross_motion"):
+        checks[f"{name}_latent_ratio"] = math.isclose(
+            float(actual_ratios.get(name, math.inf)),
+            float(expected_ratios.get(name, -math.inf)),
+            rel_tol=1e-5, abs_tol=1e-7,
+        )
+    return {"passed": all(checks.values()), "checks": checks}
+
+
 def engineering_checks(
     model: HierarchicalPosteriorTransformer,
     cpu_batch: dict[str, Any],
@@ -406,6 +579,7 @@ def run_experiment(
     f4g_run: Path,
     init_checkpoint: Path | None,
     h38_failed_run: Path | None,
+    resume_run: Path | None,
     smoke: bool,
 ) -> dict[str, Any]:
     from .dataset import StateActionWindowDataset
@@ -414,6 +588,11 @@ def run_experiment(
         raise ValueError(f"hierarchical stage must be one of {STAGES}")
     if smoke and stage != "autoencode":
         raise ValueError("hierarchical smoke always exercises the autoencode path")
+    continuation = resume_run is not None
+    if continuation and (smoke or stage != "autoencode" or config["model"]["profile"] != "H50"):
+        raise ValueError("hierarchical continuation is restricted to formal H50 autoencode")
+    if continuation and (init_checkpoint is not None or h38_failed_run is not None):
+        raise ValueError("H50 continuation cannot also use init checkpoint or H38 authorization")
     dataset_run = dataset_run.expanduser().resolve()
     output_run = output_run.expanduser().resolve()
     protected = [dataset_run, f4g_run]
@@ -421,6 +600,8 @@ def run_experiment(
         protected.append(init_checkpoint.expanduser().resolve().parents[1])
     if h38_failed_run is not None:
         protected.append(h38_failed_run)
+    if resume_run is not None:
+        protected.append(resume_run)
     assert_output_isolated(output_run, protected)
     for child in ("data", "manifests", "markers", "logs", "checkpoints", "plots", "videos"):
         (output_run / child).mkdir(parents=True, exist_ok=True)
@@ -442,7 +623,7 @@ def run_experiment(
     dataset_hash = file_sha256(dataset_run / "manifests/dataset_manifest.json")
     model_config = config["model"]
     h50_authorization = None
-    if model_config["profile"] == "H50" and stage == "autoencode":
+    if model_config["profile"] == "H50" and stage == "autoencode" and not continuation:
         h50_authorization = validate_h50_authorization(dataset_run, h38_failed_run)
     elif h38_failed_run is not None:
         raise ValueError("H38 failure authorization is accepted only for H50-A")
@@ -455,7 +636,7 @@ def run_experiment(
     if count != int(model_config["parameter_count"]) or not low <= count <= high:
         raise ValueError(f"hierarchical parameter count {count} violates the locked reference")
     initialization: dict[str, Any]
-    if stage == "autoencode":
+    if stage == "autoencode" and not continuation:
         if init_checkpoint is not None:
             raise ValueError("hierarchical autoencoding must start from random initialization")
         seed_everything(int(config["seed"]))
@@ -466,7 +647,7 @@ def run_experiment(
             "mode": "random", "seed": int(config["seed"]), "model_only": False,
             "optimizer_scheduler_rng_restored": False,
         }
-    else:
+    elif stage != "autoencode":
         if init_checkpoint is None:
             raise ValueError(f"hierarchical {stage} requires a best_fit.pt model-only source")
         checkpoint, initialization = validate_source_checkpoint(
@@ -475,6 +656,8 @@ def run_experiment(
         )
         model.load_state_dict(checkpoint["model"], strict=True)
         seed_everything(int(config["training_seed"]))
+    else:
+        initialization = {}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     workers = 0 if smoke else int(data.get("num_workers", 4))
@@ -501,7 +684,11 @@ def run_experiment(
         )
         eval_maker = lambda batch: make_physical_masks(batch, heldout_seed, held_out=True)
         evaluation_scope = "seen 32-motion T64 windows; 16 deterministic held-out physical Masks per window"
-    generator = torch.Generator().manual_seed(int(config["training_seed"]))
+    continuation_config = training.get("continuation", {}) if continuation else {}
+    active_training_seed = int(
+        continuation_config.get("training_seed", config["training_seed"])
+    )
+    generator = torch.Generator().manual_seed(active_training_seed)
     train_loader = DataLoader(
         train_data, batch_size=micro, shuffle=True, num_workers=workers, generator=generator,
         drop_last=not smoke, pin_memory=device.type == "cuda", persistent_workers=workers > 0,
@@ -512,16 +699,70 @@ def run_experiment(
     )
     base_loader = DataLoader(indexed, batch_size=micro, shuffle=False, num_workers=workers)
     fixture_hash = mask_bank_sha256(validation_loader, eval_maker)
+    resume_checkpoint: dict[str, Any] | None = None
+    source_best_evaluation: dict[str, Any] | None = None
+    if continuation:
+        resume_checkpoint, initialization = validate_h50_continuation_source(
+            dataset_run, resume_run, dataset_hash=dataset_hash, window_hash=window_hash,
+            fixture_hash=fixture_hash, config=config,
+        )
+        model.load_state_dict(resume_checkpoint["model"], strict=True)
+        source_summary = load_json(Path(initialization["source_summary"]))
+        source_best_evaluation = source_summary["best_evaluation"]
     first_batch = next(iter(base_loader))
     engineering = engineering_checks(model, first_batch, device, fixture_seed)
     if not engineering["passed"]:
         raise RuntimeError(f"hierarchical engineering contract failed: {engineering['checks']}")
     stage_config = training["stages"][stage]
-    max_steps = 2 if smoke else int(stage_config["max_optimizer_steps"])
-    validation_interval = 2 if smoke else int(stage_config["validation_interval"])
-    optimizer, scheduler, optimizer_contract = configure_optimizer(model, training, max_steps)
-    # A/B/R never inherit optimizer, scheduler, loader, or RNG state.
-    seed_everything(int(config["training_seed"]))
+    start_step = int(continuation_config.get("source_optimizer_step", 0))
+    additional_steps = int(
+        continuation_config.get("additional_optimizer_steps", stage_config["max_optimizer_steps"])
+    )
+    final_step = 2 if smoke else start_step + additional_steps
+    validation_interval = 2 if smoke else int(
+        continuation_config.get("validation_interval", stage_config["validation_interval"])
+    )
+    scheduler_horizon = int(stage_config["max_optimizer_steps"])
+    optimizer, scheduler, optimizer_contract = configure_optimizer(
+        model, training, scheduler_horizon
+    )
+    optimizer_restore: dict[str, Any] | None = None
+    if continuation:
+        assert resume_checkpoint is not None
+        optimizer.load_state_dict(resume_checkpoint["optimizer"])
+        scheduler.load_state_dict(resume_checkpoint["scheduler"])
+        minimum_lr = float(training["minimum_learning_rate"])
+        restore_checks = {
+            "optimizer_group_count": len(optimizer.param_groups) == 2,
+            "optimizer_group_names": [group["name"] for group in optimizer.param_groups]
+            == ["encoders_self_attention_ffn", "latent_cross_film_query_output"],
+            "scheduler_last_epoch": int(scheduler.last_epoch) == start_step,
+            "terminal_learning_rates": all(
+                math.isclose(float(group["lr"]), minimum_lr, rel_tol=1e-6, abs_tol=1e-12)
+                for group in optimizer.param_groups
+            ),
+        }
+        if not all(restore_checks.values()):
+            raise RuntimeError(f"H50 continuation optimizer restore failed: {restore_checks}")
+        source_learning_rates = {
+            group["name"]: float(group["lr"]) for group in optimizer.param_groups
+        }
+        scheduler = configure_continuation_scheduler(
+            optimizer, continuation_config, additional_steps
+        )
+        optimizer_restore = {
+            "passed": True,
+            "checks": restore_checks,
+            "source_scheduler_horizon": scheduler_horizon,
+            "scheduler_policy": continuation_config["scheduler_policy"],
+            "source_learning_rates": source_learning_rates,
+            "tail_initial_learning_rates": {
+                group["name"]: float(group["lr"]) for group in optimizer.param_groups
+            },
+        }
+    # Fresh stages reset every RNG. The v1 checkpoint has no DataLoader-generator
+    # state, so continuation restarts sample ordering with a separately locked seed.
+    seed_everything(active_training_seed)
     records: list[dict[str, Any]] = []
     metrics_path = output_run / "logs/metrics.jsonl"
     state_std = torch.from_numpy(base.state_std)
@@ -551,11 +792,40 @@ def run_experiment(
         append_jsonl(metrics_path, row)
         return result
 
-    initial = run_evaluation(0)
+    initial = run_evaluation(start_step)
+    source_reproduction: dict[str, Any] | None = None
+    if continuation:
+        assert source_best_evaluation is not None
+        source_reproduction = compare_continuation_reproduction(
+            initial, source_best_evaluation
+        )
+        if not source_reproduction["passed"]:
+            raise RuntimeError(
+                "H50 continuation failed to reproduce its source checkpoint: "
+                f"{source_reproduction['checks']}"
+            )
+        best = initial
+        best_score = float(initial["fit_gate"]["score"])
+        best_step = start_step
     stream = _infinite(train_loader)
     accumulation = int(training["gradient_accumulation"])
     optimizer.zero_grad(set_to_none=True)
-    for step in range(1, max_steps + 1):
+    if continuation:
+        atomic_torch_save(
+            output_run / "checkpoints/best_fit.pt",
+            _checkpoint(
+                model, optimizer, scheduler, config, stage, dataset_hash, window_hash,
+                fixture_hash, start_step, best_score,
+            ),
+        )
+        atomic_torch_save(
+            output_run / "checkpoints/last.pt",
+            _checkpoint(
+                model, optimizer, scheduler, config, stage, dataset_hash, window_hash,
+                fixture_hash, start_step, best_score,
+            ),
+        )
+    for step in range(start_step + 1, final_step + 1):
         started = time.perf_counter()
         aggregate = {key: 0.0 for key in ("total", "state", "action", "contact")}
         sampled: list[dict[str, Any]] = []
@@ -594,7 +864,7 @@ def run_experiment(
         }
         records.append(row)
         append_jsonl(metrics_path, row)
-        if step % validation_interval and step != max_steps:
+        if step % validation_interval and step != final_step:
             continue
         result = run_evaluation(step)
         score = float(result["fit_gate"]["score"])
@@ -635,7 +905,10 @@ def run_experiment(
     next_step = hierarchical_next_step(model_config["profile"], stage, quality_pass)
     summary = {
         "format_version": "sonic_posterior_hierarchical_t64_summary_v1",
-        "experiment": f"{model_config['profile']}-{stage}",
+        "experiment": (
+            f"{model_config['profile']}-{stage}-continue15k"
+            if continuation else f"{model_config['profile']}-{stage}"
+        ),
         "profile": model_config["profile"],
         "stage": stage,
         "execution_pass": True,
@@ -659,6 +932,7 @@ def run_experiment(
         "evaluation_scope": evaluation_scope,
         "model_contract": {**model_config, "actual_parameter_count": count},
         "optimizer_contract": optimizer_contract,
+        "optimizer_restore": optimizer_restore,
         "regularization": {
             "dropout": float(model_config["dropout"]),
             "kl_beta": float(training["kl_beta"]),
@@ -667,12 +941,25 @@ def run_experiment(
         "initialization": initialization,
         "f4g_authorization": f4g,
         "h50_authorization": h50_authorization,
+        "continuation": ({
+            "enabled": True,
+            "source_optimizer_step": start_step,
+            "additional_optimizer_step_budget": additional_steps,
+            "additional_completed_optimizer_steps": step - start_step,
+            "final_optimizer_step_budget": final_step,
+            "training_seed": active_training_seed,
+            "model_optimizer_restored": True,
+            "source_scheduler_validated_then_replaced": True,
+            "loader_rng_restored": False,
+            "source_reproduction": source_reproduction,
+        } if continuation else {"enabled": False}),
         "engineering_checks": engineering,
         "completed_optimizer_steps": step,
         "best_optimizer_step": best_step,
         "best_fit_score": best_score,
         "best_evaluation": best,
-        "step0_evaluation": initial,
+        "initial_evaluation": initial,
+        "step0_evaluation": initial if not continuation else None,
         "last_three_evaluations": last_three,
         "checkpoint_readback": readback,
         "plots": plots,
@@ -682,6 +969,11 @@ def run_experiment(
     atomic_write_json(output_run / "manifests/posterior_hierarchical_t64_summary.json", summary)
     marker = "cvae_posterior_hierarchical_t64_smoke.ok" if smoke else "cvae_posterior_hierarchical_t64_execution.ok"
     atomic_write_text(output_run / "markers" / marker, "PASS\n")
+    if continuation:
+        atomic_write_text(
+            output_run / "markers/cvae_posterior_hierarchical_t64_continuation_execution.ok",
+            "PASS\n",
+        )
     if quality_pass:
         atomic_write_text(
             output_run / f"markers/cvae_posterior_hierarchical_t64_{stage}_fit.ok", "PASS\n"
@@ -709,6 +1001,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage", choices=STAGES, required=True)
     parser.add_argument("--init-checkpoint", type=Path)
     parser.add_argument("--h38-failed-run", type=Path)
+    parser.add_argument("--resume-run", type=Path)
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args()
 
@@ -719,7 +1012,8 @@ def main() -> int:
     summary = run_experiment(
         args.dataset_run, args.output_run, config, stage=args.stage,
         f4g_run=args.f4g_run, init_checkpoint=args.init_checkpoint,
-        h38_failed_run=args.h38_failed_run, smoke=args.smoke,
+        h38_failed_run=args.h38_failed_run, resume_run=args.resume_run,
+        smoke=args.smoke,
     )
     print("Posterior hierarchical T64: PASS (execution complete)")
     print(json.dumps({
