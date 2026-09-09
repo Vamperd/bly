@@ -1,8 +1,8 @@
 # 活动合同：32-Motion、T64 层级 Latent Transformer 容量实验
 
-最后更新：2026-09-08
+最后更新：2026-09-09
 
-状态：H38-A已从随机初始化跑满30k并质量FAIL。A是全遮挡latent压力测试，因此不再作为B的硬门槛。A→B准入现要求正式execution、summary/checkpoint身份及质量marker一致，但允许A质量失败；B→R仍必须fit PASS。当前唯一下一步是从A的`best_fit.pt`做model-only初始化运行H38-B；不得启动H50。历史run、源HDF5和checkpoint保持只读。事实结果仍以
+状态：H38-A已跑满30k并质量FAIL；H38-B也已从A的最佳权重跑满60k并质量FAIL。B的Action有所改善，但State全局误差几乎未变，`state_rollout`为最难Mask，宽松诊断仍由p99控制失败。A/B失败链现已满足唯一一次H50-A参数规模复核的授权；H38-R仍因B没有fit marker而阻塞。历史run、源HDF5和checkpoint保持只读。事实结果仍以
 [plan.md](plan.md)为唯一台账，安全规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 问题与顺序
@@ -12,14 +12,15 @@
 
 ```text
 H38-A full-both autoencoding（已FAIL，仅作诊断）
-→ H38-B fixed physical Masks（仍需执行）
-→ H38-R held-out random physical Masks
+→ H38-B fixed physical Masks（已FAIL）
+→ H50-A full-both autoencoding（唯一一次规模复核）
+→ 仅H50-A PASS时继续H50-B/H50-R
 → 冻结KL=0基线后再实现KL三路径
 ```
 
-H38-A不再是H38-B的硬门槛。A失败而B通过表示latent不能独立还原全部细节，但结合可见条件足以完成
-目标任务；A通过而B失败才明确指向condition融合。只有A/B均失败后才讨论一次H50复核。R之前不实现
-prior、logvar、采样或KL。
+H38-A不再是H38-B的硬门槛。现在A/B均失败：B说明加入物理可见条件后Action较好，但State rollout/
+gap仍未达到门禁。下一步只用H50-A判断增加约32%参数是否能显著降低全遮挡State误差；它不是默认
+成功路线。H50-A失败即停止扩模，PASS才以H50继续B/R。R之前不实现prior、logvar、采样或KL。
 
 ## 2. 固定数据与Mask合同
 
@@ -107,9 +108,9 @@ scheduler、loader与RNG。
 |---|---|---|
 | H38 smoke | 前2 window、step0+2 step、full-both | 工程PASS；不形成质量结论 |
 | H38-A | full-both，随机初始化，30k，每1k评测 | 已质量FAIL；仍进入H38-B |
-| H38-B | 从A `best_fit.pt` model-only；8 fixed Mask，最多60k，每2k | 进入H38-R |
-| H38-R | 从B `best_fit.pt` model-only；动态Mask30k，每2k held-out评测 | 冻结KL0基线 |
-| H50复核 | 至少等H38-A/B均FAIL后才授权 | 根据A/B分项结果确定复核阶段 |
+| H38-B | 从A `best_fit.pt` model-only；8 fixed Mask，60k，每2k | 已质量FAIL；不进入H38-R |
+| H38-R（BLOCKED） | 从B `best_fit.pt` model-only；动态Mask30k，每2k held-out评测 | 只有B fit后才冻结KL0基线 |
+| H50-A复核 | A/B均FAIL后授权；full-both、随机初始化、20k，每1k | PASS才继续H50-B；FAIL停止扩模 |
 
 fit门禁必须连续三次完整评测同时满足：global State/Action RMSE各`≤1e-2`；每类Mask的worst-window
 State/Action RMSE各`≤2e-2`；continuous p99 absolute error `≤5e-2`；contact accuracy精确100%；
@@ -138,28 +139,27 @@ find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
 ls -lh "$RUN/checkpoints"
 ```
 
-当前运行B；它从A的最佳checkpoint做model-only初始化，A不需要fit marker。B通过后才执行R：
+H38-B已完成且质量失败，以下旧B/R命令不再是当前执行入口。当前只执行H50-A；它不加载H38 checkpoint，失败的H38-B run仅用于授权审计：
 
 ```bash
 cd /home/helloworld/bly/state-action-cvae
 source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
 
 unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
-unset CVAE_POSTERIOR_H38_FAILED_RUN
+unset CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT
 export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
 export CVAE_POSTERIOR_DIRECT_OUTPUT_RUN=/home/helloworld/bly/runs/cvae_posterior_direct_output_oracle_f4go_t64_20260908_023727
-export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H38
-export CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633/checkpoints/best_fit.pt
+export CVAE_POSTERIOR_HIERARCHICAL_PROFILE=H50
+export CVAE_POSTERIOR_H38_FAILED_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_fixed_20260908_133755
 
-test -f "/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_20260908_030633/markers/cvae_posterior_hierarchical_t64_execution.ok"
-test -f "$CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT"
-bash ./cvae_repro.sh posterior-hierarchical-t64-fixed
-
-export CVAE_POSTERIOR_HIERARCHICAL_INIT_CHECKPOINT=/home/helloworld/bly/runs/<h38_b_run>/checkpoints/best_fit.pt
-bash ./cvae_repro.sh posterior-hierarchical-t64-random
+test -f "$CVAE_POSTERIOR_H38_FAILED_RUN/markers/cvae_posterior_hierarchical_t64_execution.ok"
+test -f "$CVAE_POSTERIOR_H38_FAILED_RUN/markers/cvae.failed"
+bash ./cvae_repro.sh posterior-hierarchical-t64-autoencode
 ```
 
-H50尚未获授权；只有A/B均失败且链路身份完整时才允许一次复核。上面的R命令仅在B生成fixed fit marker后使用。
+H50-A已获一次性授权。若它FAIL，不增加H50步数或建立H64；若它PASS，再从其`best_fit.pt`按同profile运行fixed，fixed PASS后才运行random。
+
+H38-B正式run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_fixed_20260908_133755`，源码`c5932690f43b478fb05687ccf58e6834b0243a32`。best step60000：global S/A `0.024991/0.016406`、worst S/A `0.047077/0.025066`、p99/max `0.081572/1.611736`、contact 100%、latent整组ratio `18.83/21.42/24.47`；official与宽松诊断均FAIL。
 
 每次run结束后先回传summary、最后三个evaluation、marker列表、checkpoint列表和`source_commit.txt`，
 再把实际路径、hash、指标、结论与唯一下一步写回plan.md。smoke checkpoint不得用于正式初始化。
