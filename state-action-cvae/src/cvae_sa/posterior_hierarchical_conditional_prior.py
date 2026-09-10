@@ -30,6 +30,7 @@ from .posterior_t64_protocol import (
     _donor_maps,
     _svg,
     append_jsonl,
+    deterministic_quantile,
     evaluate,
     make_autoencode_masks,
     make_physical_masks,
@@ -753,7 +754,7 @@ def evaluate_full_both_conditional_prior(
     return {
         "global_state_rmse": math.sqrt(state_sse / state_count),
         "global_action_rmse": math.sqrt(action_sse / action_count),
-        "continuous_p99_abs": float(torch.quantile(values, 0.99)),
+        "continuous_p99_abs": deterministic_quantile(values, 0.99),
         "continuous_max_abs": float(values.max()),
         "contact_accuracy": contact_correct / contact_count,
         "gate_role": "non-identifiability diagnostic only; excluded from every PASS decision",
@@ -902,13 +903,13 @@ def evaluate_teacher_preservation(
         "global_action_rmse": math.sqrt(truth_action_sse / action_count),
         "worst_mask_state_rmse": worst_state,
         "worst_mask_action_rmse": worst_action,
-        "continuous_p99_abs": float(torch.quantile(torch.cat(truth_abs), 0.99)),
+        "continuous_p99_abs": deterministic_quantile(torch.cat(truth_abs), 0.99),
         "contact_accuracy": contact_correct / contact_count,
         "functional_contact_agreement": functional_contact_correct
         / functional_contact_count,
         "functional_state_rmse": math.sqrt(functional_state_sse / state_count),
         "functional_action_rmse": math.sqrt(functional_action_sse / action_count),
-        "functional_p99_abs": float(torch.quantile(torch.cat(functional_abs), 0.99)),
+        "functional_p99_abs": deterministic_quantile(torch.cat(functional_abs), 0.99),
     }
     truth_limits = {
         key: min(float(baseline[key]) * multiplier, float(fit_thresholds[key]))
@@ -1751,7 +1752,7 @@ def _source_truth_metrics(
         "global_action_rmse": math.sqrt(action_sse / action_count),
         "worst_mask_state_rmse": worst_state,
         "worst_mask_action_rmse": worst_action,
-        "continuous_p99_abs": float(torch.quantile(torch.cat(all_abs), 0.99)),
+        "continuous_p99_abs": deterministic_quantile(torch.cat(all_abs), 0.99),
     }
 
 

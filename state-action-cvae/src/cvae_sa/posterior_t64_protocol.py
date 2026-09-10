@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+import numpy as np
 import torch
 from torch.nn import functional as F
 
@@ -25,6 +26,16 @@ PHYSICAL_MASK_NAMES = (
     "joint_gap_8",
 )
 DIAGNOSTIC_MASK_NAMES = ("full_state", "full_both")
+
+
+def deterministic_quantile(values: torch.Tensor, quantile: float) -> float:
+    """Compute an exact CPU quantile without PyTorch's ~2**24 element limit."""
+    if values.numel() <= 0:
+        raise ValueError("quantile input must contain at least one value")
+    if not 0.0 <= quantile <= 1.0:
+        raise ValueError("quantile must be in [0, 1]")
+    array = values.detach().to(device="cpu", dtype=torch.float32).contiguous().numpy()
+    return float(np.quantile(array, quantile, overwrite_input=True))
 
 
 def identity(batch: dict[str, Any], index: int) -> tuple[Any, ...]:
@@ -564,7 +575,7 @@ def evaluate(
         "worst_mask_action_rmse": worst_action,
         "worst_state_rmse": worst_state,
         "worst_action_rmse": worst_action,
-        "continuous_p99_abs": float(torch.quantile(abs_values.float(), 0.99)),
+        "continuous_p99_abs": deterministic_quantile(abs_values, 0.99),
         "continuous_max_abs": float(abs_values.max()),
         "contact_accuracy": contact_correct / contact_count if contact_count else 1.0,
         "reconstruction_loss": {
@@ -588,9 +599,7 @@ def evaluate(
         metrics["full_sequence_reconstruction"] = {
             "global_state_rmse": math.sqrt(full_means["state"]),
             "global_action_rmse": math.sqrt(full_means["action"]),
-            "continuous_p99_abs": float(
-                torch.quantile(full_absolute.float(), 0.99)
-            ),
+            "continuous_p99_abs": deterministic_quantile(full_absolute, 0.99),
             "continuous_max_abs": float(full_absolute.max()),
             "contact_accuracy": full_contact_correct / full_counts["contact"],
             "reconstruction_loss": {

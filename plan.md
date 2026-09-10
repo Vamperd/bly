@@ -29,11 +29,11 @@
 - B没有保持A的full-both能力：同一checkpoint在B step0的full-both State/Action为`0.019671/0.014758`，到step60000变为`0.060442/0.016711`，max abs从`0.693393`恶化到`21.894020`，contact从100%降到`99.9519%`。52k→60k的full-both State仅`0.060971→0.060442`，处于明显平台。由于B训练bank不含full-both且重启高学习率，这构成condition适配伴随的A能力遗忘。
 - H50-R路线已取消：H50-B没有质量PASS，且直接condition融合会破坏H50-A的canonical解码能力。
 - H50-CRA在正式训练前被设计复审判定为错误方向并取消。它会让完整posterior latent始终承担答案、condition只做decoder侧修正，不能回答“Mask条件能否独立预测latent”。CRA没有Ubuntu正式结果，不形成模型结论。
-- H50-CPD代码现已在Windows实现：Mask后的可见序列只进入新的conditional prior encoder，预测一个global和16个local latent；冻结的H50-A decoder只接收这些latent和有效长度，不直接读取可见值或Mask。当前仍为确定性mean、`KL=0`，尚无Ubuntu工程或质量结果。
+- H50-CPD代码现已在Windows实现：Mask后的可见序列只进入新的conditional prior encoder，预测一个global和16个local latent；冻结的H50-A decoder只接收这些latent和有效长度，不直接读取可见值或Mask。Ubuntu工程smoke run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_smoke_20260911_022214`已完成2 step并报告`execution complete`；这只证明真实数据/CUDA/训练链路可运行。`quality_pass=false`、`latent_alignment_pass=false`、score `168.52648`及`STOP_CONDITIONAL_PRIOR_LATENT_ALIGNMENT_FAILED`均来自2-step通用质量判断，不构成conditional prior失败结论。source commit和完整marker尚未回传。
 
 H50-CPD固定读取H50-A续训run的step34000 `last.pt`。51,005,283参数的H50-A teacher/base与decoder先全部冻结；新增6层、宽448的conditional prior共14,779,456参数，总计65,784,739参数。teacher以完整序列产生canonical latent作为监督，student以Mask序列预测同拓扑latent，再由严格canonical decoder接口输出完整序列。
 
-当前唯一下一步：同步代码后执行`posterior-hierarchical-prior-smoke`。smoke只验证H50-A源准入、teacher缓存、Mask真值隔离、strict decoder接口、CUDA、梯度和checkpoint；审核通过后才从H50-A重新运行50k上限的P0/P1/P2正式蒸馏。
+正式P0/P1/P2首次启动在step0 held-out全量评测中停止：评测元素数超过PyTorch `quantile()`支持上限，尚未发生任何optimizer更新，因此是工程失败而非latent或重建失败。Windows已把T64/CPD全部p99路径改成确定性CPU quantile，仍对全部元素精确计算，不抽样、不近似且不改变门禁；新增16,777,217元素回归测试已通过。当前唯一下一步：同步修复后从H50-A重新新建run运行50k上限的`posterior-hierarchical-prior-train`，不能继承smoke或失败run。
 
 F4G smoke报告语义修复的历史提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`。H50-CPD实现当前位于Windows工作树；正式Ubuntu run仍以用户同步后由run写入的`source_commit.txt`为准，不预填提交号。
 
@@ -46,8 +46,8 @@ H38-A 完整序列重建（已FAIL，仅作latent压力诊断）
 → H50-A受控续训（step 34000三连fit PASS）
 → H50-B固定Mask（60k；仅global State超1.92%，但full-both明显遗忘）
 → H50-CRA（CANCELLED/SUPERSEDED，未正式运行）
-→ H50-CPD smoke（READY，待Ubuntu）
-→ P0/P1/P2冻结decoder蒸馏（最多50k）
+→ H50-CPD smoke（工程PASS；无质量结论）
+→ P0/P1/P2冻结decoder蒸馏（READY，最多50k）
   ├─ latent FAIL：停止，调查conditional prior
   ├─ latent与重建PASS：冻结KL=0基线
   └─ latent PASS但重建FAIL：D1受控latent接口适配；严格满足条件才允许D2

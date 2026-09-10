@@ -700,7 +700,10 @@ H50-CRA在Ubuntu正式训练前经设计复审取消并由H50-CPD取代。CRA让
 condition只在decoder侧作修正，不能回答Mask条件本身能否预测latent；因此CRA模型、训练模块、配置、
 Shell入口和专属测试均已删除。没有CRA正式run，不得为它写模型质量结论。
 
-H50-CPD当前在Windows实现、尚未收到Ubuntu smoke或正式质量结果。新增模型
+H50-CPD已完成Ubuntu工程smoke，但尚无正式质量结果。smoke run为
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_smoke_20260911_022214`，
+完成2 step并报告execution complete；`quality_pass=false`、`latent_alignment_pass=false`及通用STOP建议均无
+容量含义，source commit和完整marker尚未回传。新增模型
 `physics_hierarchical_conditional_prior_transformer`严格读取H50-A续训run的step34000 `last.pt`。
 冻结的完整序列posterior产生teacher `global[256]+local[16,128]`；Mask序列只进入新6层宽448的
 conditional prior并预测同拓扑latent。严格`decode_from_canonical_latents`只接受latent和有效长度，
@@ -712,7 +715,12 @@ full State/Action；训练/held-out seed为20260840/20260841。P0/P1/P2在decode
 依次从teacher latent主导转为重建主导。latent失败即停止；latent与重建均过则冻结KL=0基线；只有
 latent通过但重建失败才允许D1 latent接口适配，满足20%改善、最终score≤1.5和teacher保持后才允许D2。
 full-both prior只作不可辨识性报告。当前入口为`posterior-hierarchical-prior-smoke`、`...-train`和
-`...-decoder-adapt`；详细合同见`Next.md`，正式结果回填`plan.md`。KL三路径仍未实现。
+`...-decoder-adapt`；当前唯一下一步是从H50-A重新初始化运行正式`...-train`，不得继承smoke权重。
+详细合同见`Next.md`，正式结果回填`plan.md`。KL三路径仍未实现。
+
+正式`...-train`首次启动在step0全量评测时因PyTorch大张量`quantile()`限制停止，尚无optimizer更新，
+不得记作模型失败。Windows现已把T64/CPD全部p99计算替换为确定性CPU quantile，仍使用全部元素且不改变
+阈值，并通过16,777,217元素回归测试。Ubuntu同步后必须创建新run重跑，不得续用此次工程失败目录。
 
 ### 6.5 已完成 parent 训练
 

@@ -2,7 +2,7 @@
 
 最后更新：2026-09-11
 
-状态：代码已在Windows实现并通过静态/单元测试，尚未获得Ubuntu smoke或正式训练结果。H50-CRA已取消，不得再运行其入口。正式事实与历史结果见[plan.md](plan.md)，安全和交接规则见[AGENTS.md](AGENTS.md)。
+状态：Ubuntu smoke已完成工程验收，正式P0/P1/P2首次启动在step0全量评测前因PyTorch大张量`quantile()`限制停止，尚未发生optimizer更新，不形成模型结果。Windows已将全部p99计算替换为确定性CPU quantile并加入超过16,777,216元素的回归测试；待同步后须新建正式run重跑。smoke run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_smoke_20260911_022214`；其2-step质量与latent失败没有模型含义。H50-CRA已取消，不得再运行其入口。正式事实与历史结果见[plan.md](plan.md)，安全和交接规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 当前问题与正式数据流
 

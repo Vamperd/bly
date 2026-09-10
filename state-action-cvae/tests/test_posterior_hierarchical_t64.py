@@ -28,6 +28,7 @@ from cvae_sa.posterior_hierarchical_t64 import (
 )
 from cvae_sa.posterior_t64_protocol import (
     PHYSICAL_MASK_NAMES,
+    deterministic_quantile,
     evaluate,
     evaluate_latent_dependence,
     make_autoencode_masks,
@@ -86,6 +87,14 @@ class ItemDataset(Dataset[dict[str, object]]):
 
 
 class HierarchicalPosteriorT64Test(unittest.TestCase):
+    def test_quantile_supports_inputs_above_torch_limit(self) -> None:
+        count = 16_777_217
+        values = torch.arange(count, dtype=torch.float32)
+        expected = 0.99 * (count - 1)
+        self.assertAlmostEqual(
+            deterministic_quantile(values, 0.99), expected, delta=1.0
+        )
+
     def test_h38_h50_reference_parameter_counts(self) -> None:
         root = Path(__file__).resolve().parents[1]
         reference = json.loads((root / "configs/posterior_hierarchical_t64_reference.json").read_text())
