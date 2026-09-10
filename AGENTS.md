@@ -568,11 +568,12 @@ source、F4E、fixture/window/motion、完整训练身份、optimizer、初始�
 `RUN_DIRECT_OUTPUT_MEMORY_CEILING_FOR_DECODER_AND_OBJECTIVE`。不得继续F4F训练、选择相对较好的G8
 推进或进入32-motion/R128/KL；先设计独立的直接输出记忆上限合同。
 
-### 6.4.1 32-motion、T64层级posterior：H50-A近门槛失败，待受控续训
+### 6.4.1 32-motion、T64层级posterior：历史H38/H50路线
 
 F4F比较已经以`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`收尾。当前活动合同已切换到[Next.md](Next.md)：
-先用F4G direct-output查表证明loss/Mask/evaluator上限，再运行H38层级posterior。不得追加F4F步数，
-不得在H38-R通过前实现prior、logvar、采样或KL。
+先用F4G direct-output查表证明loss/Mask/evaluator上限，再运行H38层级posterior。不得追加F4F步数。
+其中“等待H38-R才实现prior”的旧限制已被后续H50-CPD设计明确取代；logvar、采样和KL仍必须等待
+确定性CPD双门禁通过。
 Windows主体实现提交为`b5f1e27fbefb68ce32d14dee3d342fa6f9011cca`，固定effective-batch收尾为
 `03a16bab89a31a0ba9f175481cd86eae736ee742`；Ubuntu执行前读取实际HEAD，不得为匹配这些值reset。
 
@@ -675,6 +676,43 @@ H50-B；15k仍FAIL则停止扩模，不允许第二次续训或H64。
 续训首次Ubuntu启动在任何训练step前被`last_three_steps`准入检查拦截。原因是v1 summary的
 `last_three_evaluations`指标对象不稳定携带step，真实step位于`logs/metrics.jsonl`外层。Windows已
 修复为从源JSONL核对28k/29k/30k，并同时要求日志score与summary逐项一致；该失败run无模型意义。
+
+H50-A正式尾段续训随后在run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256`
+完成，源码`bf6d14c3848ffc1c544a56195cf07d3a2188c863`。step32000/33000/34000连续三次fit PASS后
+提前结束，`quality_pass=true`，但strict-memory和legacy-exact均FAIL。首次PASS的step32000被保存为
+`best_fit.pt`：global State/Action`0.019671/0.014758`、worst State/Action`0.039847/0.021575`、
+p99/max`0.058849/0.693393`、contact 100%、三种整组latent ratio`57.84/63.67/72.73`。step34000
+进一步改善为global`0.019080/0.014412`、worst`0.037716/0.021309`、p99`0.057103`，保存在
+`last.pt`；由于fit score达标后下限为1.0且只在score严格下降时覆盖，best checkpoint没有更新。
+H50-B历史合同从step32000的`best_fit.pt`做model-only初始化；当前CPD则明确使用误差更低的step34000
+`last.pt`作为teacher/base。两个checkpoint的角色不得混淆。
+
+H50-B随后在run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_fixed_20260910_012003`跑满60k。
+源码`bf6d14c3848ffc1c544a56195cf07d3a2188c863`，execution完成但`quality_pass=false`；best在
+step60000，score`1.0192181`，唯一失败项是global State`0.020384`。global Action`0.013908`、worst
+State/Action`0.034900/0.021335`、p99`0.066332`、contact 100%及latent ratio`19.48/22.66/25.88`
+均通过，52k–60k末段持续改善。与此同时full-both State/Action退化到`0.060442/0.016711`，max abs
+`21.894020`、contact`99.9519%`，且尾段基本平台；B没有保持A的完整遮挡能力。旧H50-R已取消。
+
+H50-CRA在Ubuntu正式训练前经设计复审取消并由H50-CPD取代。CRA让完整posterior latent继续携带答案，
+condition只在decoder侧作修正，不能回答Mask条件本身能否预测latent；因此CRA模型、训练模块、配置、
+Shell入口和专属测试均已删除。没有CRA正式run，不得为它写模型质量结论。
+
+H50-CPD当前在Windows实现、尚未收到Ubuntu smoke或正式质量结果。新增模型
+`physics_hierarchical_conditional_prior_transformer`严格读取H50-A续训run的step34000 `last.pt`。
+冻结的完整序列posterior产生teacher `global[256]+local[16,128]`；Mask序列只进入新6层宽448的
+conditional prior并预测同拓扑latent。严格`decode_from_canonical_latents`只接受latent和有效长度，
+使用全Mask基线memory，不能读取可见State、Action或查询Mask。H50-A base为51,005,283参数，prior新增
+14,779,456参数，总计65,784,739。
+
+训练只使用完整Token Mask：55%独立随机State/Action/Both、25%动态物理Mask、10%稀疏Token、10%
+full State/Action；训练/held-out seed为20260840/20260841。P0/P1/P2在decoder冻结下最多50k，loss权重
+依次从teacher latent主导转为重建主导。latent失败即停止；latent与重建均过则冻结KL=0基线；只有
+latent通过但重建失败才允许D1 latent接口适配，满足20%改善、最终score≤1.5和teacher保持后才允许D2。
+full-both prior只作不可辨识性报告。当前入口为`posterior-hierarchical-prior-smoke`、`...-train`和
+`...-decoder-adapt`；详细合同见`Next.md`，正式结果回填`plan.md`。KL三路径仍未实现。
 
 ### 6.5 已完成 parent 训练
 

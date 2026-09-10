@@ -739,6 +739,62 @@ posterior_hierarchical_t64() {
   printf '%s\n' "$run_dir"
 }
 
+posterior_hierarchical_conditional_prior() {
+  local mode="$1" smoke="$2" dataset_run="${CVAE_DATASET_RUN:-}"
+  local source_run="${CVAE_POSTERIOR_PRIOR_SOURCE_RUN:-}"
+  local init_run="${CVAE_POSTERIOR_PRIOR_INIT_RUN:-}"
+  local config="$SCRIPT_DIR/configs/posterior_hierarchical_conditional_prior_h50.json"
+  local prefix run_dir marker latest_key
+  [[ -z "${CVAE_CONFIG:-}" ]] \
+    || die "posterior-hierarchical-prior uses its locked config; unset CVAE_CONFIG"
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
+    || die "dedicated overfit subset marker is missing: $dataset_run"
+  [[ -n "$source_run" ]] || die "CVAE_POSTERIOR_PRIOR_SOURCE_RUN is required"
+  [[ -f "$source_run/manifests/posterior_hierarchical_t64_summary.json" ]] \
+    || die "H50-A continuation summary is missing: $source_run"
+  [[ -f "$source_run/checkpoints/last.pt" ]] \
+    || die "H50-A continuation last.pt is missing: $source_run"
+  [[ -f "$source_run/markers/cvae_posterior_hierarchical_t64_autoencode_fit.ok" ]] \
+    || die "H50-A continuation fit marker is missing: $source_run"
+  local extra_args=()
+  if [[ "$mode" == "adapt" ]]; then
+    [[ "$smoke" == "false" ]] || die "decoder adaptation has no smoke shortcut"
+    [[ -n "$init_run" ]] || die "CVAE_POSTERIOR_PRIOR_INIT_RUN is required for decoder adaptation"
+    [[ -f "$init_run/manifests/posterior_conditional_prior_summary.json" ]] \
+      || die "conditional-prior training summary is missing: $init_run"
+    [[ -f "$init_run/markers/cvae_posterior_conditional_prior_latent_alignment.ok" ]] \
+      || die "decoder adaptation requires the latent-alignment marker"
+    [[ -f "$init_run/markers/cvae.failed" ]] \
+      || die "decoder adaptation is only allowed after reconstruction quality failure"
+    extra_args+=(--init-run "$init_run")
+  else
+    [[ "$mode" == "train" ]] || die "invalid conditional-prior mode: $mode"
+    [[ -z "$init_run" ]] || die "fresh prior training requires CVAE_POSTERIOR_PRIOR_INIT_RUN to be unset"
+  fi
+  [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
+  prefix="cvae_posterior_hierarchical_prior_h50_cpd_${mode}"
+  [[ "$smoke" == "true" ]] && prefix="${prefix}_smoke"
+  run_dir="$(new_run_dir "$prefix")"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" posterior_hierarchical_conditional_prior.log \
+    "$PYTHON" -m cvae_sa.posterior_hierarchical_conditional_prior \
+      --dataset-run "$dataset_run" \
+      --source-run "$source_run" \
+      --output-run "$run_dir" \
+      --config "$config" \
+      --mode "$mode" \
+      "${extra_args[@]}"
+  marker="cvae_posterior_conditional_prior_execution.ok"
+  [[ "$smoke" == "true" ]] && marker="cvae_posterior_conditional_prior_smoke.ok"
+  [[ -f "$run_dir/markers/$marker" ]] \
+    || die "conditional-prior marker is missing: $marker"
+  latest_key="posterior_hierarchical_prior_h50_cpd_${mode}"
+  [[ "$smoke" == "true" ]] && latest_key="${latest_key}_smoke"
+  update_latest "$latest_key" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 overfit_single_task() {
   local dataset_run="${CVAE_DATASET_RUN:-}" task="${CVAE_OVERFIT_TASK:-}"
   local seed="${CVAE_SEED:-20260828}" profile="${CVAE_OVERFIT_MODEL:-compact}"
@@ -1132,6 +1188,9 @@ case "${1:-}" in
   posterior-hierarchical-t64-continue) posterior_hierarchical_t64 autoencode false true ;;
   posterior-hierarchical-t64-fixed) posterior_hierarchical_t64 fixed false ;;
   posterior-hierarchical-t64-random) posterior_hierarchical_t64 random false ;;
+  posterior-hierarchical-prior-smoke) posterior_hierarchical_conditional_prior train true ;;
+  posterior-hierarchical-prior-train) posterior_hierarchical_conditional_prior train false ;;
+  posterior-hierarchical-prior-decoder-adapt) posterior_hierarchical_conditional_prior adapt false ;;
   analyze-overfit) analyze_overfit ;;
   diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
@@ -1142,5 +1201,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

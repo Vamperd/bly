@@ -415,6 +415,7 @@ def evaluate(
     state_std: torch.Tensor,
     action_std: torch.Tensor,
     latent_diagnostics: bool,
+    report_full_sequence: bool = False,
 ) -> dict[str, Any]:
     model.eval()
     totals = {"state": 0.0, "action": 0.0, "contact": 0.0}
@@ -429,6 +430,10 @@ def evaluate(
     feature_count = torch.zeros(97, dtype=torch.long)
     feature_max = torch.zeros(97, dtype=torch.float64)
     feature_physical_max = torch.zeros(97, dtype=torch.float64)
+    full_totals = {"state": 0.0, "action": 0.0, "contact": 0.0}
+    full_counts = {"state": 0, "action": 0, "contact": 0}
+    full_abs: list[torch.Tensor] = []
+    full_contact_correct = 0
     for cpu_batch in validation_loader:
         state_mask, action_mask, names = mask_maker(cpu_batch)
         batch = _device_batch(cpu_batch, device)
@@ -476,6 +481,39 @@ def evaluate(
         feature_physical_max = torch.maximum(feature_physical_max, batch_feature_max * scales)
         predictions = output.state_contact_logits.sigmoid() >= 0.5
         targets = batch["physical_state"][..., 68:70] >= 0.5
+        if report_full_sequence:
+            full_state_mask = batch["valid_state"].bool()[..., None].expand_as(
+                batch["physical_state"]
+            )
+            full_action_mask = batch["valid_action"].bool()[..., None].expand_as(
+                batch["action"]
+            )
+            full_values = {
+                "state": torch.square(state_error).masked_select(
+                    full_state_mask[..., :68]
+                ),
+                "action": torch.square(action_error).masked_select(
+                    full_action_mask
+                ),
+                "contact": F.binary_cross_entropy_with_logits(
+                    output.state_contact_logits,
+                    batch["physical_state"][..., 68:70],
+                    reduction="none",
+                ).masked_select(full_state_mask[..., 68:70]),
+            }
+            for key, values in full_values.items():
+                full_totals[key] += float(values.sum().cpu())
+                full_counts[key] += int(values.numel())
+            full_abs.extend((
+                state_error.abs().masked_select(full_state_mask[..., :68]).cpu(),
+                action_error.abs().masked_select(full_action_mask).cpu(),
+            ))
+            full_contact_correct += int(
+                (predictions == targets)
+                .masked_select(full_state_mask[..., 68:70])
+                .sum()
+                .cpu()
+            )
         for index, name in enumerate(names):
             case = cases[name]
             case["windows"] += 1
@@ -542,6 +580,27 @@ def evaluate(
         "cases": dict(cases),
         "feature_errors": feature_rows,
     }
+    if report_full_sequence:
+        full_absolute = torch.cat(full_abs)
+        full_means = {
+            key: full_totals[key] / full_counts[key] for key in full_totals
+        }
+        metrics["full_sequence_reconstruction"] = {
+            "global_state_rmse": math.sqrt(full_means["state"]),
+            "global_action_rmse": math.sqrt(full_means["action"]),
+            "continuous_p99_abs": float(
+                torch.quantile(full_absolute.float(), 0.99)
+            ),
+            "continuous_max_abs": float(full_absolute.max()),
+            "contact_accuracy": full_contact_correct / full_counts["contact"],
+            "reconstruction_loss": {
+                **full_means,
+                "total": sum(full_means.values()) / len(full_means),
+                "counts": full_counts,
+                "aggregation": "all valid output elements for every evaluated Mask query",
+            },
+            "gate_role": "reported alongside masked-target gates; does not replace them",
+        }
     if latent_diagnostics:
         metrics["latent_dependence"] = evaluate_latent_dependence(model, base_loader, device)
     metrics["fit_gate"] = _gate(metrics, fit_thresholds, "fit", latent_diagnostics)

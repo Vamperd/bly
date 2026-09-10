@@ -252,8 +252,16 @@ class HierarchicalPosteriorT64Test(unittest.TestCase):
             fit_thresholds=thresholds_fit, strict_thresholds=thresholds_strict,
             exact_thresholds={**thresholds_strict, "worst_state_rmse": 1e-4, "worst_action_rmse": 1e-4, "continuous_max_abs": 1e-3},
             state_std=torch.ones(70), action_std=torch.ones(29), latent_diagnostics=False,
+            report_full_sequence=True,
         )
         self.assertTrue(metrics["fit_gate"]["passed"])
+        self.assertEqual(
+            metrics["full_sequence_reconstruction"]["gate_role"],
+            "reported alongside masked-target gates; does not replace them",
+        )
+        self.assertLess(metrics["full_sequence_reconstruction"]["global_state_rmse"], 1e-7)
+        self.assertLess(metrics["full_sequence_reconstruction"]["global_action_rmse"], 1e-7)
+        self.assertEqual(metrics["full_sequence_reconstruction"]["contact_accuracy"], 1.0)
         value = batch(2)
         value["window_index"] = torch.tensor([1, 1])
         state_mask, action_mask, _ = make_physical_masks(value, 456)

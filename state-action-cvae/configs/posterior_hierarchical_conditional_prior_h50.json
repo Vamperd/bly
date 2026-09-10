@@ -1,0 +1,90 @@
+{
+  "format_version": "sonic_h50_cpd_config_v1",
+  "initialization_seed": 20260839,
+  "training_mask_seed": 20260840,
+  "heldout_mask_seed": 20260841,
+  "training_seed": 20260845,
+  "data": {
+    "motion_count": 32,
+    "window_transitions": 64,
+    "stride": 64,
+    "max_windows": null,
+    "num_workers": 4
+  },
+  "model": {
+    "kind": "physics_hierarchical_conditional_prior_transformer",
+    "profile": "H50-CPD",
+    "d_model": 448,
+    "posterior_encoder_layers": 6,
+    "condition_encoder_layers": 4,
+    "conditional_prior_encoder_layers": 6,
+    "decoder_layers": 8,
+    "heads": 8,
+    "ffn_dim": 1792,
+    "global_latent_dim": 256,
+    "local_latent_dim": 128,
+    "local_chunks": 16,
+    "chunk_transitions": 4,
+    "max_state_steps": 65,
+    "dropout": 0.0,
+    "source_run_name": "cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256",
+    "source_optimizer_step": 34000,
+    "base_parameter_count": 51005283,
+    "prior_parameter_count": 14779456,
+    "total_parameter_count": 65784739
+  },
+  "training": {
+    "precision": "FP32",
+    "micro_batch": 4,
+    "gradient_accumulation": 16,
+    "gradient_clip": 1.0,
+    "weight_decay": 0.0,
+    "kl_beta": 0.0,
+    "required_pass_streak": 3,
+    "validation_interval": 2000,
+    "prior_encoder_learning_rate": 0.0001,
+    "prior_input_head_learning_rate": 0.0003,
+    "minimum_learning_rate": 0.000001,
+    "warmup_steps": 1000,
+    "phases": [
+      {"name": "P0", "start": 0, "end": 10000, "latent_start": 10.0, "latent_end": 10.0, "reconstruction_start": 1.0, "reconstruction_end": 1.0},
+      {"name": "P1", "start": 10000, "end": 25000, "latent_start": 10.0, "latent_end": 2.0, "reconstruction_start": 1.0, "reconstruction_end": 5.0},
+      {"name": "P2", "start": 25000, "end": 50000, "latent_start": 1.0, "latent_end": 1.0, "reconstruction_start": 10.0, "reconstruction_end": 10.0}
+    ],
+    "random_training_mixture": {
+      "independent_token": 0.55,
+      "dynamic_physical": 0.25,
+      "sparse_token": 0.1,
+      "full_domain": 0.1
+    },
+    "fit_thresholds": {
+      "global_state_rmse": 0.02,
+      "global_action_rmse": 0.02,
+      "worst_mask_state_rmse": 0.04,
+      "worst_mask_action_rmse": 0.04,
+      "continuous_p99_abs": 0.08,
+      "contact_accuracy": 1.0,
+      "latent_ratio": 10.0
+    },
+    "latent_thresholds": {
+      "global_standardized_rmse": 0.25,
+      "local_standardized_rmse": 0.25,
+      "global_cosine": 0.95,
+      "local_cosine": 0.95,
+      "cross_window_error_ratio": 0.1,
+      "cross_motion_error_ratio": 0.1
+    },
+    "decoder_adaptation": {
+      "D1": {"max_optimizer_steps": 12000, "prior_learning_rate": 0.00001, "decoder_interface_learning_rate": 0.000005, "other_decoder_learning_rate": 0.0, "latent_weight": 1.0, "reconstruction_weight": 10.0, "keep_weight": 20.0},
+      "D2": {"max_optimizer_steps": 8000, "prior_learning_rate": 0.000005, "decoder_interface_learning_rate": 0.000003, "other_decoder_learning_rate": 0.000001, "latent_weight": 1.0, "reconstruction_weight": 10.0, "keep_weight": 30.0},
+      "warmup_steps": 250,
+      "minimum_learning_rate": 0.000001,
+      "minimum_d1_improvement": 0.2,
+      "maximum_d1_fit_score": 1.5,
+      "source_metric_multiplier": 1.05,
+      "functional_state_rmse": 0.002,
+      "functional_action_rmse": 0.002,
+      "functional_p99_abs": 0.01
+    }
+  }
+}
