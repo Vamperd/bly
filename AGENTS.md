@@ -700,7 +700,7 @@ H50-CRA在Ubuntu正式训练前经设计复审取消并由H50-CPD取代。CRA让
 condition只在decoder侧作修正，不能回答Mask条件本身能否预测latent；因此CRA模型、训练模块、配置、
 Shell入口和专属测试均已删除。没有CRA正式run，不得为它写模型质量结论。
 
-H50-CPD已完成Ubuntu工程smoke，但尚无正式质量结果。smoke run为
+H50-CPD的工程smoke和正式训练均已完成，且现已被H50-SCVAE取代。smoke run为
 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_smoke_20260911_022214`，
 完成2 step并报告execution complete；`quality_pass=false`、`latent_alignment_pass=false`及通用STOP建议均无
 容量含义，source commit和完整marker尚未回传。新增模型
@@ -720,12 +720,44 @@ full-both prior只作不可辨识性报告。当前入口为`posterior-hierarchi
 源码`e7522c9f6262d02cc9fbaa7eee89e0104530377f`。latent最终global/local标准化RMSE
 `0.04757/0.07825`且门禁连续PASS；但held-out随机/固定Mask score为`16.9132/10.4047`，随机worst
 State/Action为`0.67653/0.47690`，固定为`0.41619/0.22672`，质量FAIL。teacher保持、冻结base hash、
-checkpoint读回和latent依赖均PASS。best joint在step48000、score`16.83819`；正式下一步为D1 latent
-接口适配，不允许直接D2或KL。详细合同见`Next.md`，完整结果见`plan.md`。KL三路径仍未实现。
+checkpoint读回和latent依赖均PASS。best joint在step48000、score`16.83819`；当时按合同触发了D1，
+其结果见下段。该路线现已停止；详细结果见`plan.md`。标准CVAE的KL三路径代码已实现但尚未在Ubuntu运行。
+
+D1 run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_adapt_20260911_184842`
+在第一次训练后完整评测step2000触发teacher保持保护并停止，源码`0315b7d13780eeacb5937cc2bad78be2df964708`。
+唯一失败check为current/reference decoder的functional State RMSE`0.0021167>0.002`；teacher真值指标全部
+保持PASS，但随机Mask score从`16.9132`恶化至`18.2707`，固定Mask仅改善至`9.8390`，latent误差也轻微
+恶化。`latent_alignment_pass=false`因不足三次评测不能单独作为latent失败，但当前D1没有继续价值。
+正式决定为停止且不得原样重跑/延长D1或进入D2/KL；下一诊断必须保留Mask信息仅经latent传递的原则。
 
 正式`...-train`首次启动在step0全量评测时因PyTorch大张量`quantile()`限制停止，尚无optimizer更新，
 不得记作模型失败。Windows现已把T64/CPD全部p99计算替换为确定性CPU quantile，仍使用全部元素且不改变
 阈值，并通过16,777,217元素回归测试。Ubuntu同步后必须创建新run重跑，不得续用此次工程失败目录。
+
+### 6.4.1 当前活动覆盖：H50-SCVAE标准条件CVAE
+
+截至2026-09-12，H50-CPD、D1和CRA均为`SUPERSEDED`历史路线，不得续训或作为当前初始化。
+当前唯一活动路线为`physics_hierarchical_standard_cvae_transformer`。H50-A step34000 `last.pt`只作
+model-only初始化；posterior、conditional prior、condition encoder和完整decoder随后共同训练，不再
+保持旧teacher latent或旧decoder函数。
+
+标准结构具有66,129,571参数：宽448，posterior/prior各6层，condition encoder 4层，decoder 8层，
+latent为`global[256]+local[16,128]`，另有q/p各自的global/local logvar头。KL前logvar冻结。decoder读取
+真实masked condition，但隐藏真值必须先置零；posterior读取完整真值与当前Mask，prior只能读取可见值与
+Mask。
+
+最重要的隔离合同是：q与p只共享decoder参数，不能在一次调用中拼接、平均、attention融合或互相回退。
+训练均值阶段对`D(mu_q,c)`和`D(mu_p,c)`分别调用decoder再合并loss；KL阶段训练`D(z_q,c)`并用
+`KL(q||p)`对齐分布。最终部署只允许`c -> p(z|c) -> z_p -> D(z_p,c)`，不得调用posterior。
+
+M-F使用原8类固定物理Mask；M-R仅使用动态物理单缺口和2–3个彼此分离的物理多缺口，不包含散点、
+element/feature、full State或full both。full both仅为无信息诊断。只有M-R让prior/posterior mean、q-p
+对齐、固定bank和held-out物理随机bank连续三次通过，并确认高遮挡时latent未被完全忽略，才允许K1标准
+KL三路径比较。完整合同和Ubuntu命令以`Next.md`为准，正式结果回填`plan.md`。
+
+Windows已实现四个新入口：`posterior-hierarchical-standard-cvae-smoke`、`...-fixed`、
+`...-random-physical`、`...-kl`。轻量测试只证明66,129,571参数合同、masked真值隔离、prior-only部署、
+完整Token物理Mask、双路径loss和共享epsilon；Ubuntu smoke及正式质量均尚未验证。
 
 ### 6.5 已完成 parent 训练
 
@@ -879,15 +911,18 @@ bash ./cvae_repro.sh validate-state-mask-video
 | H38/H50 smoke/执行 | `cvae_posterior_hierarchical_t64_smoke.ok` / `cvae_posterior_hierarchical_t64_execution.ok` |
 | H50-A尾段续训执行 | `cvae_posterior_hierarchical_t64_continuation_execution.ok`（另以autoencode fit marker判断质量） |
 | H38/H50分阶段fit | `cvae_posterior_hierarchical_t64_<stage>_fit.ok`，stage为autoencode/fixed/random |
+| H50-SCVAE smoke/执行 | `cvae_posterior_standard_cvae_smoke.ok` / `cvae_posterior_standard_cvae_execution.ok` |
+| H50-SCVAE M-F/M-R质量 | `cvae_posterior_standard_cvae_fixed_mean_fit.ok` / `cvae_posterior_standard_cvae_random_physical_mean_fit.ok` |
+| H50-SCVAE KL比较/质量 | `cvae_posterior_standard_cvae_kl_comparison.ok` / `cvae_posterior_standard_cvae_kl_fit.ok` |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. H38-A/B均质量FAIL；H50-A 30k只差global/worst State 1.01%/3.71%且末段仍改善。当前唯一
-   下一步是从其`last.pt`执行一次最多15k的低LR尾段续训；不得启动H38-R或重复扩模。
-2. H50续训PASS才以H50继续fixed/random；FAIL则停止扩模并诊断joint velocity与最差State窗口。
-   每步先回填plan.md；R通过并冻结KL=0基线后才实现最小KL三路径CVAE。
+1. H50-A续训已经PASS；H50-B、CPD和D1均形成历史结果并被H50-SCVAE取代。当前唯一下一步是用户
+   预先同步Windows代码后运行SCVAE工程smoke；命令不得包含Git操作。
+2. smoke只验工程。通过后从H50-A step34000 `last.pt`独立运行M-F；M-F质量PASS后才运行M-R；
+   M-R质量PASS后才运行K1。任何一级失败均停止，不得绕过marker或复用smoke checkpoint。
 3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
@@ -940,6 +975,7 @@ df -h /home/helloworld/bly/runs
 | Exact fixture诊断 | `overfit_fixture_eval.py`、`cvae_repro.sh` |
 | 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`posterior_capacity_tail.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
 | T64 direct-output与层级posterior | `posterior_direct_output.py`、`posterior_direct_output_oracle.py`、`posterior_hierarchical_t64.py`、`posterior_t64_protocol.py`、`configs/posterior_{direct_output,hierarchical}_t64*.json` |
+| H50-SCVAE标准条件生成 | `posterior_hierarchical_standard_cvae.py`、`posterior_complete_token_protocol.py`、`models.py`、`configs/posterior_hierarchical_standard_cvae_h50.json`、`cvae_repro.sh` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

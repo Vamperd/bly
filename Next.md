@@ -1,156 +1,137 @@
-# 活动合同：H50-CPD Conditional Prior 蒸馏
+# 活动合同：H50-SCVAE 标准条件 CVAE
 
-最后更新：2026-09-11
+最后更新：2026-09-12
 
-状态：Ubuntu smoke已完成工程验收；大张量p99工程问题修复后，正式P0/P1/P2已在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_20260911_023356`跑满50k。latent连续三次PASS，最终global/local标准化RMSE为`0.04757/0.07825`，但held-out随机Mask最终score仍为`16.9132`，固定Mask为`10.4047`，且末段平台。teacher保持与冻结合同PASS。正式决策为`RUN_CONTROLLED_DECODER_ADAPTATION_D1`。H50-CRA已取消，不得再运行其入口。正式事实与历史结果见[plan.md](plan.md)，安全和交接规则见[AGENTS.md](AGENTS.md)。
+状态：Windows 已完成模型、固定/随机物理 Mask、均值训练、KL 三路径评测及 Shell 入口实现；尚未收到 Ubuntu smoke。H50-A 仅作初始化。CPD、D1 与 CRA 均为历史 `SUPERSEDED`，不得用于新路线初始化。
 
-## 1. 当前问题与正式数据流
+正式历史和数值见 [plan.md](plan.md)，通俗背景见 [explain.md](explain.md)，安全约束见 [AGENTS.md](AGENTS.md)。
 
-H50-A已经证明：完整序列经过posterior encoder得到的层级latent，可以被H50 decoder重建到当前fit门槛。H50-B则表明：直接让decoder读取Mask条件会改变原解码路径并造成遗忘。CPD不再让condition绕过latent。
-
-```text
-Teacher：完整 State–Action
-               ↓
-         冻结H50-A posterior encoder
-               ↓
-       canonical global + 16 local latent
-
-Student：Mask后的 State–Action + 完整Token Mask
-               ↓
-         新conditional prior encoder
-               ↓
-         预测global + 16 local latent
-               ↓
-         H50-A canonical decoder
-               ↓
-         完整 State–Action 预测
-```
-
-隔离合同：可见值和Mask只能进入conditional prior；decoder接口只接受latent及State/Action有效长度。decoder内部使用与样本内容无关的全Mask基线memory、固定时间和类型query，不能接收可见State、Action或查询Mask。full-both不参与确定性prior训练，只报告不可辨识性结果。
-
-## 2. 模型与固定源
-
-源run固定为：
+## 1. 不可改变的数据流
 
 ```text
-/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256
+训练 posterior：完整序列 x + 当前 Mask c
+                         ↓
+                    q(z | x,c)
+                         ↓
+                  一份 zq ─────────┐
+                                    ↓
+Mask 后的可见序列 c → condition memory → 共享 D(zq,c) → 完整序列
+
+训练/部署 prior：Mask 后的可见序列 c
+                         ↓
+                    p(z | c)
+                         ↓
+                  一份 zp ─────────┐
+                                    ↓
+Mask 后的可见序列 c → condition memory → 共享 D(zp,c) → 完整序列
 ```
 
-必须读取其step34000 `checkpoints/last.pt`，并校验H50-A continuation、fit marker、数据/window hash、模型签名和checkpoint step。初始化只加载模型参数，不恢复optimizer、scheduler或RNG。
+posterior 与 prior 只共享同一个 decoder 的参数，不在一次推理中融合。每次 decoder 调用只能接收一组 `global + 16 local` latent。禁止拼接、求平均、attention 融合或 posterior fallback。最终部署固定为：
 
-| 组件 | 合同 |
+```text
+c → p(z|c) → prior sample/mean → D(zp,c)
+```
+
+部署接口必须在 posterior 被禁用或抛错时仍可运行。隐藏真值只允许进入 posterior；prior 与 decoder condition 必须先把被 Mask 的完整 Token 置零。
+
+## 2. 模型和初始化
+
+新增模型种类 `physics_hierarchical_standard_cvae_transformer`：
+
+| 组件 | 固定合同 |
 |---|---|
-| H50-A teacher/base | 51,005,283参数；posterior和decoder来自step34000 |
-| conditional prior | 独立6层、宽448、8 heads、FFN1792 |
-| latent | `global [B,256] + local [B,16,128]`，每4个transition一个local |
-| 初始化 | 复制H50 posterior的value投影、embedding、encoder、global/local heads；新Mask列置零 |
-| 新增/总参数 | 14,779,456 / 65,784,739 |
-| 当前概率部分 | 只输出确定性mean；`KL=0`，无logvar和采样 |
+| 主宽度 | 448；8 heads；FFN 1792 |
+| posterior | 6层，读取完整真值和当前 Token Mask |
+| conditional prior | 独立6层，只读取可见值和 Mask |
+| condition encoder | 独立4层，读取真实 masked condition |
+| latent | 1×256 global + 16×128 local |
+| decoder | 8层 self-attention、condition+latent cross-attention、latent FiLM、FFN |
+| 参数量 | 精确 `66,129,571`；其中 logvar 头 `344,832` |
+| 正则 | dropout、weight decay均为0 |
 
-新增模型类型为`physics_hierarchical_conditional_prior_transformer`。严格decoder接口为：
-
-```python
-decode_from_canonical_latents(
-    global_latent,
-    local_latents,
-    *,
-    valid_state,
-    valid_action,
-)
-```
-
-## 3. 数据、Mask与损失
-
-数据固定为原32 motion×8 variant、256 episode、T64、stride64、`random_crop=false`。Mask只允许遮挡完整70维State token或完整29维Action token，不允许element/feature Mask。
-
-训练Mask使用seed `20260840`：55%独立State-only/Action-only/Both随机Token，遮挡率`U(0.05,0.95)`；25%动态物理Mask；10%稀疏1/2/4/8 Token；10% full State或full Action。评测seed `20260841`与训练隔离，每个window固定16个未训练Mask，覆盖三种域的10%/35%/65%/90%，另含single State、single Action、full State和full Action。每次还重评原8类固定物理Mask。
-
-Teacher latent按全部训练window预缓存；缓存必须与在线H50-A输出一致。每个latent维度按teacher训练集标准差归一化，标准差下限`1e-3`：
+初始化源固定为：
 
 ```text
-Lz = 0.5*MSE((z_global_hat-z_global)/sigma_global)
-   + 0.5*MSE((z_local_hat-z_local)/sigma_local)
-
-Lrec = 0.5*L_full + 0.5*L_masked
+/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256/checkpoints/last.pt
 ```
 
-`L_full`覆盖完整有效序列，`L_masked`只覆盖被Mask token；二者内部均为State MSE、Action MSE和contact BCE的存在项等权平均。
+H50-A step 34000 只初始化 posterior、condition encoder、decoder和均值头；不冻结、不保留旧 latent 坐标或旧输出。prior从posterior复制，新增Mask输入列置零。四个q/p global/local logvar头以权重0、bias `-4` 初始化，KL前冻结。optimizer、scheduler和RNG均不继承。
 
-## 4. P0/P1/P2：先冻结decoder
+## 3. KL 前的均值训练
 
-统一FP32、micro-batch4、累积16、effective batch64、AdamW、weight decay0、clip1.0。prior encoder峰值LR `1e-4`，输入/embedding/latent heads峰值LR `3e-4`，warmup1000后cosine到`1e-6`。三个阶段在同一run连续执行，不重置optimizer、scheduler或训练流。
+每条路径的重建损失为：
 
-| 阶段 | 绝对step | Decoder | 目标 |
-|---|---:|---|---|
-| P0 | 1–10k | 全冻结 | `10 Lz + 1 Lrec` |
-| P1 | 10k–25k | 全冻结 | `Lz 10→2`、`Lrec 1→5`线性变化 |
-| P2 | 25k–50k | 全冻结 | `1 Lz + 10 Lrec` |
+```text
+R = 0.75 × 被Mask位置重建 + 0.25 × 完整有效序列重建
+```
 
-step0及每2k完整评测。只有P2连续三次同时通过latent和重建门禁才提前停止。正式`best_latent.pt`和`best_prior_fit.pt`只能由P2评测产生，避免decoder适配误用早期checkpoint。
+State MSE、Action MSE和contact BCE在各自存在时等权。均值阶段使用两次完全独立的decoder调用：
 
-## 5. 门禁与固定决策
+```text
+Lmean = R(D(mu_p,c)) + 0.25 R(D(mu_q,c)) + lambda_z Lalign
+```
 
-重建门禁：held-out随机Mask与固定物理Mask必须同时满足global State/Action RMSE各`≤0.02`，每类worst-window State/Action各`≤0.04`，masked continuous p99 abs`≤0.08`，contact 100%，student latent的zero/cross-window/cross-motion替换ratio各`≥10`；max abs只报告。评测同时记录完整有效序列上的State/Action RMSE、p99、max abs、contact和重建loss，但这些完整序列指标只作诊断，不能替代被Mask位置门禁。
+`Lalign`只把prior均值拉向当前posterior均值，posterior目标侧stop-gradient；posterior仍由自己的重建项更新。H50-A初始latent标准差仅作量纲归一化，不作teacher目标。固定阶段 `lambda_z` 在0–10k为1，10k–30k线性降至0.1，之后为0.1；随机阶段为0.05。
 
-latent门禁：global/local标准化RMSE各`≤0.25`，cosine各`≥0.95`，student-teacher误差相对cross-window及cross-motion donor误差的比例各`≤0.10`。
+M-F固定阶段：32 motion×8 variants、T64、stride64，使用原8类物理Mask，最多60k，step0及每2k完整评测，连续3次PASS提前结束。FP32、micro4×累积16、AdamW、clip1；encoder/condition/mean heads峰值LR `1e-4`，完整decoder `3e-5`，warmup1000后cosine到`1e-6`。
 
-固定决策：
+M-R随机阶段：从M-F `best_mean_fit.pt`只加载模型参数并重置训练状态。60%为原8类的动态版本，40%为2–3个互不重叠且中间至少保留一个完整transition的物理缺口组合。禁止散点、feature/element、full State和full both。最多40k；encoder峰值LR `5e-5`、decoder `1e-5`、warmup500。每2k检查固定8类，每4k同时检查独立seed的16个held-out物理Mask。
 
-| P2结果 | 唯一动作 |
-|---|---|
-| latent FAIL | 停止；不能用decoder改动掩盖prior失败 |
-| latent PASS、重建 PASS | 冻结为KL=0基线，进入KL三路径实现 |
-| latent PASS、重建 FAIL | 从P2 `best_latent.pt`启动D1 |
+均值门禁要求posterior mean和prior mean分别满足：global State/Action RMSE≤`0.02`，每类worst-window State/Action≤`0.04`，p99 abs≤`0.08`，masked和完整contact均100%；q–p global/local标准化RMSE≤`0.25`且cosine≥`0.95`。max abs只报告。若所有高遮挡Mask的zero/cross-window/cross-motion latent替换ratio均≤`1.05`，视为latent被忽略并阻止进入KL。
 
-full-both conditional prior只报告，不参与任何PASS。无信息输入对应一个确定性代表latent，不可能恢复每个window的唯一答案。
+## 4. K1 标准 KL 与三条独立路径
 
-## 6. D1/D2：只在严格触发后适配decoder
+只有M-R连续三次同时保持held-out、固定Mask和posterior/prior均值门禁，才从其 `best_mean_fit.pt`进入KL：
 
-D1最多12k，只解冻global/local memory projection、global/local FiLM projection、FiLM输出projection，以及8层cross-attention与其LayerNorm；conditional prior继续训练。prior LR `1e-5`，latent接口LR `5e-6`，warmup250，最低`1e-6`。目标为`Lz + 10Lrec + 20Lkeep`。
+```text
+zq = mu_q + sigma_q * epsilon
+L  = R(D(zq,c)) + beta KL(q(z|x,c) || p(z|c))
+```
 
-D1未通过时，只有latent仍PASS、teacher保持PASS、最后三次fit score中位数相对step0改善至少20%、且D1最终score`≤1.5`，才启动D2。D2最多8k，额外解冻decoder self-attention、FFN、query/type embedding、final norm和输出头；prior/接口/其他decoder LR分别为`5e-6/3e-6/1e-6`，目标为`Lz + 10Lrec + 30Lkeep`。
+解冻logvar，范围裁剪到`[-8,4]`，free bits=0。beta前10k由0升至`1e-3`后固定；最多50k。q/p encoder峰值LR `5e-5`、logvar heads `1e-4`、decoder `1e-5`。每2k评测均值，每5k做8次采样完整评测。
 
-`Lkeep`同时约束teacher latent经过当前decoder仍重建真值，并与不可修改的H50-A reference输出接近。每次适配评测还必须满足：teacher-path各误差不超过`min(H50-A step34000×1.05, fit阈值)`，当前/reference输出State/Action RMSE各`≤2e-3`、p99差`≤1e-2`、contact完全一致，teacher latent replacement ratio各`≥10`。任一评测失败立即拒绝该适配run。D2后不再扩大解冻范围或延长训练。
+三条路径必须分开运行：`D(mu_q,c)`、`D(mu_q+sigma_q epsilon,c)`、`D(mu_p+sigma_p epsilon,c)`。同一window、Mask和sample index下q/p共享同一epsilon，但latent不融合。记录mean/std/p50/p95/worst/best-of-8；best-of-8不控制PASS。
 
-## 7. Ubuntu执行与回传
+prior sample八次平均须满足fit门禁，跨采样p95 score≤`1.5`，每次contact 100%；posterior sample相对posterior mean退化≤25%，prior sample相对posterior sample退化≤50%。若posterior明显受损只允许从M-R以beta `1e-4`复核一次；若posterior良好但prior误差超过2倍，只允许beta `1e-2`复核一次。
 
-命令不包含Git操作，默认代码已由用户预先同步：
+## 5. Ubuntu 执行顺序
+
+命令不包含Git操作；用户需预先完成同步。先执行smoke：
 
 ```bash
 cd /home/helloworld/bly/state-action-cvae
 source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
 
 export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
-export CVAE_POSTERIOR_PRIOR_SOURCE_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256
+export CVAE_POSTERIOR_STANDARD_CVAE_SOURCE_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256
 
 unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
-unset CVAE_POSTERIOR_PRIOR_INIT_RUN
+unset CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN
 
-bash ./cvae_repro.sh posterior-hierarchical-prior-smoke
-# 审核smoke工程合同后，重新从H50-A启动正式训练：
-bash ./cvae_repro.sh posterior-hierarchical-prior-train
+bash ./cvae_repro.sh posterior-hierarchical-standard-cvae-smoke
 ```
 
-只有正式训练summary明确输出`RUN_CONTROLLED_DECODER_ADAPTATION_D1`且存在execution、latent-alignment和`cvae.failed` marker时才执行：
+审核smoke后必须重新从H50-A启动正式M-F，不能从smoke续训：
 
 ```bash
-export CVAE_POSTERIOR_PRIOR_INIT_RUN=/home/helloworld/bly/runs/<正式CPD-train-run>
-bash ./cvae_repro.sh posterior-hierarchical-prior-decoder-adapt
+unset CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN
+bash ./cvae_repro.sh posterior-hierarchical-standard-cvae-fixed
 ```
 
-每个run结束后回传：
+只有M-F质量marker存在才执行M-R；只有M-R质量marker存在才执行KL：
 
 ```bash
-RUN=/home/helloworld/bly/runs/<实际run>
-jq '{mode,execution_pass,smoke,quality_pass,latent_alignment_pass,reconstruction_pass,
-     completed_optimizer_steps,last_training_phase,best_optimizer_step,
-     best_latent_optimizer_step,best_latent_score,unique_next_step,
-     initial:.initial_evaluation,last_three:.last_three_evaluations,
-     checkpoint_readback}' \
-  "$RUN/manifests/posterior_conditional_prior_summary.json"
-cat "$RUN/manifests/source_commit.txt"
-find "$RUN/markers" -maxdepth 1 -type f -printf '%f\n' | sort
-ls -lh "$RUN/checkpoints"
+export CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN=/home/helloworld/bly/runs/<正式M-F-run>
+bash ./cvae_repro.sh posterior-hierarchical-standard-cvae-random-physical
+
+export CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN=/home/helloworld/bly/runs/<正式M-R-run>
+bash ./cvae_repro.sh posterior-hierarchical-standard-cvae-kl
 ```
 
-最终通过只能声明：在已见32-motion、T64窗口上，Mask后的完整Token条件可经确定性conditional prior预测层级latent，并在未训练随机Mask bank上补全。它仍不证明未见motion泛化、随机采样质量或全部Mask组合的数学完备性。
+每次回传 `manifests/standard_cvae_summary.json`、`source_commit.txt`、marker列表、checkpoint列表及最后三次evaluation。质量失败时停止，不越过marker强行启动下一阶段。
+
+## 6. 产物、状态和结论边界
+
+核心产物为 `standard_cvae_summary.json`、`physical_random_mask_bank.json`、KL阶段的`kl_three_path_comparison.json`、四张SVG、`best_mean_fit.pt`/`best_kl_fit.pt`及`last.pt`。smoke、execution、M-F质量、M-R质量、KL比较完整和KL质量使用独立marker。
+
+截至本文更新，代码静态/轻量测试已证明接口隔离和参数合同，但没有Ubuntu训练质量结果。即使全流程通过，也只能声明：模型在已见32-motion、T64窗口上，能对预注册的物理可推测完整Token Mask进行均值补全，并能从conditional prior采样得到稳定结果；不能声明未见motion泛化、任意无物理线索Mask或所有组合的数学完备性。

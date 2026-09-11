@@ -43,7 +43,7 @@
 
 这才对应conditional prior：根据可见条件产生latent，再由decoder补全。它比第一层难，因为输入中可能不存在唯一答案。
 
-当前H50-CPD正准备单独检验这一层的确定性版本：先让Mask序列预测posterior已经学会的latent，再用冻结decoder补全。它尚未在Ubuntu正式训练，因此posterior实验通过仍不能写成“模型已经学会State到Action推理”。
+H50-CPD曾尝试这一层的确定性版本：让Mask序列模仿H50-A的固定latent，再用冻结decoder补全。正式实验中latent模仿已经很准，但重建仍很差，说明旧decoder对略有偏差的latent过于敏感。当前已改用H50-SCVAE，让posterior、prior和decoder共同形成更适合条件补全的新表达；它尚未在Ubuntu运行，因此仍不能写成“模型已经学会State到Action推理”。
 
 ### 2.3 第三层：生成多种合理结果
 
@@ -199,7 +199,7 @@ KL可以理解成一根把posterior分布和conditional prior分布拉近的橡�
 - 拉得太紧：所有序列的latent都被挤得太像，decoder不再使用latent，出现posterior collapse。
 - 合适的强度：posterior仍能准确重建，prior也能从可见条件找到相近分布。
 
-当前`KL beta=0`，等于暂时拿掉这根橡皮筋。CPD只让conditional prior输出一个确定的latent均值，先确认“剩余片段能否找到正确的压缩便签”。只有这个确定性路径通过后，才增加方差和KL，并比较posterior mean、posterior sample和conditional prior sample。
+当前先进行`KL beta=0`的均值阶段，等于暂时拿掉这根橡皮筋。posterior和conditional prior会分别产生一张确定性便签，并用同一个decoder参数各自独立重建。只有prior均值路径在固定和未训练物理随机Mask上都通过，才解冻方差、加入KL，并比较posterior mean、posterior sample和conditional prior sample。
 
 ## 7. 我们怎样判断模型是否成功
 
@@ -415,9 +415,10 @@ H50-B随后给模型保留物理上合理的可见State或Action片段，再补�
 | H50-A | 51.01M层级模型能否降低全遮挡误差 | 30k后只差1.01%/3.71%，末段仍改善 | 受控低LR续训15k |
 | H50-A续训 | 保留现有解继续精修是否能稳定过线 | step34000连续三次fit PASS | 进入H50-B |
 | H50-B | 51.01M模型能否补全8类固定物理缺口 | 只剩global State超1.92%，但明显遗忘A的full-both能力 | 停止旧condition融合路线 |
-| H50-CRA | 冻结A并在decoder旁边加condition校正器 | 正式训练前取消；无法检验Mask条件是否会预测latent | 改为CPD teacher-student |
-| H50-CPD | Mask序列能否预测A的global+16 local latent | 代码READY，尚无Ubuntu结果 | 先smoke，再P0/P1/P2冻结decoder训练 |
-| KL三路径 | 确定性prior通过后，采样与KL是否合适 | 尚未实现 | 根据三路径差异调整KL |
+| H50-CRA | 冻结A并在decoder旁边加condition校正器 | 正式训练前取消；无法检验Mask条件是否会预测latent | 改为conditional prior路线 |
+| H50-CPD/D1 | 模仿固定teacher latent，再由旧decoder重建 | latent对齐PASS、重建FAIL；D1也未改善主任务 | 标记SUPERSEDED |
+| H50-SCVAE | q、p与共享decoder能否共同学习标准条件生成 | Windows代码READY，尚无Ubuntu结果 | 先smoke，再固定与物理随机Mask均值训练 |
+| KL三路径 | 均值prior通过后，采样与KL是否合适 | 接口已实现但被前级marker阻断 | 仅在物理随机Mask通过后运行 |
 
 ## 10. 当前最客观的结论
 
@@ -433,6 +434,8 @@ F4G-O已经证明目标函数和评测门禁存在解析可达解；H38-A与H38-
 
 CRA原本像在一台已经知道完整答案的机器旁边安装“可见片段校正器”。它能防止旧能力被改坏，却不能证明校正器自己能从剩余片段找到答案，所以在正式训练前被取消。
 
-当前H50-CPD更像师生学习。老师H50-A看完整录像，写出一张由一个“全片摘要”和16张“分章节摘要”组成的标准便签；学生只能看被挖掉后的录像和缺口位置，目标是写出同样的便签。冻结的解码器只读学生便签，不能直接偷看剩余录像。训练前段更重视便签相似，后段更重视最终补全是否准确。
+CPD像要求学生一字不差地模仿老师以前发明的暗号，再把暗号交给一台不能改的旧机器。实验表明学生写出的暗号已经很接近，但旧机器仍会把微小差异放大；小范围改机器也没有改善随机Mask主任务。因此CPD和D1停止，不再续训。
 
-如果学生便签本身不准，实验就停止，不允许靠修改解码器掩盖问题；只有便签已达标但解码结果仍差，才小范围调整解码器读取便签的接口，并严格检查老师原有能力没有遗忘。CPD通过后才有可信的确定性KL=0条件基线；再加入概率分布和KL，公平比较三条latent路径。有限随机Mask bank通过仍不能等同于数学上穷举所有Mask组合。
+当前H50-SCVAE更像让两位记录员和同一位剪辑师重新约定一套语言。posterior记录员能看完整录像，conditional prior记录员只能看剩余片段；两人分别把自己的便签交给同一个剪辑师，而不是把两张便签混在一起。剪辑师也能直接参考未被挖掉的片段，但看不到缺口真值。训练时两条路径各自重建，最终使用时只保留conditional prior这条路。
+
+固定物理Mask通过后，缺口的位置、长度和组合才会随机化；仍会保留状态边界、动作历史等合理线索。随机均值阶段通过后才加入方差和KL，公平比较三条独立路径。有限随机Mask bank通过仍不能等同于数学上穷举所有Mask组合。

@@ -77,6 +77,35 @@ class HierarchicalDecodedOutput:
     state_contact_logits: torch.Tensor
 
 
+@dataclass
+class HierarchicalGaussianLatent:
+    """One hierarchical conditional Gaussian distribution."""
+
+    global_mean: torch.Tensor
+    global_logvar: torch.Tensor
+    local_mean: torch.Tensor
+    local_logvar: torch.Tensor
+
+
+@dataclass
+class HierarchicalStandardCVAEOutput:
+    """One decoder pass plus the two separately encoded distributions.
+
+    ``global_latent`` and ``local_latents`` always come from exactly one
+    distribution selected by ``latent_source``.  The decoder never receives a
+    posterior/prior concatenation, average, or other fusion.
+    """
+
+    physical_state: torch.Tensor
+    action: torch.Tensor
+    state_contact_logits: torch.Tensor
+    posterior: HierarchicalGaussianLatent | None
+    prior: HierarchicalGaussianLatent | None
+    global_latent: torch.Tensor
+    local_latents: torch.Tensor
+    latent_source: str
+
+
 class MLPTokenizer(nn.Module):
     def __init__(self, input_dim: int, output_dim: int) -> None:
         super().__init__()
@@ -2727,6 +2756,272 @@ class HierarchicalConditionalPriorTransformer(HierarchicalPosteriorTransformer):
         )
 
 
+class HierarchicalStandardCVAETransformer(HierarchicalConditionalPriorTransformer):
+    """Standard hierarchical conditional VAE used by the H50-SCVAE study.
+
+    The posterior and conditional prior are separate encoders.  They share one
+    decoder *by parameters only*: every decoder call receives exactly one
+    hierarchical latent and the real masked condition.  Deployment calls
+    :meth:`infer_from_conditional_prior`, which never evaluates the posterior.
+    """
+
+    LOGVAR_MIN = -8.0
+    LOGVAR_MAX = 4.0
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+        self.posterior_global_logvar_head = nn.Linear(
+            self.width, self.global_latent_dim
+        )
+        self.posterior_local_logvar_head = nn.Linear(
+            self.width, self.local_latent_dim
+        )
+        self.conditional_prior_global_logvar_head = nn.Linear(
+            self.width, self.global_latent_dim
+        )
+        self.conditional_prior_local_logvar_head = nn.Linear(
+            self.width, self.local_latent_dim
+        )
+        self.initialize_logvar_heads()
+
+    def initialize_logvar_heads(self) -> None:
+        for head in (
+            self.posterior_global_logvar_head,
+            self.posterior_local_logvar_head,
+            self.conditional_prior_global_logvar_head,
+            self.conditional_prior_local_logvar_head,
+        ):
+            nn.init.zeros_(head.weight)
+            nn.init.constant_(head.bias, -4.0)
+
+    @staticmethod
+    def is_logvar_parameter(name: str) -> bool:
+        return "logvar_head." in name
+
+    def set_standard_training_phase(self, phase: str) -> dict[str, int]:
+        if phase not in {"mean", "kl"}:
+            raise ValueError("standard CVAE phase must be 'mean' or 'kl'")
+        counts = {"mean": 0, "logvar": 0, "trainable": 0}
+        for name, parameter in self.named_parameters():
+            logvar = self.is_logvar_parameter(name)
+            parameter.requires_grad_(phase == "kl" or not logvar)
+            counts["logvar" if logvar else "mean"] += parameter.numel()
+            if parameter.requires_grad:
+                counts["trainable"] += parameter.numel()
+        return counts
+
+    def _pool_local_hidden(
+        self,
+        data_encoded: torch.Tensor,
+        valid: torch.Tensor,
+        times: torch.Tensor,
+        fallback: torch.Tensor,
+    ) -> torch.Tensor:
+        chunk_ids = self.local_chunk_ids(times)
+        pooled: list[torch.Tensor] = []
+        for chunk in range(self.local_chunks):
+            members = (chunk_ids == chunk)[None] & valid
+            denominator = members.sum(dim=1, keepdim=True)
+            value = (
+                data_encoded * members.unsqueeze(-1).to(data_encoded.dtype)
+            ).sum(dim=1)
+            value = value / denominator.clamp_min(1).to(data_encoded.dtype)
+            replacement = fallback[:, 0].expand_as(value)
+            pooled.append(torch.where(denominator > 0, value, replacement))
+        return torch.stack(pooled, dim=1)
+
+    def encode_posterior_distribution(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+    ) -> HierarchicalGaussianLatent:
+        """Encode q(z|x,c): full values plus the current complete-token Mask."""
+        state_mask, action_mask = self._complete_token_masks(
+            batch, state_mask, action_mask
+        )
+        state = batch["physical_state"]
+        action = batch["action"]
+        valid, times, _, _, _, _ = self._layout(batch)
+        state_tokens = self.state_input(
+            torch.cat((state, state_mask.to(state.dtype)), dim=-1)
+        ) + self.input_type_embedding.weight[0]
+        action_tokens = self.action_input(
+            torch.cat((action, action_mask.to(action.dtype)), dim=-1)
+        ) + self.input_type_embedding.weight[1]
+        tokens = torch.stack((state_tokens[:, :-1], action_tokens), dim=2).flatten(1, 2)
+        tokens = torch.cat((tokens, state_tokens[:, -1:]), dim=1)
+        tokens = tokens + self.time_embedding(times)[None]
+        cls = self.posterior_cls.expand(tokens.shape[0], -1, -1)
+        encoded = self.posterior_encoder(
+            torch.cat((cls, tokens), dim=1),
+            torch.cat((torch.ones_like(valid[:, :1]), valid), dim=1),
+            torch.cat((times.new_tensor([-1]), times)),
+            False,
+        )
+        local_hidden = self._pool_local_hidden(
+            encoded[:, 1:], valid, times, self.empty_local
+        )
+        return HierarchicalGaussianLatent(
+            global_mean=self.global_head(encoded[:, 0]),
+            global_logvar=self.posterior_global_logvar_head(encoded[:, 0]).clamp(
+                self.LOGVAR_MIN, self.LOGVAR_MAX
+            ),
+            local_mean=self.local_head(local_hidden),
+            local_logvar=self.posterior_local_logvar_head(local_hidden).clamp(
+                self.LOGVAR_MIN, self.LOGVAR_MAX
+            ),
+        )
+
+    def encode_conditional_prior_distribution(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+    ) -> HierarchicalGaussianLatent:
+        """Encode p(z|c) without exposing any masked truth."""
+        state_mask, action_mask = self._complete_token_masks(
+            batch, state_mask, action_mask
+        )
+        state = batch["physical_state"]
+        action = batch["action"]
+        valid, times, _, _, _, _ = self._layout(batch)
+        state_tokens = self.conditional_prior_state_input(
+            torch.cat(
+                (state.masked_fill(state_mask, 0.0), state_mask.to(state.dtype)),
+                dim=-1,
+            )
+        ) + self.conditional_prior_type_embedding.weight[0]
+        action_tokens = self.conditional_prior_action_input(
+            torch.cat(
+                (action.masked_fill(action_mask, 0.0), action_mask.to(action.dtype)),
+                dim=-1,
+            )
+        ) + self.conditional_prior_type_embedding.weight[1]
+        tokens = torch.stack((state_tokens[:, :-1], action_tokens), dim=2).flatten(1, 2)
+        tokens = torch.cat((tokens, state_tokens[:, -1:]), dim=1)
+        tokens = tokens + self.conditional_prior_time_embedding(times)[None]
+        cls = self.conditional_prior_cls.expand(tokens.shape[0], -1, -1)
+        encoded = self.conditional_prior_encoder(
+            torch.cat((cls, tokens), dim=1),
+            torch.cat((torch.ones_like(valid[:, :1]), valid), dim=1),
+            torch.cat((times.new_tensor([-1]), times)),
+            False,
+        )
+        local_hidden = self._pool_local_hidden(
+            encoded[:, 1:], valid, times, self.conditional_prior_empty_local
+        )
+        return HierarchicalGaussianLatent(
+            global_mean=self.conditional_prior_global_head(encoded[:, 0]),
+            global_logvar=self.conditional_prior_global_logvar_head(
+                encoded[:, 0]
+            ).clamp(self.LOGVAR_MIN, self.LOGVAR_MAX),
+            local_mean=self.conditional_prior_local_head(local_hidden),
+            local_logvar=self.conditional_prior_local_logvar_head(
+                local_hidden
+            ).clamp(self.LOGVAR_MIN, self.LOGVAR_MAX),
+        )
+
+    @staticmethod
+    def reparameterize(
+        distribution: HierarchicalGaussianLatent,
+        epsilon: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if epsilon is None:
+            global_epsilon = torch.randn_like(distribution.global_mean)
+            local_epsilon = torch.randn_like(distribution.local_mean)
+        else:
+            global_epsilon, local_epsilon = epsilon
+            if global_epsilon.shape != distribution.global_mean.shape:
+                raise ValueError("global epsilon shape disagrees with its distribution")
+            if local_epsilon.shape != distribution.local_mean.shape:
+                raise ValueError("local epsilon shape disagrees with its distribution")
+        return (
+            distribution.global_mean
+            + torch.exp(0.5 * distribution.global_logvar) * global_epsilon,
+            distribution.local_mean
+            + torch.exp(0.5 * distribution.local_logvar) * local_epsilon,
+        )
+
+    def decode_from_conditioned_latents(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        global_latent: torch.Tensor,
+        local_latents: torch.Tensor,
+    ) -> HierarchicalDecodedOutput:
+        """Decode one, and only one, latent together with the real condition."""
+        return self.decode_from_hierarchical_latent(
+            batch, state_mask, action_mask, global_latent, local_latents
+        )
+
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        *,
+        latent_source: str = "prior_mean",
+        epsilon: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> HierarchicalStandardCVAEOutput:
+        if latent_source not in {
+            "posterior_mean", "posterior_sample", "prior_mean", "prior_sample"
+        }:
+            raise ValueError("unknown standard CVAE latent source")
+        posterior: HierarchicalGaussianLatent | None = None
+        prior: HierarchicalGaussianLatent | None = None
+        if latent_source.startswith("posterior"):
+            posterior = self.encode_posterior_distribution(
+                batch, state_mask, action_mask
+            )
+            selected = posterior
+        else:
+            prior = self.encode_conditional_prior_distribution(
+                batch, state_mask, action_mask
+            )
+            selected = prior
+        if latent_source.endswith("sample"):
+            global_latent, local_latents = self.reparameterize(selected, epsilon)
+        else:
+            global_latent, local_latents = selected.global_mean, selected.local_mean
+        decoded = self.decode_from_conditioned_latents(
+            batch,
+            state_mask,
+            action_mask,
+            global_latent,
+            local_latents,
+        )
+        return HierarchicalStandardCVAEOutput(
+            physical_state=decoded.physical_state,
+            action=decoded.action,
+            state_contact_logits=decoded.state_contact_logits,
+            posterior=posterior,
+            prior=prior,
+            global_latent=global_latent,
+            local_latents=local_latents,
+            latent_source=latent_source,
+        )
+
+    def infer_from_conditional_prior(
+        self,
+        batch: dict[str, torch.Tensor],
+        state_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        *,
+        sample: bool = True,
+        epsilon: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> HierarchicalStandardCVAEOutput:
+        """Deployment path: c -> p(z|c) -> one z_p -> D(z_p,c)."""
+        return self.forward(
+            batch,
+            state_mask,
+            action_mask,
+            latent_source="prior_sample" if sample else "prior_mean",
+            epsilon=epsilon,
+        )
+
+
 def build_model(config: dict[str, Any]) -> nn.Module:
     kind = str(config.get("kind", "transformer"))
     if kind == "transformer":
@@ -2741,6 +3036,8 @@ def build_model(config: dict[str, Any]) -> nn.Module:
         return HierarchicalPosteriorTransformer(config)
     if kind == "physics_hierarchical_conditional_prior_transformer":
         return HierarchicalConditionalPriorTransformer(config)
+    if kind == "physics_hierarchical_standard_cvae_transformer":
+        return HierarchicalStandardCVAETransformer(config)
     if kind == "tcn":
         return TCNCVAE(config)
     raise ValueError(f"unsupported model kind {kind!r}")

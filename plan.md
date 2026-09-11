@@ -1,10 +1,14 @@
 # State–Action Posterior 容量实验：精简计划与结果台账
 
-最后更新：2026-09-11
+最后更新：2026-09-12
 
 本文只记录具有研究意义的正式训练、正式比较、只读诊断和当前唯一下一步。两步 smoke 统一视为“开机自检”，不作为模型质量证据。当前阶段的完整执行合同见 [Next.md](Next.md)，面向读者的通俗说明见 [explain.md](explain.md)。
 
 ## 1. 当前状态与唯一下一步
+
+当前活动路线已切换为 **H50-SCVAE 标准条件 CVAE**。Windows 已完成66,129,571参数模型、M-F/M-R/K1训练评测和四个Shell入口；Ubuntu尚未运行smoke。唯一下一步是同步代码后执行`posterior-hierarchical-standard-cvae-smoke`，审核工程合同后再从H50-A step34000 `last.pt`独立启动M-F。CPD、D1和CRA均为`SUPERSEDED`历史结果，不再续训，也不作为SCVAE初始化。
+
+硬约束是：posterior与conditional prior只共享decoder参数，任何一次decoder调用只能接收其中一条路径的一组latent；二者绝不拼接、平均或attention融合。最终推理只允许`Mask条件 → p(z|c) → prior latent → D(z,c)`，不得调用posterior或回退到真值路径。
 
 当前已确认：
 
@@ -39,7 +43,11 @@ CPD的latent门禁连续三次通过，最终global/local标准化RMSE为`0.0475
 
 最难随机Mask为`random_both_90`，worst State/Action`0.67653/0.47690`；固定Mask最难为`joint_gap_8`，为`0.41619/0.22672`。teacher保持始终PASS，student latent替换ratio最终为`13.74/15.08/17.25`。这支持“prior latent已接近teacher，但原decoder对off-manifold小偏差敏感”，不支持“conditional prior已经能良好补全”。full-both prior为无信息诊断，State/Action`1.38375/1.16703`，不控制PASS。正式唯一下一步为预注册D1 latent接口适配。
 
-F4G smoke报告语义修复的历史提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`。H50-CPD实现当前位于Windows工作树；正式Ubuntu run仍以用户同步后由run写入的`source_commit.txt`为准，不预填提交号。
+D1随后在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_adapt_20260911_184842`启动，源码`0315b7d13780eeacb5937cc2bad78be2df964708`，从正式CPD `best_latent.pt`（SHA256 `555d2af2...2fcc`）model-only初始化。第一次训练后完整评测step2000即触发保护并安全停止；只完成2k而非12k，last checkpoint读回SHA256为`c2f7d8db...519f`。唯一失败check是current/reference decoder输出的functional State RMSE `0.0021167>0.002`，超5.84%；functional Action`0.0010045`、p99`0.006774`、contact一致性和全部teacher真值指标仍PASS，故没有“明显真值能力遗忘”的证据，但按预注册硬门禁必须拒绝。
+
+D1 step2000并未改善student主任务：随机Mask score由`16.9132`恶化至`18.2707`，固定Maskscore由`10.4047`改善至`9.8390`，latent仍单点评测PASS但global/local误差从`0.04757/0.07825`轻微恶化至`0.04860/0.07869`。summary的最终`latent_alignment_pass=false`只因不足三次评测；best仍为step0。正式结论为`STOP_DECODER_ADAPTATION_REJECTED`：不延长、不原样重跑D1，不进入D2/KL。该结果支持重新审查“teacher latent的欧氏/cosine接近是否等价于decoder可用”，下一方案必须保持Mask信息只能经latent传递。
+
+F4G smoke报告语义修复的历史提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`。H50-SCVAE实现当前位于Windows工作树；正式Ubuntu run仍以用户同步后由run写入的`source_commit.txt`为准，不预填提交号。
 
 固定推进顺序：
 
@@ -52,8 +60,12 @@ H38-A 完整序列重建（已FAIL，仅作latent压力诊断）
 → H50-CRA（CANCELLED/SUPERSEDED，未正式运行）
 → H50-CPD smoke（工程PASS；无质量结论）
 → P0/P1/P2冻结decoder蒸馏（50k完成；latent PASS、重建FAIL）
-→ D1受控latent接口适配（待详细结果审核后启动；严格满足条件才允许D2）
-→ posterior mean / posterior sample / conditional prior sample 三路径KL对照
+→ D1受控latent接口适配（step2000触发teacher保持拒绝，已停止）
+→ CPD/D1/CRA统一标记SUPERSEDED，不再续训
+→ H50-SCVAE smoke（当前唯一下一步）
+→ M-F原8类固定物理Mask均值训练
+→ M-R动态单缺口及2–3个物理多缺口均值训练
+→ K1标准KL与posterior mean/sample、prior sample三条独立路径对照
 ```
 
 H38-A不再是H38-B的硬门槛：A的全遮挡任务信息更少，只用于latent压力诊断。H50-A显示约32%的参数增长显著降低平均State与p99，但最差State窗口几乎未变。15k续训是针对“只差3.71%且末段仍单调改善”的一次预注册例外；不允许再追加第二次续训或H64阶梯。
@@ -62,12 +74,12 @@ H38-A不再是H38-B的硬门槛：A的全遮挡任务信息更少，只用于lat
 
 ### 2.1 我们正在验证什么
 
-早期阶段验证posterior reconstruction capacity：posterior encoder读取完整真值并编码latent。当前H50-CPD首次单独验证conditional prior：student只能读取Mask后的可见序列，并必须先预测canonical latent，再通过不接收condition的decoder重建。
+早期阶段验证posterior reconstruction capacity：posterior encoder读取完整真值并编码latent。当前H50-SCVAE改为标准联合训练：posterior读取完整序列与当前Mask，conditional prior只读取Mask后的可见序列，二者分别产生latent并用同一decoder参数独立重建；decoder还读取真实masked condition，但永远看不到被遮挡真值。
 
 因此：
 
 - 历史posterior通过只证明模型能记住并解码已见序列，不能证明只看Mask条件也能补全。
-- CPD通过才支持“已见序列上的Mask条件能够预测确定性层级latent并完成补全”；teacher真值只用于训练监督，不进入student前向输出。
+- SCVAE的prior路径通过才支持“已见序列上的物理Mask条件能够形成可用层级latent并完成补全”；posterior只参与训练和评测，最终推理不调用它。
 - 通过不能证明未见 motion 泛化。
 - `KL=0` 时不要求 latent 接近某个可随机采样的分布，也不能把随机 latent 当作有效生成结果。
 - 只有后续 conditional prior 在不读取被遮挡真值时通过，才可以讨论真实的条件生成能力。
@@ -105,7 +117,8 @@ S0, A0, S1, A1, ..., A(T-1), ST
 | F4G / F4G-O direct output | 每个 window 对应完整 State/Action/contact 输出；F4G梯度学习，F4G-O直接复制真值 | 无 encoder、latent、decoder | 分开验证稀疏查表优化和解析 evaluator 上限 |
 | H38 hierarchical | 独立 posterior/condition encoder + global/local latent + cross-attention/FiLM decoder | 37,574,883 | 历史T64层级容量实验 |
 | H50-A | H38同结构，宽度扩大到448 | 51,005,283 | 已通过canonical posterior autoencoding fit |
-| H50-CPD | H50-A teacher/base + 独立conditional prior；decoder无condition旁路 | 65,784,739 | 当前目标：Mask条件预测canonical层级latent |
+| H50-CPD | 冻结H50-A + 独立conditional prior；canonical decoder不读condition | 65,784,739 | `SUPERSEDED`历史蒸馏路线 |
+| H50-SCVAE | 联合训练q/p/condition encoder/共享decoder；q/p分开解码 | 66,129,571 | 当前标准conditional VAE路线；最终仅prior推理 |
 
 H38 的 latent 为一个 256 维 global code 加 16 个 128 维 local code；每个 local code覆盖4个 transition。decoder 的每一层都能读取条件和17个 latent token，并再次接收 global/local FiLM 条件，避免所有时序细节只通过一个输入 token 传播。
 
@@ -123,7 +136,7 @@ H38/H50-B使用8类物理结构 Mask：
 | Full Action | 完整 State 可见，遮挡全部 Action |
 | Joint gap 2/8 | 同时遮挡短 Action 段和内部 State，保留前后 State 边界 |
 
-当前CPD复用这8类Mask作保持检查，同时以完整Token随机Mask为主：训练覆盖State-only、Action-only、Both的5%–95%随机比例、稀疏Token和full State/Action；独立评测bank覆盖10%/35%/65%/90%以及single/full域。它仍不是未见motion泛化实验，也不声称穷举全部Mask组合。
+当前SCVAE的M-F使用这8类固定Mask。M-R只扩展为这些物理Mask的动态起点/长度，以及2–3个互不重叠、间隔至少一个完整可见transition的物理缺口；禁止独立散点、feature/element、full State与full both。独立seed的held-out bank每窗口含8个动态单缺口、4个双缺口和4个三缺口。它仍不是未见motion泛化实验，也不声称穷举全部Mask组合。
 
 ### 2.5 Loss、指标与门禁
 
@@ -247,7 +260,8 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 | H50-B | 从续训`best_fit.pt` model-only初始化；8类固定物理Mask | 60k，每2k；三连PASS提前停 | `FAIL quality`；仅global State `0.020384`超1.92%，但full-both State退化到`0.060442` | 设计保留A能力的B修复，不进入R |
 | H50-R | 从H50-B继续旧condition融合 | 原计划最多30k | `CANCELLED`；B会遗忘A且无fit marker | 不再执行 |
 | H50-CRA | 冻结H50-A、decoder侧差分condition adapter | 未正式训练 | `CANCELLED/SUPERSEDED`；不能检验Mask条件能否预测latent | 删除训练入口，不形成结果 |
-| H50-CPD | Mask序列→新conditional prior→global+16 local→H50-A canonical decoder | P0/P1/P2冻结decoder正式50k | latent PASS、重建/联合质量FAIL；best joint score 16.8382 | 按预注册决策进入D1，详细指标待回传 |
+| H50-CPD | Mask序列→新conditional prior→global+16 local→冻结canonical decoder | P0/P1/P2正式50k | latent PASS但重建FAIL；best joint score 16.8382 | `SUPERSEDED`；D1也已拒绝，不再续训 |
+| H50-SCVAE | 标准q/p；真实masked condition；共享decoder分开解码 | Windows实现完成，Ubuntu未smoke | `READY/UNVERIFIED`；无质量结论 | 只运行工程smoke |
 
 ### 3.6 正式结果源码审计
 
@@ -275,6 +289,9 @@ source commit只用于复现实验，不用于替代run内的dataset、fixture�
 | H50-A正式 | `fd7928f26b1a12dfa6e01218c7defd9d5ffe2166` |
 | H50-A续训 | `bf6d14c3848ffc1c544a56195cf07d3a2188c863` |
 | H50-B | `bf6d14c3848ffc1c544a56195cf07d3a2188c863` |
+| H50-CPD正式 | `e7522c9f6262d02cc9fbaa7eee89e0104530377f` |
+| H50-CPD D1 | `0315b7d13780eeacb5937cc2bad78be2df964708` |
+| H50-SCVAE | 未运行，source commit待Ubuntu run生成 |
 
 ## 4. 工程验收摘要
 
@@ -284,15 +301,15 @@ S0、S25、F4B A/B/C、F4E、F4F G8/T129、F4G及H38均执行过对应smoke。H3
 
 H50续训首次启动在训练前被准入检查拦截：旧summary的末三点评测对象没有稳定携带step字段，step实际位于`metrics.jsonl`外层。现改为从源JSONL核对`28000/29000/30000`并校验其score与summary一致；该次没有执行optimizer step，不形成模型结论。
 
-Windows代码READY或测试PASS只表示接口和静态合同通过，不写入正式实验结果表。CRA专项实现与入口已删除。CPD专项测试覆盖精确参数量、posterior复制和Mask列归零、canonical decoder隔离、masked真值隔离、完整Token约束、P0/P1/P2权重、D1/D2 allowlist与决策、随机Mask双seed、full-both报告、teacher latent donor及checkpoint读回；真实质量仍必须由Ubuntu正式run决定。
+Windows代码READY或测试PASS只表示接口和静态合同通过，不写入正式实验结果表。CRA专项实现与入口已删除；CPD代码只为历史checkpoint读取兼容保留。SCVAE轻量测试覆盖66,129,571参数合同、H50-A model-only迁移、KL前logvar冻结、q读取真值、p/condition隐藏真值隔离、prior-only部署、单latent decoder调用、0.75/0.25重建、q-p stop-gradient对齐、KL手算、物理随机Mask双seed和共享epsilon。真实质量仍必须由Ubuntu新run决定。
 
 ## 5. 当前执行与结果回填
 
-### 5.0 H50-CPD当前入口
+### 5.0 H50-SCVAE当前入口
 
-当前正式路线已由旧H50-R/CRA切换为H50-CPD。根本验收对象仍是完整State token、完整Action token或二者组合的随机Mask；不使用element/feature Mask。student可见信息只能先形成global+16 local latent，decoder没有condition旁路。
+当前正式路线已由H50-CPD/D1切换为H50-SCVAE。根本验收对象仍是物理上可推测的完整State/Action token缺口；不使用element/feature或无规律散点Mask。decoder读取真实masked condition和一条latent，但在任何一次调用中都不允许融合q与p。
 
-模型、Mask、P0/P1/P2、D1/D2、marker和Ubuntu命令的详细活动合同见[Next.md](Next.md)。P0/P1/P2已经完成，当前应先回传source commit、H50-A checkpoint hash、teacher cache hash、最后三次latent/重建门禁、full-both不可辨识性诊断、teacher保持和marker，再以该正式run启动D1。下文旧H50-B入口只保留为历史记录，不再执行。
+模型、Mask、M-F/M-R/K1、marker和Ubuntu命令的详细活动合同见[Next.md](Next.md)。当前只允许运行SCVAE smoke；它通过后从H50-A step34000 `last.pt`重新启动M-F，不继承任何CPD/D1权重。下文旧H50-B、CPD和D1入口只保留为历史记录，不再执行。
 
 ### 5.1 H50-A续训结果与H50-B历史入口（已执行，不再使用）
 
@@ -308,7 +325,7 @@ H50-A尾段续训已经完成。run为：
 
 ### 5.2 后续 KL 三路径边界
 
-只有H50-CPD的确定性conditional prior同时通过latent对齐、随机/固定Mask重建和teacher保持门禁后，才冻结KL=0基线并实现：
+只有H50-SCVAE的M-R让prior mean、posterior mean、q-p对齐、固定Mask和held-out物理随机Mask连续三次同时通过，且高遮挡条件下latent未被完全忽略，才进入已经实现但受marker阻断的K1：
 
 | 路径 | latent来源 | 是否读取被遮挡真值 | 作用 |
 |---|---|---|---|
