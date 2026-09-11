@@ -33,7 +33,11 @@
 
 H50-CPD固定读取H50-A续训run的step34000 `last.pt`。51,005,283参数的H50-A teacher/base与decoder先全部冻结；新增6层、宽448的conditional prior共14,779,456参数，总计65,784,739参数。teacher以完整序列产生canonical latent作为监督，student以Mask序列预测同拓扑latent，再由严格canonical decoder接口输出完整序列。
 
-正式P0/P1/P2首次启动在step0 held-out全量评测中停止：评测元素数超过PyTorch `quantile()`支持上限，尚未发生任何optimizer更新，因此是工程失败而非latent或重建失败。Windows已把T64/CPD全部p99路径改成确定性CPU quantile，仍对全部元素精确计算，不抽样、不近似且不改变门禁；新增16,777,217元素回归测试已通过。当前唯一下一步：同步修复后从H50-A重新新建run运行50k上限的`posterior-hierarchical-prior-train`，不能继承smoke或失败run。
+正式P0/P1/P2首次启动曾在step0因PyTorch大张量`quantile()`限制停止，且没有optimizer更新；修复后正式run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_20260911_023356`已跑满50k，源码`e7522c9f6262d02cc9fbaa7eee89e0104530377f`。execution和latent marker存在，质量marker为`cvae.failed`；H50-A源checkpoint SHA256为`18bfc7be...bae2`，teacher cache为`d76d9d65...fd24`，冻结base前后hash一致且无梯度，last checkpoint读回SHA256为`f0b228ab...355e`。
+
+CPD的latent门禁连续三次通过，最终global/local标准化RMSE为`0.04757/0.07825`、cosine为`0.99898/0.99732`、相对cross-window/cross-motion donor误差比为`0.06404/0.05424`；best latent在step50000、score`0.95255`。但重建明显失败：最终held-out随机Mask global State/Action为`0.10133/0.06431`、worst-window为`0.67653/0.47690`、p99`0.35953`、contact`99.9699%`，score`16.9132`；固定物理Mask对应`0.07018/0.04200`、`0.41619/0.22672`、p99`0.23126`、contact`99.9989%`，score`10.4047`。best joint在step48000、score`16.8382`。最终三次几乎平台，不能靠继续P2合理外推到门禁。
+
+最难随机Mask为`random_both_90`，worst State/Action`0.67653/0.47690`；固定Mask最难为`joint_gap_8`，为`0.41619/0.22672`。teacher保持始终PASS，student latent替换ratio最终为`13.74/15.08/17.25`。这支持“prior latent已接近teacher，但原decoder对off-manifold小偏差敏感”，不支持“conditional prior已经能良好补全”。full-both prior为无信息诊断，State/Action`1.38375/1.16703`，不控制PASS。正式唯一下一步为预注册D1 latent接口适配。
 
 F4G smoke报告语义修复的历史提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`。H50-CPD实现当前位于Windows工作树；正式Ubuntu run仍以用户同步后由run写入的`source_commit.txt`为准，不预填提交号。
 
@@ -47,10 +51,8 @@ H38-A 完整序列重建（已FAIL，仅作latent压力诊断）
 → H50-B固定Mask（60k；仅global State超1.92%，但full-both明显遗忘）
 → H50-CRA（CANCELLED/SUPERSEDED，未正式运行）
 → H50-CPD smoke（工程PASS；无质量结论）
-→ P0/P1/P2冻结decoder蒸馏（READY，最多50k）
-  ├─ latent FAIL：停止，调查conditional prior
-  ├─ latent与重建PASS：冻结KL=0基线
-  └─ latent PASS但重建FAIL：D1受控latent接口适配；严格满足条件才允许D2
+→ P0/P1/P2冻结decoder蒸馏（50k完成；latent PASS、重建FAIL）
+→ D1受控latent接口适配（待详细结果审核后启动；严格满足条件才允许D2）
 → posterior mean / posterior sample / conditional prior sample 三路径KL对照
 ```
 
@@ -245,7 +247,7 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 | H50-B | 从续训`best_fit.pt` model-only初始化；8类固定物理Mask | 60k，每2k；三连PASS提前停 | `FAIL quality`；仅global State `0.020384`超1.92%，但full-both State退化到`0.060442` | 设计保留A能力的B修复，不进入R |
 | H50-R | 从H50-B继续旧condition融合 | 原计划最多30k | `CANCELLED`；B会遗忘A且无fit marker | 不再执行 |
 | H50-CRA | 冻结H50-A、decoder侧差分condition adapter | 未正式训练 | `CANCELLED/SUPERSEDED`；不能检验Mask条件能否预测latent | 删除训练入口，不形成结果 |
-| H50-CPD | Mask序列→新conditional prior→global+16 local→H50-A canonical decoder | P0/P1/P2最多50k；必要时D1 12k、D2 8k | `CODE READY`，尚无Ubuntu结果 | smoke→正式蒸馏；按latent/重建双门禁决策 |
+| H50-CPD | Mask序列→新conditional prior→global+16 local→H50-A canonical decoder | P0/P1/P2冻结decoder正式50k | latent PASS、重建/联合质量FAIL；best joint score 16.8382 | 按预注册决策进入D1，详细指标待回传 |
 
 ### 3.6 正式结果源码审计
 
@@ -290,7 +292,7 @@ Windows代码READY或测试PASS只表示接口和静态合同通过，不写入�
 
 当前正式路线已由旧H50-R/CRA切换为H50-CPD。根本验收对象仍是完整State token、完整Action token或二者组合的随机Mask；不使用element/feature Mask。student可见信息只能先形成global+16 local latent，decoder没有condition旁路。
 
-模型、Mask、P0/P1/P2、D1/D2、marker和Ubuntu命令的详细活动合同见[Next.md](Next.md)。目前仅允许执行CPD smoke；正式结果必须回填run路径、source commit、H50-A checkpoint hash、teacher cache hash、最后三次latent/重建门禁、full-both不可辨识性诊断、teacher保持、marker和唯一下一步。下文旧H50-B入口只保留为历史记录，不再执行。
+模型、Mask、P0/P1/P2、D1/D2、marker和Ubuntu命令的详细活动合同见[Next.md](Next.md)。P0/P1/P2已经完成，当前应先回传source commit、H50-A checkpoint hash、teacher cache hash、最后三次latent/重建门禁、full-both不可辨识性诊断、teacher保持和marker，再以该正式run启动D1。下文旧H50-B入口只保留为历史记录，不再执行。
 
 ### 5.1 H50-A续训结果与H50-B历史入口（已执行，不再使用）
 

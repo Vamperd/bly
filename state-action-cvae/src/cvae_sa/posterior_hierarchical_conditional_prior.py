@@ -1337,6 +1337,7 @@ def run_experiment(
             1.0 if preservation["passed"] else 2.0,
         )
         result = {
+            "optimizer_step": step,
             "random_masks": random_metrics,
             "fixed_physical_masks": fixed_metrics,
             "latent_alignment": alignment,

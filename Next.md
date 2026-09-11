@@ -2,7 +2,7 @@
 
 最后更新：2026-09-11
 
-状态：Ubuntu smoke已完成工程验收，正式P0/P1/P2首次启动在step0全量评测前因PyTorch大张量`quantile()`限制停止，尚未发生optimizer更新，不形成模型结果。Windows已将全部p99计算替换为确定性CPU quantile并加入超过16,777,216元素的回归测试；待同步后须新建正式run重跑。smoke run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_smoke_20260911_022214`；其2-step质量与latent失败没有模型含义。H50-CRA已取消，不得再运行其入口。正式事实与历史结果见[plan.md](plan.md)，安全和交接规则见[AGENTS.md](AGENTS.md)。
+状态：Ubuntu smoke已完成工程验收；大张量p99工程问题修复后，正式P0/P1/P2已在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_20260911_023356`跑满50k。latent连续三次PASS，最终global/local标准化RMSE为`0.04757/0.07825`，但held-out随机Mask最终score仍为`16.9132`，固定Mask为`10.4047`，且末段平台。teacher保持与冻结合同PASS。正式决策为`RUN_CONTROLLED_DECODER_ADAPTATION_D1`。H50-CRA已取消，不得再运行其入口。正式事实与历史结果见[plan.md](plan.md)，安全和交接规则见[AGENTS.md](AGENTS.md)。
 
 ## 1. 当前问题与正式数据流
 

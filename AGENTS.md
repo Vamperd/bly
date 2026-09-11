@@ -715,8 +715,13 @@ full State/Action；训练/held-out seed为20260840/20260841。P0/P1/P2在decode
 依次从teacher latent主导转为重建主导。latent失败即停止；latent与重建均过则冻结KL=0基线；只有
 latent通过但重建失败才允许D1 latent接口适配，满足20%改善、最终score≤1.5和teacher保持后才允许D2。
 full-both prior只作不可辨识性报告。当前入口为`posterior-hierarchical-prior-smoke`、`...-train`和
-`...-decoder-adapt`；当前唯一下一步是从H50-A重新初始化运行正式`...-train`，不得继承smoke权重。
-详细合同见`Next.md`，正式结果回填`plan.md`。KL三路径仍未实现。
+`...-decoder-adapt`。修复p99工程问题后的正式P0/P1/P2 run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_20260911_023356`已跑满50k；
+源码`e7522c9f6262d02cc9fbaa7eee89e0104530377f`。latent最终global/local标准化RMSE
+`0.04757/0.07825`且门禁连续PASS；但held-out随机/固定Mask score为`16.9132/10.4047`，随机worst
+State/Action为`0.67653/0.47690`，固定为`0.41619/0.22672`，质量FAIL。teacher保持、冻结base hash、
+checkpoint读回和latent依赖均PASS。best joint在step48000、score`16.83819`；正式下一步为D1 latent
+接口适配，不允许直接D2或KL。详细合同见`Next.md`，完整结果见`plan.md`。KL三路径仍未实现。
 
 正式`...-train`首次启动在step0全量评测时因PyTorch大张量`quantile()`限制停止，尚无optimizer更新，
 不得记作模型失败。Windows现已把T64/CPD全部p99计算替换为确定性CPU quantile，仍使用全部元素且不改变
