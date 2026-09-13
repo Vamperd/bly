@@ -1,8 +1,32 @@
 # 活动合同：H50-SCVAE 标准条件 CVAE
 
-最后更新：2026-09-12
+最后更新：2026-09-13
 
-状态：Windows 已完成模型、固定/随机物理 Mask、均值训练、KL 三路径评测及 Shell 入口实现；尚未收到 Ubuntu smoke。H50-A 仅作初始化。CPD、D1 与 CRA 均为历史 `SUPERSEDED`，不得用于新路线初始化。
+状态：正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，execution PASS、quality FAIL、best joint score `2.1918797`。审计确认q-p均值对齐PASS、latent未被忽略，但prior和posterior重建均FAIL。M-F2设计前先执行一次H50-A已见窗口Action物理重放；该独立入口已实现、尚待Ubuntu运行。视频诊断后再恢复M-F2；M-R和KL仍被质量marker阻断。H50-A不重新训练；CPD、D1与CRA均为历史`SUPERSEDED`。
+
+## 0. 当前插入式诊断：H50-A已见窗口Action重放
+
+这不是新的训练，也不改变SCVAE路线。默认读取H50-A续训run的step34000 `last.pt`，确定性选择按motion名称排序的第一个`variant 0 / start 0 / T64`训练窗口，并使用H50-A实际训练过的`full_both` Mask：posterior看完整窗口，decoder的State/Action condition全部被Mask。模型重建出的64步Action替换原Action后，在同一Isaac配置中与原Action各重放一次。
+
+主视频固定为三栏：训练HDF5记录、原始Action重放、H50-A预测Action重放。报告同时给出离线Action RMSE、原始重放对训练记录的偏移，以及预测重放相对原始重放的偏移。只有后两条重放共享完全相同的reset和runtime context；如果训练记录与原始重放差异较大，仍可比较中/右两栏，但不能把左/中差异归因于H50-A。
+
+Ubuntu命令不包含Git操作：
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+export CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256
+
+unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
+unset CVAE_POSTERIOR_H50_REPLAY_CHECKPOINT CVAE_POSTERIOR_H50_REPLAY_MOTION_KEY
+unset CVAE_POSTERIOR_H50_REPLAY_VARIANT CVAE_POSTERIOR_H50_REPLAY_WINDOW_START
+
+bash ./cvae_repro.sh posterior-h50-action-replay
+```
+
+完成后回传`manifests/h50a_seen_window_action_replay_summary.json`、marker列表、`source_commit.txt`及主视频路径。`.ok`只表示推理、两次Isaac重放、指标和MP4均完整，不代表conditional prior或随机Mask质量通过。
 
 正式历史和数值见 [plan.md](plan.md)，通俗背景见 [explain.md](explain.md)，安全约束见 [AGENTS.md](AGENTS.md)。
 
@@ -134,4 +158,4 @@ bash ./cvae_repro.sh posterior-hierarchical-standard-cvae-kl
 
 核心产物为 `standard_cvae_summary.json`、`physical_random_mask_bank.json`、KL阶段的`kl_three_path_comparison.json`、四张SVG、`best_mean_fit.pt`/`best_kl_fit.pt`及`last.pt`。smoke、execution、M-F质量、M-R质量、KL比较完整和KL质量使用独立marker。
 
-截至本文更新，代码静态/轻量测试已证明接口隔离和参数合同，但没有Ubuntu训练质量结果。即使全流程通过，也只能声明：模型在已见32-motion、T64窗口上，能对预注册的物理可推测完整Token Mask进行均值补全，并能从conditional prior采样得到稳定结果；不能声明未见motion泛化、任意无物理线索Mask或所有组合的数学完备性。
+截至本文更新，正式M-F在step60000的prior mean为global State/Action `0.043838/0.026704`、worst `0.074567/0.041620`、p99 `0.137523`，posterior mean为`0.038486/0.023520`、worst `0.058044/0.034188`、p99 `0.120053`；两者contact均100%。q-p global/local标准化RMSE `0.052575/0.080972`、cosine `0.999920/0.999921`，alignment通过且latent未被忽略。这表明当前先要解决联合训练中的重建底座，而非继续加强q-p对齐。即使后续全流程通过，也只能声明：模型在已见32-motion、T64窗口上，能对预注册的物理可推测完整Token Mask进行均值补全，并能从conditional prior采样得到稳定结果；不能声明未见motion泛化、任意无物理线索Mask或所有组合的数学完备性。

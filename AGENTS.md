@@ -756,8 +756,18 @@ element/feature、full State或full both。full both仅为无信息诊断。只�
 KL三路径比较。完整合同和Ubuntu命令以`Next.md`为准，正式结果回填`plan.md`。
 
 Windows已实现四个新入口：`posterior-hierarchical-standard-cvae-smoke`、`...-fixed`、
-`...-random-physical`、`...-kl`。轻量测试只证明66,129,571参数合同、masked真值隔离、prior-only部署、
-完整Token物理Mask、双路径loss和共享epsilon；Ubuntu smoke及正式质量均尚未验证。
+`...-random-physical`、`...-kl`。Ubuntu smoke run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_smoke_20260912_015255`
+已完成2 step并通过工程marker；`quality_pass=false`及score`111.3966`无质量含义。正式M-F run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`
+随后跑满60k，源码`0029f8c637d041dbf9613db0c8b3188e32c09359`，execution PASS但quality FAIL，
+best位于step60000，joint score为`2.1918797`。prior mean的global State/Action、worst State/Action和
+p99为`0.043838/0.026704`、`0.074567/0.041620`、`0.137523`；posterior mean对应
+`0.038486/0.023520`、`0.058044/0.034188`、`0.120053`；两条路径contact均100%。q-p global/local
+标准化RMSE为`0.052575/0.080972`，cosine为`0.999920/0.999921`，alignment gate通过且
+`latent_ignored=false`。因此失败不只是prior落后：posterior自身也未建立合格重建，当前主要证据指向
+q/p/condition/decoder同时联合优化的课程问题。不得原样延长、启动M-R或K1；下一步只设计先posterior、
+再prior、最后短程联合的M-F2分阶段均值课程。
 
 ### 6.5 已完成 parent 训练
 
@@ -914,21 +924,21 @@ bash ./cvae_repro.sh validate-state-mask-video
 | H50-SCVAE smoke/执行 | `cvae_posterior_standard_cvae_smoke.ok` / `cvae_posterior_standard_cvae_execution.ok` |
 | H50-SCVAE M-F/M-R质量 | `cvae_posterior_standard_cvae_fixed_mean_fit.ok` / `cvae_posterior_standard_cvae_random_physical_mean_fit.ok` |
 | H50-SCVAE KL比较/质量 | `cvae_posterior_standard_cvae_kl_comparison.ok` / `cvae_posterior_standard_cvae_kl_fit.ok` |
+| H50-A单窗口Action重放 | `cvae_posterior_h50_action_replay.ok`（仅表示已见窗口posterior推理、两次Isaac重放、指标和MP4完整） |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
-1. H50-A续训已经PASS；H50-B、CPD和D1均形成历史结果并被H50-SCVAE取代。当前唯一下一步是用户
-   预先同步Windows代码后运行SCVAE工程smoke；命令不得包含Git操作。
-2. smoke只验工程。通过后从H50-A step34000 `last.pt`独立运行M-F；M-F质量PASS后才运行M-R；
-   M-R质量PASS后才运行K1。任何一级失败均停止，不得绕过marker或复用smoke checkpoint。
-3. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
+1. H50-A续训已经PASS；H50-B、CPD和D1均形成历史结果并被H50-SCVAE取代；SCVAE M-F已完成。
+2. M-F2设计前先执行一次独立`posterior-h50-action-replay`：读取H50-A step34000 `last.pt`，选择预注册的已见`variant 0/start 0/T64`窗口，以训练内`full_both` posterior重建64步Action，并生成训练记录/原Action重放/预测Action重放三栏MP4。该marker不表示conditional prior或新Mask通过。
+3. 视频诊断完成后恢复M-F2分阶段均值课程；不得原样续训M-F，也不得绕过缺失的M-F质量marker启动M-R或K1。
+4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
-4. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
+5. 在相同 fixed fixture、seed、学习率和 samples-per-task 下比较 compact 与 6,204,665 参数
    LeanSplit v1；inverse 使用 reference-conditioned deterministic 指标和概率覆盖率双报告。
-5. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
+6. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
    motion ID、package/outcome、未来真实 State、真实随机 delay draw 和 oracle dynamics context
    不得进入部署模型；oracle 结果只能明确标注为上限实验。
 
@@ -976,6 +986,7 @@ df -h /home/helloworld/bly/runs
 | 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`posterior_capacity_tail.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
 | T64 direct-output与层级posterior | `posterior_direct_output.py`、`posterior_direct_output_oracle.py`、`posterior_hierarchical_t64.py`、`posterior_t64_protocol.py`、`configs/posterior_{direct_output,hierarchical}_t64*.json` |
 | H50-SCVAE标准条件生成 | `posterior_hierarchical_standard_cvae.py`、`posterior_complete_token_protocol.py`、`models.py`、`configs/posterior_hierarchical_standard_cvae_h50.json`、`cvae_repro.sh` |
+| H50-A已见窗口Action重放 | `posterior_h50_action_replay.py`、`render_h50a_seen_window_action_replay.py`、`cvae_repro.sh` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

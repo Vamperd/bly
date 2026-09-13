@@ -1,12 +1,12 @@
 # State–Action Posterior 容量实验：精简计划与结果台账
 
-最后更新：2026-09-12
+最后更新：2026-09-13
 
 本文只记录具有研究意义的正式训练、正式比较、只读诊断和当前唯一下一步。两步 smoke 统一视为“开机自检”，不作为模型质量证据。当前阶段的完整执行合同见 [Next.md](Next.md)，面向读者的通俗说明见 [explain.md](explain.md)。
 
 ## 1. 当前状态与唯一下一步
 
-当前活动路线已切换为 **H50-SCVAE 标准条件 CVAE**。Windows 已完成66,129,571参数模型、M-F/M-R/K1训练评测和四个Shell入口；Ubuntu尚未运行smoke。唯一下一步是同步代码后执行`posterior-hierarchical-standard-cvae-smoke`，审核工程合同后再从H50-A step34000 `last.pt`独立启动M-F。CPD、D1和CRA均为`SUPERSEDED`历史结果，不再续训，也不作为SCVAE初始化。
+当前活动路线为 **H50-SCVAE 标准条件 CVAE**。正式M-F已从H50-A step34000 `last.pt`独立初始化并跑满60k；execution PASS但quality FAIL，best joint score为`2.1918797`。失败分项现已审计完成：q-p均值对齐通过且latent未被忽略，但prior和posterior重建同时失败。在设计M-F2前，用户要求先执行一次H50-A已见窗口的Action物理重放；独立入口`posterior-h50-action-replay`已在Windows实现并通过静态/单元检查，尚待Ubuntu运行。该视频诊断完成后才回到M-F2分阶段均值课程；不得原样续训M-F，也不得启动M-R或KL。CPD、D1和CRA均为`SUPERSEDED`历史结果。
 
 硬约束是：posterior与conditional prior只共享decoder参数，任何一次decoder调用只能接收其中一条路径的一组latent；二者绝不拼接、平均或attention融合。最终推理只允许`Mask条件 → p(z|c) → prior latent → D(z,c)`，不得调用posterior或回退到真值路径。
 
@@ -27,6 +27,7 @@
 - H50-A已从随机初始化训练30k，execution PASS但质量FAIL；run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_20260909_120934`，源码`fd7928f26b1a12dfa6e01218c7defd9d5ffe2166`。最佳点是step30000，fit score `1.03707`；global State/Action为`0.020202/0.015074`，worst State/Action为`0.041483/0.022078`，p99/max为`0.060677/0.715894`，contact 100%，三种latent ratio为`56.32/62.06/70.89`。
 - H50-A只差global State 1.01%和worst State 3.71%；28k/29k/30k score为`1.06244→1.04331→1.03707`，所有主要连续指标仍改善。相对同任务H38-A，H50把global State/Action和p99改善约19.0%/15.5%/19.4%，但worst State只改善0.67%；最差feature全部落在29维joint velocity区间。这支持了一次受控尾段续训，不证明加宽已经解决最坏窗口。
 - H50-A尾段续训已在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256`完成，源码`bf6d14c3848ffc1c544a56195cf07d3a2188c863`。它从原H50-A `last.pt`恢复模型与AdamW，在绝对step 34000因step32000/33000/34000连续三次fit PASS提前结束；`quality_pass=true`，但`strict_memory_pass=false`且`legacy_exact_pass=false`。
+- H50-A已见窗口Action重放为当前插入式定性诊断，代码状态`READY / Ubuntu未运行`。它固定读取上述run的step34000 `last.pt`，预注册选择按名称排序的第一个`variant=0, window_start=0`训练窗口；H50-A posterior读取完整真值，decoder使用其训练过的`full_both`条件并重建全部64步Action。Isaac中同时重放原始记录Action与预测Action，主MP4三栏显示训练记录、原Action重放和预测Action重放；原Action重放是环境/初态偏移控制。该实验只说明一个已见窗口的posterior重建及物理效果，不检验conditional prior或新Mask。
 - `best_fit.pt`停留在首次PASS的step32000：global State/Action `0.019671/0.014758`、worst State/Action `0.039847/0.021575`、p99/max abs `0.058849/0.693393`、contact 100%，zero/cross-window/cross-motion ratio `57.84/63.67/72.73`。step34000的对应连续指标进一步改善到`0.019080/0.014412`、`0.037716/0.021309`和p99 `0.057103`；但fit score通过后下限为1.0，保存条件只接受更低score，因此没有覆盖`best_fit.pt`。当前预注册B合同仍从step32000的`best_fit.pt`做model-only初始化。
 - H50-B已从上述`best_fit.pt`做model-only初始化，在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_fixed_20260910_012003`跑满60k，源码`bf6d14c3848ffc1c544a56195cf07d3a2188c863`。execution完成但`quality_pass=false`，best位于step60000，fit score `1.0192181`；唯一失败项是global State `0.020384`，比`0.02`高1.92%。global Action `0.013908`、worst State/Action `0.034900/0.021335`、p99 `0.066332`、contact 100%及latent ratio `19.48/22.66/25.88`均通过。
 - B在52k→60k的score为`1.72360→1.21865→1.03544→1.02523→1.01922`，所有主连续指标在末段持续改善；但下降速度随学习率衰减而放缓。8类Mask中最难的是`state_rollout`，worst State `0.034900`，已经低于门槛。
@@ -34,6 +35,10 @@
 - H50-R路线已取消：H50-B没有质量PASS，且直接condition融合会破坏H50-A的canonical解码能力。
 - H50-CRA在正式训练前被设计复审判定为错误方向并取消。它会让完整posterior latent始终承担答案、condition只做decoder侧修正，不能回答“Mask条件能否独立预测latent”。CRA没有Ubuntu正式结果，不形成模型结论。
 - H50-CPD代码现已在Windows实现：Mask后的可见序列只进入新的conditional prior encoder，预测一个global和16个local latent；冻结的H50-A decoder只接收这些latent和有效长度，不直接读取可见值或Mask。Ubuntu工程smoke run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_smoke_20260911_022214`已完成2 step并报告`execution complete`；这只证明真实数据/CUDA/训练链路可运行。`quality_pass=false`、`latent_alignment_pass=false`、score `168.52648`及`STOP_CONDITIONAL_PRIOR_LATENT_ALIGNMENT_FAILED`均来自2-step通用质量判断，不构成conditional prior失败结论。source commit和完整marker尚未回传。
+
+- H50-SCVAE正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，源码`0029f8c637d041dbf9613db0c8b3188e32c09359`；execution marker存在、质量marker缺失并保留`cvae.failed`。最佳点为step60000。prior mean的global State/Action为`0.043838/0.026704`，worst State/Action为`0.074567/0.041620`，p99/max abs为`0.137523/1.299885`，contact 100%，score`2.191880`；posterior mean对应`0.038486/0.023520`、`0.058044/0.034188`、`0.120053/0.999769`、contact 100%，score`1.924321`。
+- q-p对齐不是当前失败项：step60000的global/local标准化RMSE为`0.052575/0.080972`，cosine为`0.999920/0.999921`，alignment gate通过，且`latent_ignored=false`。prior相对posterior只差约14%–28%，而posterior自身仍由global State与p99等指标卡住。因此证据支持“联合均值训练没有先建立可靠的posterior/decoder重建底座”，不支持“只需让prior继续追posterior”或“latent完全没被使用”。最难项集中在State：prior的`state_rollout/state_gap_4/joint_gap_8` worst State为`0.074567/0.063739/0.058842`；posterior对应`0.058044/0.056352/0.054296`。prior的`full_action` Action仅轻微超门槛，为`0.041620`。
+- 56k→58k→60k的joint score仅`2.22781→2.20783→2.19188`，末段仍改善但速度很慢，且学习率已经接近调度下限；原样延长不足以形成有区分力的实验。M-R、KL和直接续训继续阻断。
 
 H50-CPD固定读取H50-A续训run的step34000 `last.pt`。51,005,283参数的H50-A teacher/base与decoder先全部冻结；新增6层、宽448的conditional prior共14,779,456参数，总计65,784,739参数。teacher以完整序列产生canonical latent作为监督，student以Mask序列预测同拓扑latent，再由严格canonical decoder接口输出完整序列。
 
@@ -62,9 +67,11 @@ H38-A 完整序列重建（已FAIL，仅作latent压力诊断）
 → P0/P1/P2冻结decoder蒸馏（50k完成；latent PASS、重建FAIL）
 → D1受控latent接口适配（step2000触发teacher保持拒绝，已停止）
 → CPD/D1/CRA统一标记SUPERSEDED，不再续训
-→ H50-SCVAE smoke（当前唯一下一步）
-→ M-F原8类固定物理Mask均值训练
-→ M-R动态单缺口及2–3个物理多缺口均值训练
+→ H50-SCVAE smoke（工程PASS；无质量结论）
+→ M-F原8类固定物理Mask均值训练（60k完成；q-p对齐PASS，q/p重建均FAIL）
+→ H50-A单个已见full-both窗口Action物理重放（当前唯一执行项）
+→ M-F2分阶段均值课程设计（视频诊断后恢复；尚未实现或执行）
+→ M-R动态单缺口及2–3个物理多缺口均值训练（BLOCKED）
 → K1标准KL与posterior mean/sample、prior sample三条独立路径对照
 ```
 
@@ -261,7 +268,8 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 | H50-R | 从H50-B继续旧condition融合 | 原计划最多30k | `CANCELLED`；B会遗忘A且无fit marker | 不再执行 |
 | H50-CRA | 冻结H50-A、decoder侧差分condition adapter | 未正式训练 | `CANCELLED/SUPERSEDED`；不能检验Mask条件能否预测latent | 删除训练入口，不形成结果 |
 | H50-CPD | Mask序列→新conditional prior→global+16 local→冻结canonical decoder | P0/P1/P2正式50k | latent PASS但重建FAIL；best joint score 16.8382 | `SUPERSEDED`；D1也已拒绝，不再续训 |
-| H50-SCVAE | 标准q/p；真实masked condition；共享decoder分开解码 | Windows实现完成，Ubuntu未smoke | `READY/UNVERIFIED`；无质量结论 | 只运行工程smoke |
+| H50-SCVAE smoke | 标准q/p；真实masked condition；共享decoder分开解码 | 2-step工程自检 | `PASS engineering`；run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_smoke_20260912_015255`；质量未评定 | 从H50-A重新启动正式M-F |
+| H50-SCVAE M-F | 同一标准q/p和共享decoder；原8类固定物理Mask | 60k，每2k完整评测 | `FAIL quality`；step60k prior/posterior score `2.19188/1.92432`，alignment PASS、latent未忽略；run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547` | 设计M-F2分阶段课程；M-R/KL保持阻断 |
 
 ### 3.6 正式结果源码审计
 
@@ -291,11 +299,12 @@ source commit只用于复现实验，不用于替代run内的dataset、fixture�
 | H50-B | `bf6d14c3848ffc1c544a56195cf07d3a2188c863` |
 | H50-CPD正式 | `e7522c9f6262d02cc9fbaa7eee89e0104530377f` |
 | H50-CPD D1 | `0315b7d13780eeacb5937cc2bad78be2df964708` |
-| H50-SCVAE | 未运行，source commit待Ubuntu run生成 |
+| H50-SCVAE smoke | 未回传；待读取run内`source_commit.txt` |
+| H50-SCVAE M-F | `0029f8c637d041dbf9613db0c8b3188e32c09359` |
 
 ## 4. 工程验收摘要
 
-S0、S25、F4B A/B/C、F4E、F4F G8/T129、F4G及H38均执行过对应smoke。H38 smoke run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h38_autoencode_smoke_20260908_025405`，完成2 step并返回execution PASS；`quality_pass=false`是预期语义。有效smoke只证明相关数据读取、真实CUDA前向/反向、短训练、完整评测、checkpoint读回和marker链路能够运行，不提供模型容量结论。
+S0、S25、F4B A/B/C、F4E、F4F G8/T129、F4G、H38及H50-SCVAE均执行过对应smoke。SCVAE smoke run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_smoke_20260912_015255`，完成2 step并由Shell验证smoke marker；`quality_pass=false`和score `111.3966`没有质量含义。有效smoke只证明相关数据读取、真实CUDA前向/反向、短训练、完整评测、checkpoint读回和marker链路能够运行，不提供模型容量结论。
 
 历史上发现并修复了三类协议/报告问题：F1的fixed训练与评测Mask seed不一致；F4E smoke误把“质量门禁不适用”报告成根因失败；F4F G8 smoke最初使用了错误的学习率配置键。它们均已修复或隔离，不得作为模型优劣证据。
 
@@ -309,7 +318,7 @@ Windows代码READY或测试PASS只表示接口和静态合同通过，不写入�
 
 当前正式路线已由H50-CPD/D1切换为H50-SCVAE。根本验收对象仍是物理上可推测的完整State/Action token缺口；不使用element/feature或无规律散点Mask。decoder读取真实masked condition和一条latent，但在任何一次调用中都不允许融合q与p。
 
-模型、Mask、M-F/M-R/K1、marker和Ubuntu命令的详细活动合同见[Next.md](Next.md)。当前只允许运行SCVAE smoke；它通过后从H50-A step34000 `last.pt`重新启动M-F，不继承任何CPD/D1权重。下文旧H50-B、CPD和D1入口只保留为历史记录，不再执行。
+模型、Mask、M-F/M-R/K1、marker和Ubuntu命令的详细活动合同见[Next.md](Next.md)。SCVAE smoke和正式M-F execution已经完成；审计确认q-p对齐通过、prior/posterior重建均失败。当前只允许设计M-F2分阶段均值课程，不得原样续训、启动M-R或KL。下文旧H50-B、CPD和D1入口只保留为历史记录，不再执行。
 
 ### 5.1 H50-A续训结果与H50-B历史入口（已执行，不再使用）
 
