@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 14 Sep 2026 12:00:00 +0800
+Subject: [PATCH] feat: restore exact external replay initialization
+
+Add an opt-in reset hook for historical Physics State-Action replay. The hook
+is inactive unless an exact initialization artifact and readback report path
+are explicitly supplied, so ordinary SONIC evaluation remains unchanged.
+---
+ gear_sonic/eval_agent_trl.py | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/gear_sonic/eval_agent_trl.py b/gear_sonic/eval_agent_trl.py
+--- a/gear_sonic/eval_agent_trl.py
++++ b/gear_sonic/eval_agent_trl.py
+@@ -589,5 +589,28 @@ def main(override_config: omegaconf.OmegaConf):
+         env.set_is_evaluating(True)
+         obs_dict = env.reset_all()
++        external_replay_initialization_path = config.get(
++            "external_replay_initialization_path", None
++        )
++        if external_replay_initialization_path:
++            external_replay_initialization_report_path = config.get(
++                "external_replay_initialization_report_path", None
++            )
++            if not external_replay_initialization_report_path:
++                raise ValueError(
++                    "external_replay_initialization_report_path is required with "
++                    "external_replay_initialization_path"
++                )
++            from exact_replay_initializer import apply_exact_replay_initialization
++
++            obs_dict = apply_exact_replay_initialization(
++                env,
++                external_replay_initialization_path,
++                external_replay_initialization_report_path,
++            )
++            logger.info(
++                "Applied exact external replay initialization: "
++                f"{external_replay_initialization_path}"
++            )
+         model.eval()
+         for obs_key in obs_dict:
+             obs_dict[obs_key] = obs_dict[obs_key].to(device)
+-- 
+2.42.0.windows.2

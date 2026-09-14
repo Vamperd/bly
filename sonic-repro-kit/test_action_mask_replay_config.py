@@ -37,6 +37,33 @@ class ActionMaskReplayConfigTest(unittest.TestCase):
             replay_phase,
         )
 
+    def test_exact_initialization_is_optional_and_has_one_report_per_process(self) -> None:
+        script = (Path(__file__).resolve().parent / "sonic_repro.sh").read_text(
+            encoding="utf-8"
+        )
+        replay_start = script.index("phase_replay_action_mask()")
+        render_start = script.index("phase_render_action_mask()")
+        replay_phase = script[replay_start:render_start]
+
+        self.assertIn("json_manifest_optional_value", replay_phase)
+        self.assertIn("exact_initialization_file_sha256", replay_phase)
+        self.assertIn("exact_initialization_report_paths", replay_phase)
+        self.assertIn("++external_replay_initialization_path=$exact_init_file", replay_phase)
+        self.assertIn(
+            "++external_replay_initialization_report_path=$exact_init_report",
+            replay_phase,
+        )
+        self.assertIn('if [[ -n "$exact_init_file" ]]', replay_phase)
+
+    def test_exact_initializer_hook_is_delivered_as_an_outer_patch(self) -> None:
+        patch = (
+            Path(__file__).resolve().parent
+            / "patches/0009-feat-restore-exact-external-replay-initialization.patch"
+        ).read_text(encoding="utf-8")
+        self.assertIn("external_replay_initialization_path", patch)
+        self.assertIn("external_replay_initialization_report_path", patch)
+        self.assertIn("apply_exact_replay_initialization", patch)
+
     def test_recorder_exports_physics_v4_superset(self) -> None:
         recorder = (Path(__file__).resolve().parent / "action_replay_recorder.py").read_text(
             encoding="utf-8"

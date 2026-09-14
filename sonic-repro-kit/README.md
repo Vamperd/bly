@@ -520,6 +520,15 @@ context；关闭随机化时 nominal 明确定义为未扰动 runtime default。
 对这些完整物理状态做 50 FPS 公共世界相机可视化，不会把 CVAE 预测 State 当成物理结果。
 `ACTION_MASK_GL`、宽高和相机距离仅影响离线视频，不影响 Isaac 轨迹。
 
+H50-A历史训练窗口的严格复现使用独立入口
+`state-action-cvae/cvae_repro.sh posterior-h50-action-replay-exact-init`。该入口仍把
+original与H50-A Action拆成两个串行的`num_envs=1`进程，但会让两个进程在reset后、第一条
+Action前加载同一份`exact_initialization.npz`，并分别保存初始化readback。训练HDF本身直接
+渲染为`recorded_hdf.mp4`；两次仿真分别渲染为`original_action_exact_init.mp4`和
+`h50a_action_exact_init.mp4`，只执行64条Action，不追加窗口外步数。SONIC嵌套仓库必须已经
+包含外层补丁`0009-feat-restore-exact-external-replay-initialization.patch`；该补丁只有在显式
+提供`external_replay_initialization_path`时生效，普通评测和历史重放保持不变。
+
 ## 十、CVAE State Mask 运动学视频
 
 `state-action-cvae`的`validate-state-mask-video`会直接读取已索引的Physics v4 HDF5并生成

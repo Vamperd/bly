@@ -1155,6 +1155,80 @@ posterior_h50_action_replay() {
   printf '%s\n' "$run_dir"
 }
 
+posterior_h50_action_replay_exact_init() {
+  local dataset_run="${CVAE_DATASET_RUN:-}"
+  local source_run="${CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN:-}"
+  local checkpoint motion_key variant window_start replay_seed
+  local run_dir model_path
+  [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -n "$source_run" ]] || die "CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN is required"
+  checkpoint="${CVAE_POSTERIOR_H50_REPLAY_CHECKPOINT:-$source_run/checkpoints/last.pt}"
+  motion_key="${CVAE_POSTERIOR_H50_REPLAY_MOTION_KEY:-auto}"
+  variant="${CVAE_POSTERIOR_H50_REPLAY_VARIANT:-0}"
+  window_start="${CVAE_POSTERIOR_H50_REPLAY_WINDOW_START:-0}"
+  replay_seed="${CVAE_POSTERIOR_H50_REPLAY_SEED:-20260834}"
+  [[ -f "$source_run/markers/cvae_posterior_hierarchical_t64_execution.ok" ]] \
+    || die "H50-A execution marker is missing: $source_run"
+  [[ -f "$source_run/markers/cvae_posterior_hierarchical_t64_continuation_execution.ok" ]] \
+    || die "H50-A continuation marker is missing: $source_run"
+  [[ -f "$source_run/markers/cvae_posterior_hierarchical_t64_autoencode_fit.ok" ]] \
+    || die "H50-A autoencode fit marker is missing: $source_run"
+  [[ -f "$checkpoint" ]] || die "H50-A exact replay checkpoint is missing: $checkpoint"
+  [[ "$variant" =~ ^[0-9]+$ ]] \
+    || die "CVAE_POSTERIOR_H50_REPLAY_VARIANT must be non-negative"
+  [[ "$window_start" =~ ^[0-9]+$ ]] \
+    || die "CVAE_POSTERIOR_H50_REPLAY_WINDOW_START must be non-negative"
+  [[ "$replay_seed" =~ ^[0-9]+$ ]] \
+    || die "CVAE_POSTERIOR_H50_REPLAY_SEED must be non-negative"
+  [[ -d "$SONIC_KIT_DIR" && -f "$SONIC_KIT_DIR/sonic_repro.sh" ]] \
+    || die "SONIC reproduction kit is unavailable: $SONIC_KIT_DIR"
+  grep -q 'external_replay_initialization_path = config.get' \
+    "$SONIC_DIR/gear_sonic/eval_agent_trl.py" \
+    || die "SONIC exact replay hook is missing; apply sonic-repro-kit patch 0009 before running"
+  grep -q 'apply_exact_replay_initialization' \
+    "$SONIC_DIR/gear_sonic/eval_agent_trl.py" \
+    || die "SONIC exact replay initializer hook is incomplete"
+
+  run_dir="$(new_run_dir cvae_posterior_h50a_action_replay_exact_init)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" h50a_exact_replay_prepare.log \
+    "$PYTHON" -m cvae_sa.posterior_h50_action_replay_exact_init prepare \
+      --dataset-run "$dataset_run" \
+      --source-run "$source_run" \
+      --checkpoint "$checkpoint" \
+      --output-run "$run_dir" \
+      --motion-key "$motion_key" \
+      --variant-id "$variant" \
+      --window-start "$window_start" \
+      --seed "$replay_seed"
+  run_logged "$run_dir" h50a_exact_replay_isaac.log \
+    env ACTION_MASK_RUN_DIR="$run_dir" \
+      bash "$SONIC_KIT_DIR/sonic_repro.sh" replay-action-mask
+
+  model_path="$SONIC_DIR/decoupled_wbc/control/robot_model/model_data/g1/g1_29dof_old.xml"
+  [[ -f "$model_path" ]] || die "MuJoCo G1 model missing: $model_path"
+  run_logged "$run_dir" h50a_exact_replay_render.log \
+    "$PYTHON" "$SONIC_KIT_DIR/render_h50a_exact_action_replays.py" \
+      --run-dir "$run_dir" \
+      --model "$model_path" \
+      --width "${CVAE_POSTERIOR_H50_REPLAY_WIDTH:-960}" \
+      --height "${CVAE_POSTERIOR_H50_REPLAY_HEIGHT:-540}" \
+      --gl "${CVAE_POSTERIOR_H50_REPLAY_GL:-egl}" \
+      --camera-distance "${CVAE_POSTERIOR_H50_REPLAY_CAMERA_DISTANCE:-2.0}"
+  for video in recorded_hdf original_action_exact_init h50a_action_exact_init; do
+    [[ -s "$run_dir/videos/$video.mp4" ]] \
+      || die "H50-A exact replay renderer did not create $video.mp4"
+  done
+  printf 'PASS\n' > "$run_dir/markers/h50a_exact_action_replay_render.ok"
+  run_logged "$run_dir" h50a_exact_replay_finalize.log \
+    "$PYTHON" -m cvae_sa.posterior_h50_action_replay_exact_init finalize \
+      --output-run "$run_dir"
+  [[ -f "$run_dir/markers/cvae_posterior_h50_action_replay_exact_execution.ok" ]] \
+    || die "H50-A exact-init Action replay execution marker is missing"
+  update_latest posterior_h50_action_replay_exact "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 validate_action_mask_replay() {
   local dataset_run="${CVAE_DATASET_RUN:-}" checkpoint="${CVAE_CHECKPOINT:-}"
   local split="${CVAE_REPLAY_SPLIT:-validation}" package="${CVAE_REPLAY_PACKAGE:-Locomotion}"
@@ -1334,6 +1408,7 @@ case "${1:-}" in
   posterior-hierarchical-standard-cvae-random-physical) posterior_hierarchical_standard_cvae random false ;;
   posterior-hierarchical-standard-cvae-kl) posterior_hierarchical_standard_cvae kl false ;;
   posterior-h50-action-replay) posterior_h50_action_replay ;;
+  posterior-h50-action-replay-exact-init) posterior_h50_action_replay_exact_init ;;
   analyze-overfit) analyze_overfit ;;
   diagnose-overfit-fixture) diagnose_overfit_fixture ;;
   summarize-overfit) summarize_overfit ;;
@@ -1344,5 +1419,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|posterior-h50-action-replay-exact-init|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

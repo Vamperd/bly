@@ -769,6 +769,25 @@ p99为`0.043838/0.026704`、`0.074567/0.041620`、`0.137523`；posterior mean对
 q/p/condition/decoder同时联合优化的课程问题。不得原样延长、启动M-R或K1；下一步只设计先posterior、
 再prior、最后短程联合的M-F2分阶段均值课程。
 
+H50-A已见窗口Action重放已在run
+`/home/helloworld/bly/runs/cvae_posterior_h50a_seen_window_action_replay_20260913_230317`执行完成，源码
+`0f39e35424b3d616e52418c20ae8b13e324f81d8`，全部execution marker和577 KiB三栏MP4完整。固定选择
+`baby_full_diaper_walk_ff_360_loop_R_001__A462 / variant0 / start0 / T64 / full_both`，checkpoint为
+H50-A step34000 `last.pt`。预测Action的normalized/physical RMSE为`0.015191/0.005441 rad`；原Action与
+预测Action在相同重放条件下的joint RMSE为`0.008448 rad`、root位置RMSE`0.003229 m`、body MPJPE
+`0.004635 m`，mapping/context/executed Action差均为0。但训练记录与原Action重放基线明显失败：joint
+RMSE`0.245825 rad`、root位置RMSE`0.251772 m`、姿态max`106.918°`、body MPJPE`0.418972 m`。因此只
+能声明已见窗口Action记忆及中/右受控重放接近，不能声明复现训练轨迹或通过conditional prior/新Mask。
+
+旧重放没有恢复训练采集时的startup随机化与精确`S0`，因此新增独立
+`posterior-h50-action-replay-exact-init`复核路径，当前状态为Windows代码READY、Ubuntu待执行。
+它从同一HDF窗口生成带payload/file SHA256的`exact_initialization.npz`，恢复root/关节状态、世界
+速度、Action历史与初始target、runtime default/limit/Kp/Kd/armature/friction以及body
+mass/inertia/COM/material和ground material。SONIC opt-in reset hook由外层`patches/0009`提供；
+historical replay不触发。original与H50-A仍在两个独立`num_envs=1`进程中串行运行，各64条Action，
+训练HDF直接渲染，最终产生三份独立MP4。初始化或原Action基线未通过时不得评价H50-A；正式Ubuntu
+结果产生前不得写成重放通过。
+
 ### 6.5 已完成 parent 训练
 
 ```text
@@ -925,14 +944,15 @@ bash ./cvae_repro.sh validate-state-mask-video
 | H50-SCVAE M-F/M-R质量 | `cvae_posterior_standard_cvae_fixed_mean_fit.ok` / `cvae_posterior_standard_cvae_random_physical_mean_fit.ok` |
 | H50-SCVAE KL比较/质量 | `cvae_posterior_standard_cvae_kl_comparison.ok` / `cvae_posterior_standard_cvae_kl_fit.ok` |
 | H50-A单窗口Action重放 | `cvae_posterior_h50_action_replay.ok`（仅表示已见窗口posterior推理、两次Isaac重放、指标和MP4完整） |
+| H50-A exact-init重放 | `cvae_posterior_h50_action_replay_exact_execution.ok`；初始化身份和原Action基线另用两个独立marker |
 
 `latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
 ## 10. 下一步优先级
 
 1. H50-A续训已经PASS；H50-B、CPD和D1均形成历史结果并被H50-SCVAE取代；SCVAE M-F已完成。
-2. M-F2设计前先执行一次独立`posterior-h50-action-replay`：读取H50-A step34000 `last.pt`，选择预注册的已见`variant 0/start 0/T64`窗口，以训练内`full_both` posterior重建64步Action，并生成训练记录/原Action重放/预测Action重放三栏MP4。该marker不表示conditional prior或新Mask通过。
-3. 视频诊断完成后恢复M-F2分阶段均值课程；不得原样续训M-F，也不得绕过缺失的M-F质量marker启动M-R或K1。
+2. `posterior-h50-action-replay`已完成；它支持H50-A已见窗口Action记忆和中/右受控重放接近，但训练记录/原Action重放基线FAIL，不得据此声称物理轨迹被复现。
+3. 当前先运行`posterior-h50-action-replay-exact-init`并核验原Action基线；完成结果回填后再恢复M-F2分阶段均值课程设计。不得原样续训M-F，也不得绕过缺失的M-F质量marker启动M-R或K1。
 4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。
@@ -986,7 +1006,7 @@ df -h /home/helloworld/bly/runs
 | 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`posterior_capacity_tail.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
 | T64 direct-output与层级posterior | `posterior_direct_output.py`、`posterior_direct_output_oracle.py`、`posterior_hierarchical_t64.py`、`posterior_t64_protocol.py`、`configs/posterior_{direct_output,hierarchical}_t64*.json` |
 | H50-SCVAE标准条件生成 | `posterior_hierarchical_standard_cvae.py`、`posterior_complete_token_protocol.py`、`models.py`、`configs/posterior_hierarchical_standard_cvae_h50.json`、`cvae_repro.sh` |
-| H50-A已见窗口Action重放 | `posterior_h50_action_replay.py`、`render_h50a_seen_window_action_replay.py`、`cvae_repro.sh` |
+| H50-A已见窗口Action重放 | `posterior_h50_action_replay.py`、`posterior_h50_action_replay_exact_init.py`、`render_h50a_seen_window_action_replay.py`、`render_h50a_exact_action_replays.py`、`exact_replay_initializer.py`、`cvae_repro.sh` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |
 

@@ -1,14 +1,40 @@
 # 活动合同：H50-SCVAE 标准条件 CVAE
 
-最后更新：2026-09-13
+最后更新：2026-09-14
 
-状态：正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，execution PASS、quality FAIL、best joint score `2.1918797`。审计确认q-p均值对齐PASS、latent未被忽略，但prior和posterior重建均FAIL。M-F2设计前先执行一次H50-A已见窗口Action物理重放；该独立入口已实现、尚待Ubuntu运行。视频诊断后再恢复M-F2；M-R和KL仍被质量marker阻断。H50-A不重新训练；CPD、D1与CRA均为历史`SUPERSEDED`。
+状态：正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，execution PASS、quality FAIL、best joint score `2.1918797`。在恢复M-F2设计前，当前先执行H50-A exact-init物理复核：旧run没有恢复采集时的随机初态和动力学参数，因此训练HDF/原Action差异尚不能归因于模型。新入口代码已就绪、Ubuntu待执行。M-R和KL仍被质量marker阻断；CPD、D1与CRA均为历史`SUPERSEDED`。
 
-## 0. 当前插入式诊断：H50-A已见窗口Action重放
+### 0.1 当前唯一执行项：精确初始化重放
+
+`posterior-h50-action-replay-exact-init`继续使用旧流程的两个独立`num_envs=1` Isaac进程，但两次reset后都加载同一份带SHA256的`exact_initialization.npz`。它恢复训练HDF中的首帧root/关节状态、世界速度、初始Action历史与target，以及关节和刚体动力学参数；每次在第一条Action前生成独立readback。训练HDF直接渲染，不重新仿真；original和H50-A各只重放64条Action，不追加窗口外步数。SONIC端的可选reset hook由外层补丁`sonic-repro-kit/patches/0009-feat-restore-exact-external-replay-initialization.patch`提供，普通replay不触发该路径。
+
+初始化身份通过要求两次readback最大差`≤1e-6`，各自与HDF State/context最大差`≤1e-5`，姿态误差`≤1e-4°`，Action历史/target误差`≤1e-6`。随后original基线要求joint RMSE`≤0.02 rad`、root RMSE`≤0.05 m`、姿态max`≤5°`、body MPJPE`≤0.05 m`、contact一致率`≥95%`。原Action基线不通过时不得评价H50-A，只能调查尚未记录的PhysX隐藏状态。
+
+代码同步及补丁应用由用户预先完成后，Ubuntu只运行：
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+
+export CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+export CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256
+
+unset CVAE_CONFIG CVAE_RUN_DIR CVAE_INIT_CHECKPOINT CVAE_POSTERIOR_WARM_START
+unset CVAE_POSTERIOR_H50_REPLAY_CHECKPOINT CVAE_POSTERIOR_H50_REPLAY_MOTION_KEY
+unset CVAE_POSTERIOR_H50_REPLAY_VARIANT CVAE_POSTERIOR_H50_REPLAY_WINDOW_START
+
+bash ./cvae_repro.sh posterior-h50-action-replay-exact-init
+```
+
+正式run结束后回填初始化hash/readback、原Action基线、H50-A对比及三份视频；此前不预判结果。
+
+## 0. 已完成插入式诊断：H50-A已见窗口Action重放
 
 这不是新的训练，也不改变SCVAE路线。默认读取H50-A续训run的step34000 `last.pt`，确定性选择按motion名称排序的第一个`variant 0 / start 0 / T64`训练窗口，并使用H50-A实际训练过的`full_both` Mask：posterior看完整窗口，decoder的State/Action condition全部被Mask。模型重建出的64步Action替换原Action后，在同一Isaac配置中与原Action各重放一次。
 
-主视频固定为三栏：训练HDF5记录、原始Action重放、H50-A预测Action重放。报告同时给出离线Action RMSE、原始重放对训练记录的偏移，以及预测重放相对原始重放的偏移。只有后两条重放共享完全相同的reset和runtime context；如果训练记录与原始重放差异较大，仍可比较中/右两栏，但不能把左/中差异归因于H50-A。
+正式run为`/home/helloworld/bly/runs/cvae_posterior_h50a_seen_window_action_replay_20260913_230317`，源码`0f39e35424b3d616e52418c20ae8b13e324f81d8`。选择窗口为`baby_full_diaper_walk_ff_360_loop_R_001__A462 / variant 0 / start 0`。预测Action的normalized RMSE为`0.015191`，物理RMSE为`0.005441 rad`。中/右两栏的关节位置RMSE为`0.008448 rad`、root位置RMSE为`0.003229 m`、root姿态mean/max为`0.672°/2.010°`、body MPJPE为`0.004635 m`；两次mapping、runtime context及planned/executed Action均逐值一致。
+
+训练记录与原Action重放的基线没有复现：关节位置RMSE`0.245825 rad`、root位置RMSE`0.251772 m`、root姿态max`106.918°`、body MPJPE`0.418972 m`。因此本实验支持“H50-A在这个已见窗口准确记忆Action，预测Action与原Action在相同重放条件下效果接近”，不能支持“H50-A复现了训练HDF5轨迹”。主视频位于run内`videos/h50a_seen_window_action_replay.mp4`，大小577 KiB。
 
 Ubuntu命令不包含Git操作：
 
@@ -26,7 +52,7 @@ unset CVAE_POSTERIOR_H50_REPLAY_VARIANT CVAE_POSTERIOR_H50_REPLAY_WINDOW_START
 bash ./cvae_repro.sh posterior-h50-action-replay
 ```
 
-完成后回传`manifests/h50a_seen_window_action_replay_summary.json`、marker列表、`source_commit.txt`及主视频路径。`.ok`只表示推理、两次Isaac重放、指标和MP4均完整，不代表conditional prior或随机Mask质量通过。
+以上旧命令仅保留用于复现历史run；本次`.ok`只表示推理、两次Isaac重放、指标和MP4均完整，不代表采集环境被精确恢复，也不代表conditional prior或随机Mask质量通过。
 
 正式历史和数值见 [plan.md](plan.md)，通俗背景见 [explain.md](explain.md)，安全约束见 [AGENTS.md](AGENTS.md)。
 

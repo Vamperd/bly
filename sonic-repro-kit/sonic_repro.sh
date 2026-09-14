@@ -1064,6 +1064,20 @@ json_manifest_value() {
     "$manifest" "$key"
 }
 
+json_manifest_optional_value() {
+  local manifest="$1" key="$2"
+  python -c \
+    'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2]); print("" if value is None else value)' \
+    "$manifest" "$key"
+}
+
+json_manifest_array_value() {
+  local manifest="$1" key="$2" index="$3"
+  python -c \
+    'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8"))[sys.argv[2]][int(sys.argv[3])]; print(value)' \
+    "$manifest" "$key" "$index"
+}
+
 prepare_action_mask_motion_dir() {
   local run_dir="$1" request="$2" motion_file expected_hash actual_hash motion_dir motion_link
   motion_file="$(json_manifest_value "$request" motion_file)"
@@ -1165,6 +1179,7 @@ phase_replay_action_mask() {
     || die "Set ACTION_MASK_RUN_DIR to the CVAE Action-mask evaluation run"
   local run_dir request source_request motion_dir checkpoint_path seed actions_file actions_hash
   local expected_actions_hash num_envs output_dir slice_dir slice_manifest
+  local exact_init_file exact_init_hash actual_exact_init_hash
   run_dir="$(validated_run_dir "$ACTION_MASK_RUN_DIR")"
   request="$run_dir/manifests/action_replay_request.json"
   source_request="$run_dir/manifests/action_mask_request.json"
@@ -1181,6 +1196,17 @@ phase_replay_action_mask() {
   actions_hash="$(sha256sum "$actions_file" | awk '{print $1}')"
   [[ "$actions_hash" == "$expected_actions_hash" ]] \
     || die "External Action replay SHA256 no longer matches its request manifest"
+  exact_init_file="$(json_manifest_optional_value "$request" exact_initialization_file)"
+  if [[ -n "$exact_init_file" ]]; then
+    exact_init_hash="$(json_manifest_value "$request" exact_initialization_file_sha256)"
+    [[ -s "$exact_init_file" ]] \
+      || die "Exact replay initialization file is missing: $exact_init_file"
+    [[ "$(realpath -m -- "$exact_init_file")" == "$run_dir/"* ]] \
+      || die "Exact replay initialization must be stored inside the evaluation run"
+    actual_exact_init_hash="$(sha256sum "$exact_init_file" | awk '{print $1}')"
+    [[ "$actual_exact_init_hash" == "$exact_init_hash" ]] \
+      || die "Exact replay initialization SHA256 no longer matches its request manifest"
+  fi
   output_dir="$run_dir/data/replay"
   slice_dir="$run_dir/data/replay_action_slices"
   slice_manifest="$run_dir/manifests/action_replay_slices.json"
@@ -1192,13 +1218,24 @@ phase_replay_action_mask() {
     --manifest "$slice_manifest" \
     > "$run_dir/logs/action_replay_slices.log"
 
-  local scenario_index scenario_id action_slice hydra_dir
+  local scenario_index scenario_id action_slice hydra_dir exact_init_report
   for ((scenario_index = 0; scenario_index < num_envs; scenario_index++)); do
     printf -v scenario_id '%06d' "$scenario_index"
     action_slice="$slice_dir/$scenario_id.actions.npz"
     hydra_dir="$run_dir/manifests/hydra_action_mask_replay_$scenario_id"
     [[ -s "$action_slice" ]] \
       || die "Serial Action replay slice is missing: $action_slice"
+    local -a exact_init_args=()
+    if [[ -n "$exact_init_file" ]]; then
+      exact_init_report="$(json_manifest_array_value \
+        "$request" exact_initialization_report_paths "$scenario_index")"
+      [[ "$(realpath -m -- "$exact_init_report")" == "$run_dir/"* ]] \
+        || die "Exact replay initialization report must be stored inside the evaluation run"
+      exact_init_args+=(
+        "++external_replay_initialization_path=$exact_init_file"
+        "++external_replay_initialization_report_path=$exact_init_report"
+      )
+    fi
     log "Replaying Action-mask environment $scenario_index/$((num_envs - 1)) as one isolated env"
     if (
       cd "$SONIC_DIR"
@@ -1210,6 +1247,7 @@ phase_replay_action_mask() {
         ++run_eval_loop=True \
         ++run_once=False \
         "++external_action_replay_path=$action_slice" \
+        "${exact_init_args[@]}" \
         ++num_envs=1 \
         "++seed=$seed" \
         ++use_encoder=g1 \
@@ -1257,6 +1295,14 @@ phase_replay_action_mask() {
   trajectory_count="$(find "$output_dir" -maxdepth 1 -type f -name '*.trajectory.pkl' -size +0c | wc -l)"
   [[ "$replay_count" == "$num_envs" && "$trajectory_count" == "$num_envs" ]] \
     || die "Expected $num_envs replay artifacts; found NPZ=$replay_count PKL=$trajectory_count"
+  if [[ -n "$exact_init_file" ]]; then
+    for ((scenario_index = 0; scenario_index < num_envs; scenario_index++)); do
+      exact_init_report="$(json_manifest_array_value \
+        "$request" exact_initialization_report_paths "$scenario_index")"
+      [[ -s "$exact_init_report" ]] \
+        || die "Exact replay initialization readback is missing: $exact_init_report"
+    done
+  fi
   record_exit_code "$run_dir" action_mask_replay 0
   mark_stage "$run_dir" action_mask_replay.ok
 }
