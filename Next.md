@@ -30,6 +30,8 @@ bash ./cvae_repro.sh posterior-h50-action-replay-exact-init
 
 历史正式run已通过并生成三份65帧独立视频与三栏视频。完整episode扩展已在Windows实现并通过单元、编译与Shell检查，尚待Ubuntu对三个motion分别新建run；每个run都会生成三份完整视频和三栏视频，并在manifest记录完整帧数、红色窗口起止及窗口前/内/后的轨迹指标。
 
+长视频进一步表明原Action开环重放会在数秒内累计误差，因此新增`CVAE_POSTERIOR_H50_REPLAY_SCOPE=window`短程模式。它从所选T64窗口的真实首帧和前一Action target精确初始化，只重放该窗口的64条原始/预测Action；默认`full_episode`行为保持不变。当前选定`body_stretch_v003_001__A362 / variant 0 / start 64`与`body_stretch_4_002__A054 / variant 0 / start 64`作两条额外定性短视频，Ubuntu结果尚未执行。
+
 ## 0. 已完成插入式诊断：H50-A已见窗口Action重放
 
 这不是新的训练，也不改变SCVAE路线。默认读取H50-A续训run的step34000 `last.pt`，确定性选择按motion名称排序的第一个`variant 0 / start 0 / T64`训练窗口，并使用H50-A实际训练过的`full_both` Mask：posterior看完整窗口，decoder的State/Action condition全部被Mask。模型重建出的64步Action替换原Action后，在同一Isaac配置中与原Action各重放一次。

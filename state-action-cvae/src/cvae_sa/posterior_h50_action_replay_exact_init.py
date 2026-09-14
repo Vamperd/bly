@@ -388,6 +388,7 @@ def prepare(
     motion_key: str,
     variant_id: int,
     window_start: int,
+    replay_scope: str,
     seed: int,
 ) -> dict[str, Any]:
     import h5py
@@ -403,6 +404,8 @@ def prepare(
     output_run = output_run.expanduser().resolve()
     if variant_id < 0 or window_start < 0:
         raise ValueError("variant and window start must be non-negative")
+    if replay_scope not in {"full_episode", "window"}:
+        raise ValueError("replay scope must be full_episode or window")
     for child in (
         "data/replay",
         "data/replay_action_slices",
@@ -590,37 +593,71 @@ def prepare(
         action_clip,
         wrapper_clip,
     )
-    replay_actions, hybrid_raw, replay_composition = compose_full_episode_replay_actions(
-        full_original_raw,
-        predicted_raw,
-        window_start,
-    )
+    if replay_scope == "full_episode":
+        source_start, source_stop = 0, episode_steps
+        replay_steps = episode_steps
+        masked_window_start, masked_window_stop = window_start, window_stop
+        replay_actions, hybrid_raw, replay_composition = (
+            compose_full_episode_replay_actions(
+                full_original_raw,
+                predicted_raw,
+                window_start,
+            )
+        )
+    else:
+        source_start, source_stop = window_start, window_stop
+        replay_steps = WINDOW_TRANSITIONS
+        masked_window_start, masked_window_stop = 0, WINDOW_TRANSITIONS
+        window_original_raw = full_original_raw[window_start:window_stop]
+        replay_actions = np.stack((window_original_raw, predicted_raw), axis=1)
+        hybrid_raw = predicted_raw.copy()
+        replay_composition = {
+            "episode_action_steps": episode_steps,
+            "masked_window_start": 0,
+            "masked_window_stop": WINDOW_TRANSITIONS,
+            "masked_window_transitions": WINDOW_TRANSITIONS,
+            "pre_window_original_steps": 0,
+            "post_window_original_steps": 0,
+            "outside_window_max_abs_difference": 0.0,
+        }
 
-    # Both Isaac runs begin at the true episode start.  The selected T64
-    # prediction may be in the middle of the episode, so using its S0 here
-    # would no longer reproduce the full recorded trajectory.
-    previous_processed = initial_target_canonical + nominal
-    previous_raw = _raw_from_processed(
-        previous_processed,
-        action_scale,
-        context_arrays["action_offset"],
-        action_clip,
-        wrapper_clip,
-    )
-    previous_source = "episode initial processed target, inverted through recorded Action mapping"
+    source_states = full_states[source_start : source_stop + 1]
+    source_original_canonical = full_original_canonical[source_start:source_stop]
+    source_original_raw = full_original_raw[source_start:source_stop]
+    source_processed_abs = full_processed_abs[source_start:source_stop]
+    source_root_quat = full_root_quat[source_start : source_stop + 1]
+    source_root_pos_world = full_root_pos_world[source_start : source_stop + 1]
+    source_body_pos_world = full_body_pos_world[source_start : source_stop + 1]
+
+    if source_start == 0:
+        previous_processed = initial_target_canonical + nominal
+        previous_raw = _raw_from_processed(
+            previous_processed,
+            action_scale,
+            context_arrays["action_offset"],
+            action_clip,
+            wrapper_clip,
+        )
+        previous_source = (
+            "episode initial processed target, inverted through recorded Action mapping"
+        )
+    else:
+        previous_processed = full_processed_abs[source_start - 1]
+        previous_raw = full_original_raw[source_start - 1]
+        previous_source = "recorded Action immediately before the selected T64 window"
 
     translation = np.asarray(
-        [full_root_pos_world[0, 0], full_root_pos_world[0, 1], 0.0],
+        [source_root_pos_world[0, 0], source_root_pos_world[0, 1], 0.0],
         dtype=np.float32,
     )
-    root_pos = full_root_pos_world - translation
-    body_pos = full_body_pos_world - translation[None, None]
-    joint_pos = full_states[:, :29] + nominal[None]
+    root_pos = source_root_pos_world - translation
+    body_pos = source_body_pos_world - translation[None, None]
+    joint_pos = source_states[:, :29] + nominal[None]
     root_lin_vel_world = rotate_body_to_world(
-        full_root_quat[0], full_states[0, 58:61]
+        source_root_quat[0], source_states[0, 58:61]
     )
     root_ang_vel_world = rotate_body_to_world(
-        full_root_quat[0], full_states[0, 61:64]
+        source_root_quat[0], source_states[0, 61:64]
     )
 
     hdf_identity = {
@@ -628,12 +665,12 @@ def prepare(
         "episode": str(record["episode"]),
         "context_id": str(record["context_id"]),
     }
-    episode_arrays = {
-        "states": full_states,
-        "original_raw": full_original_raw,
-        "processed_abs": full_processed_abs,
+    replay_source_arrays = {
+        "states": source_states,
+        "original_raw": source_original_raw,
+        "processed_abs": source_processed_abs,
         "root_pos": root_pos,
-        "root_quat": full_root_quat,
+        "root_quat": source_root_quat,
         "body_pos": body_pos,
         **{f"episode_context_{name}": value for name, value in episode_context.items()},
     }
@@ -649,13 +686,13 @@ def prepare(
     init_arrays: dict[str, Any] = {
         "joint_names": np.asarray(schema["joint_names"]),
         "joint_pos": joint_pos[0],
-        "joint_vel": full_states[0, 29:58],
+        "joint_vel": source_states[0, 29:58],
         "root_pos_relative": root_pos[0],
-        "root_quat_wxyz": full_root_quat[0],
+        "root_quat_wxyz": source_root_quat[0],
         "root_lin_vel_world": root_lin_vel_world,
         "root_ang_vel_world": root_ang_vel_world,
         "body_pos_relative": body_pos[0],
-        "physics_state_v3": full_states[0],
+        "physics_state_v3": source_states[0],
         "nominal_default_joint_pos": nominal,
         "runtime_default_joint_pos": context_arrays["runtime_default_joint_pos"],
         "action_scale": action_scale,
@@ -686,7 +723,9 @@ def prepare(
         "selected_windows_sha256": np.asarray(windows_hash),
         "window_identity_sha256": np.asarray(_identity_sha256(window_identity)),
         "hdf_identity_sha256": np.asarray(_identity_sha256(hdf_identity)),
-        "episode_arrays_sha256": np.asarray(_window_context_hash(episode_arrays)),
+        "episode_arrays_sha256": np.asarray(
+            _window_context_hash(replay_source_arrays)
+        ),
         "context_arrays_sha256": np.asarray(_window_context_hash(context_arrays)),
         "source_checkpoint_sha256": np.asarray(source["checkpoint_sha256"]),
     }
@@ -697,12 +736,13 @@ def prepare(
     initialization_manifest.update(
         {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "initialization_episode_frame": 0,
+            "replay_scope": replay_scope,
+            "initialization_episode_frame": source_start,
             "window_identity": window_identity,
             "window_identity_sha256": _identity_sha256(window_identity),
             "hdf_identity": hdf_identity,
             "hdf_identity_sha256": _identity_sha256(hdf_identity),
-            "episode_arrays_sha256": _window_context_hash(episode_arrays),
+            "episode_arrays_sha256": _window_context_hash(replay_source_arrays),
             "context_arrays_sha256": _window_context_hash(context_arrays),
             "source_world_xy_translation_removed": translation.tolist(),
             "previous_action_source": previous_source,
@@ -717,17 +757,17 @@ def prepare(
     source_npz = output_run / SOURCE_RELATIVE_PATH
     _write_npz(
         source_npz,
-        physical_state=full_states,
-        physics_state_v3=full_states,
+        physical_state=source_states,
+        physics_state_v3=source_states,
         joint_pos=joint_pos,
-        joint_vel=full_states[:, 29:58],
+        joint_vel=source_states[:, 29:58],
         root_pos=root_pos,
-        root_quat=full_root_quat,
+        root_quat=source_root_quat,
         root_lin_vel=np.vstack(
             [
                 rotate_body_to_world(q, v)
                 for q, v in zip(
-                    full_root_quat, full_states[:, 58:61], strict=True
+                    source_root_quat, source_states[:, 58:61], strict=True
                 )
             ]
         ),
@@ -735,15 +775,15 @@ def prepare(
             [
                 rotate_body_to_world(q, v)
                 for q, v in zip(
-                    full_root_quat, full_states[:, 61:64], strict=True
+                    source_root_quat, source_states[:, 61:64], strict=True
                 )
             ]
         ),
         body_pos=body_pos,
-        raw_action=full_original_raw,
-        processed_action=full_processed_abs,
-        action_rel=full_original_canonical,
-        action_target_canonical=full_original_canonical,
+        raw_action=source_original_raw,
+        processed_action=source_processed_abs,
+        action_rel=source_original_canonical,
+        action_target_canonical=source_original_canonical,
         joint_names=np.asarray(schema["joint_names"]),
         action_default=context_arrays["runtime_default_joint_pos"],
         nominal_default_joint_pos=nominal,
@@ -788,27 +828,29 @@ def prepare(
                 for name in ("body_mass", "body_inertia", "body_com", "body_material", "ground_material")
             ]
         ).astype(np.float32),
-        replay_schema_version=np.asarray("sonic_h50a_exact_recorded_hdf_full_episode_v2"),
+        replay_schema_version=np.asarray(
+            f"sonic_h50a_exact_recorded_hdf_{replay_scope}_v2"
+        ),
         nominal_source=np.asarray("training_hdf5_variant_context"),
     )
     _write_trajectory(
         output_run / SOURCE_TRAJECTORY_RELATIVE_PATH,
         joint_pos=joint_pos,
         root_pos=root_pos,
-        root_quat=full_root_quat,
+        root_quat=source_root_quat,
         fps=fps,
     )
     _write_npz(
         output_run / REPLAY_ACTIONS_RELATIVE_PATH,
         raw_actions=replay_actions,
         scenario_names=np.asarray(SCENARIOS),
-        masked_window_start=np.int64(window_start),
-        masked_window_stop=np.int64(window_stop),
+        masked_window_start=np.int64(masked_window_start),
+        masked_window_stop=np.int64(masked_window_stop),
     )
 
     motion_path, motion_provenance = _resolve_motion_file(record)
     request = {
-        "schema_version": "sonic_h50a_exact_init_full_episode_action_replay_request_v2",
+        "schema_version": "sonic_h50a_exact_init_action_replay_request_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dataset_run": str(dataset_run),
         "dataset_manifest_sha256": dataset_hash,
@@ -816,13 +858,16 @@ def prepare(
         "checkpoint_sha256": source["checkpoint_sha256"],
         **window_identity,
         "mask_name": "full_both",
-        "replay_steps": episode_steps,
+        "replay_scope": replay_scope,
+        "replay_steps": replay_steps,
         "episode_steps": episode_steps,
-        "masked_window_start": window_start,
-        "masked_window_stop": window_stop,
+        "masked_window_start": masked_window_start,
+        "masked_window_stop": masked_window_stop,
+        "masked_window_episode_start": window_start,
+        "masked_window_episode_stop": window_stop,
         "masked_window_transitions": WINDOW_TRANSITIONS,
-        "pre_window_replay_steps": window_start,
-        "post_window_replay_steps": episode_steps - window_stop,
+        "pre_window_replay_steps": masked_window_start,
+        "post_window_replay_steps": replay_steps - masked_window_stop,
         "seed": int(seed),
         "motion_file": str(motion_path),
         "motion_file_sha256": motion_provenance["sha256"],
@@ -830,24 +875,27 @@ def prepare(
         "selection_rule": selection_rule,
         "render_mode": "three_independent_videos_and_triptych",
         "replay_composition": (
-            "original scenario uses recorded Actions for the full episode; H50-A scenario "
-            "uses recorded Actions outside the selected T64 full-both Mask window and "
-            "H50-A posterior-mean Actions inside it"
+            "full episode with recorded Actions outside and H50-A Actions inside the T64 window"
+            if replay_scope == "full_episode"
+            else "selected T64 window only; original and H50-A Actions replayed independently"
         ),
     }
     atomic_write_json(output_run / "manifests/action_mask_request.json", request)
     replay_request = {
-        "schema_version": "sonic_action_replay_request_exact_init_full_episode_v2",
+        "schema_version": "sonic_action_replay_request_exact_init_v2",
         "representation": "physics_v4",
         "motion_key": str(selected["motion_key"]),
         "motion_file": str(motion_path),
         "motion_file_sha256": motion_provenance["sha256"],
         "raw_actions_file": str((output_run / REPLAY_ACTIONS_RELATIVE_PATH).resolve()),
         "raw_actions_sha256": file_sha256(output_run / REPLAY_ACTIONS_RELATIVE_PATH),
-        "steps": episode_steps,
+        "steps": replay_steps,
+        "replay_scope": replay_scope,
         "episode_steps": episode_steps,
-        "masked_window_start": window_start,
-        "masked_window_stop": window_stop,
+        "masked_window_start": masked_window_start,
+        "masked_window_stop": masked_window_stop,
+        "masked_window_episode_start": window_start,
+        "masked_window_episode_stop": window_stop,
         "masked_window_transitions": WINDOW_TRANSITIONS,
         "pre_window_original_steps": replay_composition["pre_window_original_steps"],
         "post_window_original_steps": replay_composition["post_window_original_steps"],
@@ -857,7 +905,11 @@ def prepare(
         "control_dt": float(schema["simulation"]["control_dt"]),
         "latent_mode": "posterior_mean",
         "execution_mode": "two_serial_independent_single_environment_processes",
-        "h50a_action_mode": "hybrid_full_episode_original_outside_predicted_inside_mask_window",
+        "h50a_action_mode": (
+            "hybrid_full_episode_original_outside_predicted_inside_mask_window"
+            if replay_scope == "full_episode"
+            else "short_window_original_vs_predicted"
+        ),
         "exact_initialization_file": str(initialization_path.resolve()),
         "exact_initialization_file_sha256": initialization_manifest["file_sha256"],
         "exact_initialization_payload_sha256": payload_sha,
@@ -867,7 +919,7 @@ def prepare(
     }
     atomic_write_json(output_run / "manifests/action_replay_request.json", replay_request)
     offline = {
-        "format_version": "sonic_h50a_exact_init_full_episode_offline_metrics_v2",
+        "format_version": "sonic_h50a_exact_init_offline_metrics_v2",
         "selection": {**window_identity, "rule": selection_rule},
         "checkpoint": source,
         "dataset": {
@@ -889,18 +941,24 @@ def prepare(
             "saturated_element_count": int(saturated.sum()),
             "saturated_element_fraction": float(saturated.mean()),
         },
-        "full_episode": {
+        "replay": {
             **replay_composition,
-            "state_frames": episode_steps + 1,
-            "duration_seconds": episode_steps * float(schema["simulation"]["control_dt"]),
-            "original_raw_sha256": _array_sha256(full_original_raw),
+            "scope": replay_scope,
+            "source_episode_action_steps": episode_steps,
+            "source_episode_action_start": source_start,
+            "source_episode_action_stop": source_stop,
+            "replay_action_steps": replay_steps,
+            "state_frames": replay_steps + 1,
+            "duration_seconds": replay_steps
+            * float(schema["simulation"]["control_dt"]),
+            "original_raw_sha256": _array_sha256(source_original_raw),
             "hybrid_raw_sha256": _array_sha256(hybrid_raw),
         },
         "initialization": initialization_manifest,
         "scope": (
-            "one seen H50-A T64 posterior/full-both window inserted into its complete recorded "
-            "episode; exact episode-start initialization; not conditional-prior, KL, sampling, "
-            "or unseen-motion evaluation"
+            "one seen H50-A T64 posterior/full-both window; exact initialization at the replay "
+            f"start; replay_scope={replay_scope}; not conditional-prior, KL, sampling, or "
+            "unseen-motion evaluation"
         ),
     }
     atomic_write_json(output_run / "manifests/h50a_exact_init_offline_metrics.json", offline)
@@ -912,9 +970,10 @@ def prepare(
         "checkpoint_step": source["optimizer_step"],
         "initialization_payload_sha256": payload_sha,
         "offline_action_rmse_rad": offline["action"]["physical_rad"]["rmse"],
-        "replay_steps": episode_steps,
-        "masked_window_start": window_start,
-        "masked_window_stop": window_stop,
+        "replay_scope": replay_scope,
+        "replay_steps": replay_steps,
+        "masked_window_start": masked_window_start,
+        "masked_window_stop": masked_window_stop,
     }
 
 
@@ -1064,6 +1123,9 @@ def _write_error_svg(path: Path, errors: dict[str, np.ndarray], fps: float) -> N
 def finalize(output_run: Path) -> dict[str, Any]:
     output_run = output_run.expanduser().resolve()
     replay_request = load_json(output_run / "manifests/action_replay_request.json")
+    replay_scope = str(replay_request.get("replay_scope", "full_episode"))
+    if replay_scope not in {"full_episode", "window"}:
+        raise ValueError("finalize found an invalid replay scope")
     episode_steps = int(replay_request["steps"])
     window_start = int(replay_request["masked_window_start"])
     window_stop = int(replay_request["masked_window_stop"])
@@ -1255,8 +1317,7 @@ def finalize(output_run: Path) -> dict[str, Any]:
             replay[index]["joint_pos"].shape[0] == episode_steps + 1
             for index in range(2)
         ),
-        "recorded_full_episode_frames": source["joint_pos"].shape[0]
-        == episode_steps + 1,
+        "recorded_replay_frames": source["joint_pos"].shape[0] == episode_steps + 1,
         "planned_raw_actions_executed": action_execution_max_abs <= 1.0e-6,
         "hybrid_uses_original_actions_outside_mask_window": outside_window_action_max_abs
         == 0.0,
@@ -1286,7 +1347,7 @@ def finalize(output_run: Path) -> dict[str, Any]:
         )
 
     summary = {
-        "format_version": "sonic_h50a_exact_init_full_episode_action_replay_summary_v2",
+        "format_version": "sonic_h50a_exact_init_action_replay_summary_v2",
         "execution_pass": True,
         "initialization_identity_pass": initialization_identity_pass,
         "recorded_action_baseline_pass": recorded_baseline_pass,
@@ -1326,8 +1387,8 @@ def finalize(output_run: Path) -> dict[str, Any]:
         "conclusion": conclusion,
         "unique_next_step": next_step,
         "scope": (
-            "one complete recorded episode with one seen H50-A T64 posterior/full-both Action "
-            "window inserted; no conditional prior, random Mask, sampling, KL, or unseen-motion claim"
+            f"replay_scope={replay_scope}; one seen H50-A T64 posterior/full-both Action window; "
+            "no conditional prior, random Mask, sampling, KL, or unseen-motion claim"
         ),
     }
     atomic_write_json(
@@ -1373,6 +1434,9 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("--motion-key", default="auto")
     prepare_parser.add_argument("--variant-id", type=int, default=0)
     prepare_parser.add_argument("--window-start", type=int, default=0)
+    prepare_parser.add_argument(
+        "--replay-scope", choices=("full_episode", "window"), default="full_episode"
+    )
     prepare_parser.add_argument("--seed", type=int, default=20260834)
     finalize_parser = subparsers.add_parser("finalize")
     finalize_parser.add_argument("--output-run", type=Path, required=True)
@@ -1390,6 +1454,7 @@ def main() -> int:
             motion_key=args.motion_key,
             variant_id=args.variant_id,
             window_start=args.window_start,
+            replay_scope=args.replay_scope,
             seed=args.seed,
         )
     else:

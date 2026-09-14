@@ -1158,7 +1158,7 @@ posterior_h50_action_replay() {
 posterior_h50_action_replay_exact_init() {
   local dataset_run="${CVAE_DATASET_RUN:-}"
   local source_run="${CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN:-}"
-  local checkpoint motion_key variant window_start replay_seed
+  local checkpoint motion_key variant window_start replay_scope replay_seed
   local run_dir model_path
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
   [[ -n "$source_run" ]] || die "CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN is required"
@@ -1166,6 +1166,7 @@ posterior_h50_action_replay_exact_init() {
   motion_key="${CVAE_POSTERIOR_H50_REPLAY_MOTION_KEY:-auto}"
   variant="${CVAE_POSTERIOR_H50_REPLAY_VARIANT:-0}"
   window_start="${CVAE_POSTERIOR_H50_REPLAY_WINDOW_START:-0}"
+  replay_scope="${CVAE_POSTERIOR_H50_REPLAY_SCOPE:-full_episode}"
   replay_seed="${CVAE_POSTERIOR_H50_REPLAY_SEED:-20260834}"
   [[ -f "$source_run/markers/cvae_posterior_hierarchical_t64_execution.ok" ]] \
     || die "H50-A execution marker is missing: $source_run"
@@ -1178,6 +1179,8 @@ posterior_h50_action_replay_exact_init() {
     || die "CVAE_POSTERIOR_H50_REPLAY_VARIANT must be non-negative"
   [[ "$window_start" =~ ^[0-9]+$ ]] \
     || die "CVAE_POSTERIOR_H50_REPLAY_WINDOW_START must be non-negative"
+  [[ "$replay_scope" == "full_episode" || "$replay_scope" == "window" ]] \
+    || die "CVAE_POSTERIOR_H50_REPLAY_SCOPE must be full_episode or window"
   [[ "$replay_seed" =~ ^[0-9]+$ ]] \
     || die "CVAE_POSTERIOR_H50_REPLAY_SEED must be non-negative"
   [[ -d "$SONIC_KIT_DIR" && -f "$SONIC_KIT_DIR/sonic_repro.sh" ]] \
@@ -1200,6 +1203,7 @@ posterior_h50_action_replay_exact_init() {
       --motion-key "$motion_key" \
       --variant-id "$variant" \
       --window-start "$window_start" \
+      --replay-scope "$replay_scope" \
       --seed "$replay_seed"
   run_logged "$run_dir" h50a_exact_replay_isaac.log \
     env ACTION_MASK_RUN_DIR="$run_dir" \

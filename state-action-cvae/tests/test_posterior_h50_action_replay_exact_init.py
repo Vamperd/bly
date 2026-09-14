@@ -153,6 +153,8 @@ class H50ExactInitializationReplayTests(unittest.TestCase):
         self.assertIn("posterior_h50_action_replay_exact_init prepare", function)
         self.assertIn("render_h50a_exact_action_replays.py", function)
         self.assertIn("posterior_h50_action_replay_exact_init finalize", function)
+        self.assertIn("CVAE_POSTERIOR_H50_REPLAY_SCOPE", function)
+        self.assertIn('--replay-scope "$replay_scope"', function)
         self.assertNotIn("CVAE_POSTERIOR_H50_REPLAY_POST_STEPS", function)
         self.assertIn("SONIC exact replay hook is missing", function)
         self.assertIn("apply_exact_replay_initialization", function)

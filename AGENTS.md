@@ -804,6 +804,12 @@ Action；训练HDF直接渲染。初始化或原Action基线未通过时不得�
 变化，底部进度条将模型替换区间标红；summary另报告窗口前、窗口内和窗口后的误差。该代码已在
 Windows通过目标单元测试、编译、Shell语法和diff检查，Ubuntu三个motion正式run尚未执行。
 
+完整episode回传还显示两个初始化身份通过的run在长程原Action开环播放中明显漂移，另一个run初始化
+身份失败；因此不得把长视频跌倒归因于模型。入口现新增可选
+`CVAE_POSTERIOR_H50_REPLAY_SCOPE=window`：从所选T64窗口的HDF首帧及其前一Action精确初始化，只重放
+64条Action。默认仍为`full_episode`。短程模式仅用于额外定性复核，当前预选
+`body_stretch_v003_001__A362`与`body_stretch_4_002__A054`，Ubuntu结果尚未执行。
+
 ### 6.5 已完成 parent 训练
 
 ```text

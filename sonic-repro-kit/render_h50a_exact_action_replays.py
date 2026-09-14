@@ -205,16 +205,22 @@ def main() -> int:
     if request.get("scenario_names") != ["original", "h50a_posterior_full_both"]:
         raise ValueError("exact H50-A replay requires original and posterior scenarios")
     action_steps = int(request.get("steps", -1))
+    replay_scope = str(request.get("replay_scope", "full_episode"))
+    if replay_scope not in {"full_episode", "window"}:
+        raise ValueError("exact H50-A renderer received an invalid replay scope")
     masked_window_start = int(request.get("masked_window_start", -1))
     masked_window_stop = int(request.get("masked_window_stop", -1))
     if action_steps <= 0:
-        raise ValueError("exact H50-A renderer requires a non-empty full episode")
+        raise ValueError("exact H50-A renderer requires a non-empty replay")
     if masked_window_stop - masked_window_start != 64:
         raise ValueError("exact H50-A renderer requires one 64-Action Mask window")
     progress_bar_geometry(
         args.width, action_steps, masked_window_start, masked_window_stop
     )
     total_frames = action_steps + 1
+    labels = dict(LABELS)
+    if replay_scope == "window":
+        labels["h50a_action_exact_init"] = "H50-A short T64 Action replay"
 
     entries = []
     for name, trajectory_relative, video_relative in TRAJECTORIES:
@@ -275,7 +281,7 @@ def main() -> int:
                     frame = _annotate(
                         cv2,
                         renderer.render().copy(),
-                        LABELS[entry["name"]],
+                        labels[entry["name"]],
                         frame_index,
                         total_action_steps=action_steps,
                         masked_window_start=masked_window_start,
@@ -323,7 +329,7 @@ def main() -> int:
         )
 
     manifest = {
-        "schema_version": "sonic_h50a_exact_action_replay_render_full_episode_v2",
+        "schema_version": "sonic_h50a_exact_action_replay_render_v2",
         "independent_videos": encoded,
         "optional_triptych": {
             "video": str(triptych_path),
@@ -332,8 +338,12 @@ def main() -> int:
             "duration_seconds": float(triptych_duration),
         },
         "fps": 50.0,
-        "full_episode_action_steps": action_steps,
-        "full_episode_frames": total_frames,
+        "replay_scope": replay_scope,
+        "replay_action_steps": action_steps,
+        "replay_frames": total_frames,
+        "source_episode_action_steps": int(
+            request.get("episode_steps", action_steps)
+        ),
         "masked_window_progress_segment": {
             "action_start_inclusive": masked_window_start,
             "action_stop_exclusive": masked_window_stop,
@@ -350,8 +360,8 @@ def main() -> int:
             "elevation": args.camera_elevation,
         },
         "execution_semantics": (
-            "complete recorded episode plus two serial isolated full-episode Isaac runs; "
-            "the H50-A run replaces only the red T64 Mask interval"
+            "three trajectories rendered after two serial isolated Isaac runs; the red progress "
+            f"segment marks the H50-A T64 interval; replay_scope={replay_scope}"
         ),
         "xml_patch": xml_details,
     }
