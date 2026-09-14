@@ -2,11 +2,11 @@
 
 最后更新：2026-09-14
 
-状态：正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，execution PASS、quality FAIL、best joint score `2.1918797`。在恢复M-F2设计前，当前先执行H50-A exact-init物理复核。首次Ubuntu run `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_104705`在第一个Isaac进程、0 Action处因默认ground material prim缺失而工程失败；无模型结论。Windows已改为创建并绑定专用重放地面材质，当前待同步后从头重跑。M-R和KL仍被质量marker阻断；CPD、D1与CRA均为历史`SUPERSEDED`。
+状态：正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，execution PASS、quality FAIL、best joint score `2.1918797`。H50-A exact-init正式run `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_112412`已通过execution、初始化身份和原Action基线，并支持该单个已见窗口的H50-A Action重放。当前已实现完整episode定性回放，可分别补充三个已见motion；这不升级为模型门禁，随后仍恢复M-F2。M-R和KL仍被质量marker阻断；CPD、D1与CRA均为历史`SUPERSEDED`。
 
 ### 0.1 当前唯一执行项：精确初始化重放
 
-`posterior-h50-action-replay-exact-init`继续使用旧流程的两个独立`num_envs=1` Isaac进程，但两次reset后都加载同一份带SHA256的`exact_initialization.npz`。它恢复训练HDF中的首帧root/关节状态、世界速度、初始Action历史与target，以及关节和刚体动力学参数；每次在第一条Action前生成独立readback。训练HDF直接渲染，不重新仿真；original和H50-A各只重放64条Action，不追加窗口外步数。SONIC端的可选reset hook由外层补丁`sonic-repro-kit/patches/0009-feat-restore-exact-external-replay-initialization.patch`提供，普通replay不触发该路径。
+`posterior-h50-action-replay-exact-init`继续使用两个独立`num_envs=1` Isaac进程，两次reset后都加载同一份带SHA256的`exact_initialization.npz`。它恢复训练HDF的episode首帧root/关节状态、世界速度、初始Action历史与target，以及关节和刚体动力学参数；每次在第一条Action前生成独立readback。训练HDF完整episode直接渲染，不重新仿真；original重放整段原始Action，H50-A重放也覆盖整段episode，但只在所选T64窗口使用预测Action，其余Action与原记录逐位相同。视频底部进度条把该64步替换区间标红。SONIC端的可选reset hook由外层补丁`sonic-repro-kit/patches/0009-feat-restore-exact-external-replay-initialization.patch`提供，普通replay不触发该路径。
 
 首次运行暴露出Isaac版本差异：配置声明的`{terrain}/physicsMaterial`并不保证存在。修复后不再硬编码该路径，而是发现实际Plane/Collision prim，创建`exactReplayPhysicsMaterial`并显式绑定，同时把collision/material路径与binding target写入readback。失败run不得续用；新run必须重新执行prepare与两次Isaac进程。
 
@@ -28,7 +28,7 @@ unset CVAE_POSTERIOR_H50_REPLAY_VARIANT CVAE_POSTERIOR_H50_REPLAY_WINDOW_START
 bash ./cvae_repro.sh posterior-h50-action-replay-exact-init
 ```
 
-正式run结束后回填初始化hash/readback、原Action基线、H50-A对比及三份视频；此前不预判结果。
+历史正式run已通过并生成三份65帧独立视频与三栏视频。完整episode扩展已在Windows实现并通过单元、编译与Shell检查，尚待Ubuntu对三个motion分别新建run；每个run都会生成三份完整视频和三栏视频，并在manifest记录完整帧数、红色窗口起止及窗口前/内/后的轨迹指标。
 
 ## 0. 已完成插入式诊断：H50-A已见窗口Action重放
 

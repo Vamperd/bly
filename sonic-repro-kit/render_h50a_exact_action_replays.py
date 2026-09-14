@@ -37,7 +37,7 @@ TRAJECTORIES = (
 LABELS = {
     "recorded_hdf": "Recorded training HDF (no simulation)",
     "original_action_exact_init": "Original Action replay (exact init)",
-    "h50a_action_exact_init": "H50-A Action replay (exact init)",
+    "h50a_action_exact_init": "H50-A hybrid replay (red interval predicted)",
 }
 
 
@@ -73,7 +73,42 @@ def _writer(imageio: Any, path: Path, fps: float):
     )
 
 
-def _annotate(cv2: Any, frame: np.ndarray, label: str, frame_index: int) -> np.ndarray:
+def progress_bar_geometry(
+    width: int,
+    total_action_steps: int,
+    masked_window_start: int,
+    masked_window_stop: int,
+) -> dict[str, int]:
+    if width <= 40 or total_action_steps <= 0:
+        raise ValueError("video width and total Action steps must be positive")
+    if not (
+        0 <= masked_window_start < masked_window_stop <= total_action_steps
+    ):
+        raise ValueError("Mask progress interval is outside the full episode")
+    left, right = 14, width - 14
+    span = right - left
+
+    def position(action_index: int) -> int:
+        return left + round(span * action_index / total_action_steps)
+
+    return {
+        "left": left,
+        "right": right,
+        "masked_left": position(masked_window_start),
+        "masked_right": position(masked_window_stop),
+    }
+
+
+def _annotate(
+    cv2: Any,
+    frame: np.ndarray,
+    label: str,
+    frame_index: int,
+    *,
+    total_action_steps: int,
+    masked_window_start: int,
+    masked_window_stop: int,
+) -> np.ndarray:
     output = frame.copy()
     cv2.rectangle(output, (0, 0), (output.shape[1], 38), (20, 20, 20), -1)
     cv2.putText(
@@ -86,16 +121,60 @@ def _annotate(cv2: Any, frame: np.ndarray, label: str, frame_index: int) -> np.n
         1,
         cv2.LINE_AA,
     )
+    digits = len(str(total_action_steps))
     cv2.putText(
         output,
-        f"frame {frame_index:02d}/64  |  50 Hz",
-        (10, output.shape[0] - 14),
+        f"frame {frame_index:0{digits}d}/{total_action_steps}  |  50 Hz",
+        (14, output.shape[0] - 29),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.44,
         (245, 245, 245),
         1,
         cv2.LINE_AA,
     )
+    geometry = progress_bar_geometry(
+        output.shape[1],
+        total_action_steps,
+        masked_window_start,
+        masked_window_stop,
+    )
+    bar_top, bar_bottom = output.shape[0] - 19, output.shape[0] - 10
+    cv2.rectangle(
+        output,
+        (geometry["left"], bar_top),
+        (geometry["right"], bar_bottom),
+        (45, 45, 45),
+        -1,
+    )
+    current = geometry["left"] + round(
+        (geometry["right"] - geometry["left"])
+        * min(max(frame_index, 0), total_action_steps)
+        / total_action_steps
+    )
+    cv2.rectangle(
+        output,
+        (geometry["left"], bar_top),
+        (current, bar_bottom),
+        (210, 145, 45),
+        -1,
+    )
+    completed_mask_right = min(current, geometry["masked_right"])
+    if completed_mask_right > geometry["masked_left"]:
+        cv2.rectangle(
+            output,
+            (geometry["masked_left"], bar_top),
+            (completed_mask_right, bar_bottom),
+            (35, 35, 230),
+            -1,
+        )
+    cv2.rectangle(
+        output,
+        (geometry["masked_left"], bar_top - 1),
+        (geometry["masked_right"], bar_bottom + 1),
+        (35, 35, 230),
+        1,
+    )
+    cv2.line(output, (current, bar_top - 2), (current, bar_bottom + 2), (255, 255, 255), 1)
     return output
 
 
@@ -125,8 +204,17 @@ def main() -> int:
     )
     if request.get("scenario_names") != ["original", "h50a_posterior_full_both"]:
         raise ValueError("exact H50-A replay requires original and posterior scenarios")
-    if int(request.get("steps", -1)) != 64:
-        raise ValueError("exact H50-A renderer requires exactly 64 Action steps")
+    action_steps = int(request.get("steps", -1))
+    masked_window_start = int(request.get("masked_window_start", -1))
+    masked_window_stop = int(request.get("masked_window_stop", -1))
+    if action_steps <= 0:
+        raise ValueError("exact H50-A renderer requires a non-empty full episode")
+    if masked_window_stop - masked_window_start != 64:
+        raise ValueError("exact H50-A renderer requires one 64-Action Mask window")
+    progress_bar_geometry(
+        args.width, action_steps, masked_window_start, masked_window_stop
+    )
+    total_frames = action_steps + 1
 
     entries = []
     for name, trajectory_relative, video_relative in TRAJECTORIES:
@@ -134,9 +222,10 @@ def main() -> int:
         trajectory = load_trajectory(trajectory_path)
         qpos = build_mujoco_qpos(trajectory)
         fps = float(trajectory.get("fps", 0.0))
-        if qpos.shape[0] != 65 or not np.isclose(fps, 50.0):
+        if qpos.shape[0] != total_frames or not np.isclose(fps, 50.0):
             raise ValueError(
-                f"{name} must contain 65 frames at 50 Hz; found {qpos.shape[0]} at {fps}"
+                f"{name} must contain {total_frames} frames at 50 Hz; "
+                f"found {qpos.shape[0]} at {fps}"
             )
         entries.append(
             {
@@ -177,7 +266,7 @@ def main() -> int:
         for entry in entries:
             writer = _writer(imageio, entry["video"], entry["fps"])
             try:
-                for frame_index in range(65):
+                for frame_index in range(total_frames):
                     data.qpos[:] = entry["qpos"][frame_index]
                     data.qvel[:] = 0.0
                     camera.lookat[:] = camera_qpos[frame_index, :3]
@@ -188,14 +277,17 @@ def main() -> int:
                         renderer.render().copy(),
                         LABELS[entry["name"]],
                         frame_index,
+                        total_action_steps=action_steps,
+                        masked_window_start=masked_window_start,
+                        masked_window_stop=masked_window_stop,
                     )
                     writer.append_data(frame)
             finally:
                 writer.close()
             frame_count, duration = count_frames_and_secs(str(entry["video"]))
-            if int(frame_count) != 65 or entry["video"].stat().st_size <= 0:
+            if int(frame_count) != total_frames or entry["video"].stat().st_size <= 0:
                 raise RuntimeError(
-                    f"{entry['name']} encoded {frame_count} frames; expected 65"
+                    f"{entry['name']} encoded {frame_count} frames; expected {total_frames}"
                 )
             encoded.append(
                 {
@@ -217,7 +309,7 @@ def main() -> int:
     readers = [imageio.get_reader(str(entry["video"])) for entry in entries]
     triptych_writer = _writer(imageio, triptych_path, 50.0)
     try:
-        for frame_index in range(65):
+        for frame_index in range(total_frames):
             frames = [reader.get_data(frame_index) for reader in readers]
             triptych_writer.append_data(np.concatenate(frames, axis=1))
     finally:
@@ -225,11 +317,13 @@ def main() -> int:
         for reader in readers:
             reader.close()
     triptych_frames, triptych_duration = count_frames_and_secs(str(triptych_path))
-    if int(triptych_frames) != 65:
-        raise RuntimeError(f"triptych encoded {triptych_frames} frames; expected 65")
+    if int(triptych_frames) != total_frames:
+        raise RuntimeError(
+            f"triptych encoded {triptych_frames} frames; expected {total_frames}"
+        )
 
     manifest = {
-        "schema_version": "sonic_h50a_exact_action_replay_render_v1",
+        "schema_version": "sonic_h50a_exact_action_replay_render_full_episode_v2",
         "independent_videos": encoded,
         "optional_triptych": {
             "video": str(triptych_path),
@@ -238,6 +332,15 @@ def main() -> int:
             "duration_seconds": float(triptych_duration),
         },
         "fps": 50.0,
+        "full_episode_action_steps": action_steps,
+        "full_episode_frames": total_frames,
+        "masked_window_progress_segment": {
+            "action_start_inclusive": masked_window_start,
+            "action_stop_exclusive": masked_window_stop,
+            "transitions": masked_window_stop - masked_window_start,
+            "color": "red",
+            "meaning": "H50-A posterior Action replacement interval in the hybrid replay",
+        },
         "width": args.width,
         "height": args.height,
         "camera": {
@@ -247,7 +350,8 @@ def main() -> int:
             "elevation": args.camera_elevation,
         },
         "execution_semantics": (
-            "three trajectories rendered independently after two serial isolated Isaac runs"
+            "complete recorded episode plus two serial isolated full-episode Isaac runs; "
+            "the H50-A run replaces only the red T64 Mask interval"
         ),
         "xml_patch": xml_details,
     }

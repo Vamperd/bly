@@ -6,7 +6,7 @@
 
 ## 1. 当前状态与唯一下一步
 
-当前活动路线仍为 **H50-SCVAE 标准条件 CVAE**，但在设计M-F2前先完成一次不训练的H50-A精确初始化重放诊断。正式M-F已从H50-A step34000 `last.pt`独立初始化并跑满60k；execution PASS但quality FAIL，best joint score为`2.1918797`。旧H50-A视频证明原Action与预测Action在同一新环境中结果接近，却没有复现训练HDF；代码审计确认采集时的随机初态和动力学参数并未恢复。exact-init首次Ubuntu run已在第一个Isaac进程应用初始化时因默认地面材质prim不存在而工程失败，尚未执行任何Action；这不是模型结论。Windows已改为查找真实地面碰撞prim、创建并显式绑定专用重放材质，当前唯一下一步是同步修复后从头重跑。只有原Action基线通过后才评价模型；随后再恢复M-F2设计。M-R与KL继续阻断，CPD、D1和CRA均为`SUPERSEDED`历史结果。
+当前活动路线仍为 **H50-SCVAE 标准条件 CVAE**。H50-A精确初始化重放已在修复地面材质绑定后正式通过：两次初始化身份一致，原始Action能够复现训练HDF，且H50-A Action也在同一已见窗口通过重放。该结果只支持单窗口posterior Action记忆，不扩展为conditional prior或随机Mask结论。完整episode定性回放现已实现：只在选定T64窗口替换H50-A预测Action，窗口外保持原Action，进度条把替换区间标红；待在Ubuntu对三个已见motion分别执行。随后恢复M-F2设计；M-R与KL继续阻断，CPD、D1和CRA均为`SUPERSEDED`历史结果。
 
 硬约束是：posterior与conditional prior只共享decoder参数，任何一次decoder调用只能接收其中一条路径的一组latent；二者绝不拼接、平均或attention融合。最终推理只允许`Mask条件 → p(z|c) → prior latent → D(z,c)`，不得调用posterior或回退到真值路径。
 
@@ -31,6 +31,8 @@
 - 同一reset/runtime context下，原Action重放与预测Action重放的关节位置RMSE为`0.008448 rad`，root位置RMSE `0.003229 m`、root姿态mean/max `0.672°/2.010°`、body MPJPE `0.004635 m`、contact一致率`99.13%`；planned/executed raw Action、两次mapping和两次runtime context的max差均为0。这支持该已见窗口的Action数值记忆及受控重放接近。
 - 训练记录与原Action重放的基线检查FAIL：关节位置RMSE `0.245825 rad`、root位置RMSE `0.251772 m`、root姿态max `106.918°`、body MPJPE `0.418972 m`、contact一致率`77.39%`。因此左栏与中栏的巨大差距属于采集/重放初态、环境或上下文未复现问题；正式物理结论只能比较共享条件的中/右两栏。该实验不检验conditional prior、新Mask、采样或未见motion。
 - 精确初始化复核首次Ubuntu run `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_104705`完成离线准备并选择同一`baby_full_diaper...A462 / variant 0 / start 0 / T64`窗口；checkpoint step34000、初始化payload SHA256为`e5263b782a8707b39ec8f126b34c46cf60bf2ed550a23c288ce92e028aa59865`，预测Action物理RMSE仍为`0.005441 rad`。第一个Isaac进程尚未执行Action就在恢复ground material时失败：当前场景不存在硬编码的`/World/ground/physicsMaterial`。因此该run是`ENGINEERING FAIL`，没有readback、视频或模型质量结论。Windows已修复为创建独立`exactReplayPhysicsMaterial`并绑定到实际Plane/Collision prim；同步后必须创建新run从头重跑，不复用失败目录。
+- 修复后的正式exact-init run `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_112412`已经通过：`execution_pass=true`、`initialization_identity_pass=true`、`recorded_action_baseline_pass=true`，结论为`ORIGINAL_AND_H50A_ACTION_REPLAY_PASS_ON_ONE_SEEN_WINDOW`。三份65帧、50 Hz、1.3秒的独立视频及可选三栏视频均已生成；source commit和详细逐轨迹数值尚未回传。该结果证明旧重放的主要问题确实在初始化/环境复现，并支持该单个已见窗口的H50-A posterior Action物理重放；不证明其他motion、conditional prior、新Mask或采样能力。
+- 2026-09-14新增完整episode扩展（代码READY、Ubuntu未执行）：精确初始化改为真正的episode第0帧；original使用整段原Action，H50-A使用“窗口外原Action+窗口内64步预测Action”的混合序列。准备和收尾阶段都强制验证窗口外Action最大差为0；渲染帧数由episode长度决定，底部进度条以红色标记预测区间，并分别报告窗口前、窗口内和窗口后的轨迹误差。该扩展只改变定性视频长度和归因清晰度，不增加模型补全范围。
 - `best_fit.pt`停留在首次PASS的step32000：global State/Action `0.019671/0.014758`、worst State/Action `0.039847/0.021575`、p99/max abs `0.058849/0.693393`、contact 100%，zero/cross-window/cross-motion ratio `57.84/63.67/72.73`。step34000的对应连续指标进一步改善到`0.019080/0.014412`、`0.037716/0.021309`和p99 `0.057103`；但fit score通过后下限为1.0，保存条件只接受更低score，因此没有覆盖`best_fit.pt`。当前预注册B合同仍从step32000的`best_fit.pt`做model-only初始化。
 - H50-B已从上述`best_fit.pt`做model-only初始化，在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_fixed_20260910_012003`跑满60k，源码`bf6d14c3848ffc1c544a56195cf07d3a2188c863`。execution完成但`quality_pass=false`，best位于step60000，fit score `1.0192181`；唯一失败项是global State `0.020384`，比`0.02`高1.92%。global Action `0.013908`、worst State/Action `0.034900/0.021335`、p99 `0.066332`、contact 100%及latent ratio `19.48/22.66/25.88`均通过。
 - B在52k→60k的score为`1.72360→1.21865→1.03544→1.02523→1.01922`，所有主连续指标在末段持续改善；但下降速度随学习率衰减而放缓。8类Mask中最难的是`state_rollout`，worst State `0.034900`，已经低于门槛。
@@ -73,7 +75,7 @@ H38-A 完整序列重建（已FAIL，仅作latent压力诊断）
 → H50-SCVAE smoke（工程PASS；无质量结论）
 → M-F原8类固定物理Mask均值训练（60k完成；q-p对齐PASS，q/p重建均FAIL）
 → H50-A单个已见full-both窗口Action物理重放（execution PASS；Action与受控轨迹接近，训练记录重放基线FAIL）
-→ H50-A同窗口exact-init三次独立视频复核（首run因地面材质路径假设工程失败；修复READY、待新run）
+→ H50-A同窗口exact-init三次独立视频复核（正式PASS；单窗口posterior Action重放成立）
 → M-F2分阶段均值课程设计（exact-init回填后的下一步；尚未实现或执行）
 → M-R动态单缺口及2–3个物理多缺口均值训练（BLOCKED）
 → K1标准KL与posterior mean/sample、prior sample三条独立路径对照
@@ -269,7 +271,7 @@ compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_c
 | H50-A复核 | H38同结构扩至51.01M；full-both、随机初始化 | 30k，每1k评测 | `FAIL quality`；score `1.03707`，仅global/worst State略超 | 受控续训15k |
 | H50-A续训 | 恢复H50-A `last.pt`的模型和AdamW；低LR尾段重启 | 最多15k，每1k；三连PASS提前停 | `PASS fit`；best checkpoint step32000，step34000三连PASS后提前结束；strict/exact FAIL | H50-B |
 | H50-A Action重放 | step34000 posterior、已见variant0/start0/T64、full-both；原/预测Action分别重放 | 不训练；离线误差、两次受控Isaac重放及三栏MP4 | `PASS execution`；物理Action RMSE `0.005441 rad`，原/预测重放关节RMSE `0.008448 rad`；训练记录/原重放基线FAIL | 只作记忆可视化；回到M-F2设计 |
-| H50-A exact-init重放 | 同一已见T64窗口；训练HDF直读，original/H50-A各自独立单环境精确初始化重放 | 不训练；64 Action、三份独立MP4、首帧/context readback与逐帧误差 | 首run `ENGINEERING FAIL`：默认ground material prim不存在，0 Action执行；专用材质绑定修复READY | 同步修复后新建run；原Action基线通过才评价H50-A |
+| H50-A exact-init重放 | 历史run为同一已见T64窗口；现已扩展为完整episode，H50-A只替换其中64步 | 不训练；三份独立MP4、首帧/context readback、窗口外Action恒等与分区误差 | 历史65帧run已`PASS`；完整episode三motion待Ubuntu执行 | 完成定性视频后回到M-F2 |
 | H50-B | 从续训`best_fit.pt` model-only初始化；8类固定物理Mask | 60k，每2k；三连PASS提前停 | `FAIL quality`；仅global State `0.020384`超1.92%，但full-both State退化到`0.060442` | 设计保留A能力的B修复，不进入R |
 | H50-R | 从H50-B继续旧condition融合 | 原计划最多30k | `CANCELLED`；B会遗忘A且无fit marker | 不再执行 |
 | H50-CRA | 冻结H50-A、decoder侧差分condition adapter | 未正式训练 | `CANCELLED/SUPERSEDED`；不能检验Mask条件能否预测latent | 删除训练入口，不形成结果 |

@@ -783,14 +783,26 @@ RMSE`0.245825 rad`、root位置RMSE`0.251772 m`、姿态max`106.918°`、body MP
 `posterior-h50-action-replay-exact-init`复核路径。首次Ubuntu run
 `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_104705`在第一个Isaac
 进程、0 Action处工程失败：场景不存在硬编码的`/World/ground/physicsMaterial`，因此没有初始化
-readback、视频或模型质量结论。Windows现已修复为发现实际Plane/Collision prim、创建并显式绑定
-专用`exactReplayPhysicsMaterial`；当前状态为修复READY、Ubuntu待新run。
+readback、视频或模型质量结论。Windows随后修复为发现实际Plane/Collision prim、创建并显式绑定
+专用`exactReplayPhysicsMaterial`。
 它从同一HDF窗口生成带payload/file SHA256的`exact_initialization.npz`，恢复root/关节状态、世界
 速度、Action历史与初始target、runtime default/limit/Kp/Kd/armature/friction以及body
 mass/inertia/COM/material和ground material。SONIC opt-in reset hook由外层`patches/0009`提供；
-historical replay不触发。original与H50-A仍在两个独立`num_envs=1`进程中串行运行，各64条Action，
-训练HDF直接渲染，最终产生三份独立MP4。初始化或原Action基线未通过时不得评价H50-A；正式Ubuntu
-结果产生前不得写成重放通过。
+historical replay不触发。历史版本让original与H50-A在两个独立`num_envs=1`进程中串行运行，各64条
+Action；训练HDF直接渲染。初始化或原Action基线未通过时不得评价H50-A。
+
+修复后正式run `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_112412`
+已完成，`execution_pass=true`、`initialization_identity_pass=true`、`recorded_action_baseline_pass=true`，
+并输出三份65帧独立MP4和三栏视频；正式结论为
+`ORIGINAL_AND_H50A_ACTION_REPLAY_PASS_ON_ONE_SEEN_WINDOW`。这只支持一个已见窗口的posterior Action
+记忆与物理重放。source commit和详细轨迹数值尚未回传，不得猜测；补充其他已见motion只能作定性
+复核，不得替代SCVAE Mask质量门禁。
+
+2026-09-14后续版本已把定性回放扩展为完整episode：两次Isaac仍独立串行，并从真正的episode第0帧
+加载同一精确初始化；original执行整段记录Action，H50-A执行“窗口外原Action、窗口内64步预测Action”
+的混合序列。准备与收尾都强制窗口外Action逐位相同。三份独立视频和三栏视频的帧数随episode长度
+变化，底部进度条将模型替换区间标红；summary另报告窗口前、窗口内和窗口后的误差。该代码已在
+Windows通过目标单元测试、编译、Shell语法和diff检查，Ubuntu三个motion正式run尚未执行。
 
 ### 6.5 已完成 parent 训练
 
@@ -956,7 +968,7 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 1. H50-A续训已经PASS；H50-B、CPD和D1均形成历史结果并被H50-SCVAE取代；SCVAE M-F已完成。
 2. `posterior-h50-action-replay`已完成；它支持H50-A已见窗口Action记忆和中/右受控重放接近，但训练记录/原Action重放基线FAIL，不得据此声称物理轨迹被复现。
-3. 当前先同步ground material绑定修复并从头重跑`posterior-h50-action-replay-exact-init`；失败run不得复用。核验原Action基线并回填后再恢复M-F2分阶段均值课程设计。不得原样续训M-F，也不得绕过缺失的M-F质量marker启动M-R或K1。
+3. exact-init单窗口已正式通过；完整episode混合重放已实现，允许对三个已见motion作定性视频复核，随后恢复M-F2分阶段均值课程设计。不得把视频复核当作conditional prior或随机Mask门禁，不得原样续训M-F，也不得绕过缺失的M-F质量marker启动M-R或K1。
 4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。

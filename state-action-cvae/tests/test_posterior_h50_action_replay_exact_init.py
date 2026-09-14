@@ -9,6 +9,7 @@ import unittest
 import numpy as np
 
 from cvae_sa.posterior_h50_action_replay_exact_init import (
+    compose_full_episode_replay_actions,
     _first_threshold_crossings,
     _payload_sha256,
     _raw_from_processed,
@@ -39,6 +40,22 @@ class H50ExactInitializationReplayTests(unittest.TestCase):
         offset = np.linspace(-0.1, 0.1, 29, dtype=np.float32)
         raw = _raw_from_processed(processed, scale, offset, None, None)
         np.testing.assert_allclose(raw * scale + offset, processed, atol=1.0e-6)
+
+    def test_full_episode_hybrid_replaces_only_selected_t64_window(self) -> None:
+        original = np.arange(160 * 29, dtype=np.float32).reshape(160, 29)
+        predicted = np.full((64, 29), -7.0, dtype=np.float32)
+        replay, hybrid, contract = compose_full_episode_replay_actions(
+            original, predicted, 48
+        )
+        self.assertEqual(replay.shape, (160, 2, 29))
+        np.testing.assert_array_equal(hybrid[:48], original[:48])
+        np.testing.assert_array_equal(hybrid[48:112], predicted)
+        np.testing.assert_array_equal(hybrid[112:], original[112:])
+        np.testing.assert_array_equal(replay[:, 0], original)
+        np.testing.assert_array_equal(replay[:, 1], hybrid)
+        self.assertEqual(contract["masked_window_start"], 48)
+        self.assertEqual(contract["masked_window_stop"], 112)
+        self.assertEqual(contract["outside_window_max_abs_difference"], 0.0)
 
     def test_initialization_payload_hash_is_deterministic(self) -> None:
         values = {
@@ -153,7 +170,10 @@ class H50ExactInitializationReplayTests(unittest.TestCase):
         ):
             self.assertIn(name, renderer)
         self.assertIn("for entry in entries", renderer)
-        self.assertIn("if int(request.get(\"steps\", -1)) != 64", renderer)
+        self.assertIn("total_frames = action_steps + 1", renderer)
+        self.assertIn("progress_bar_geometry", renderer)
+        self.assertIn("masked_window_progress_segment", renderer)
+        self.assertIn('"color": "red"', renderer)
 
 
 if __name__ == "__main__":

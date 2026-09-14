@@ -197,6 +197,55 @@ def _raw_from_processed(
     return raw.astype(np.float32)
 
 
+def compose_full_episode_replay_actions(
+    original_raw: np.ndarray,
+    predicted_window_raw: np.ndarray,
+    window_start: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Build original and hybrid full-episode Action streams.
+
+    The H50-A prediction replaces exactly one T64 interval.  Every Action
+    outside that interval remains byte-for-byte equal to the recorded Action.
+    """
+
+    original = np.asarray(original_raw, dtype=np.float32)
+    predicted = np.asarray(predicted_window_raw, dtype=np.float32)
+    if original.ndim != 2 or original.shape[1:] != (29,):
+        raise ValueError("full-episode raw Action must have shape [steps,29]")
+    if predicted.shape != (WINDOW_TRANSITIONS, 29):
+        raise ValueError("H50-A predicted Action window must have shape [64,29]")
+    if window_start < 0:
+        raise ValueError("window start must be non-negative")
+    window_stop = window_start + WINDOW_TRANSITIONS
+    if window_stop > original.shape[0]:
+        raise ValueError("H50-A prediction window exceeds the recorded episode")
+    if not np.isfinite(original).all() or not np.isfinite(predicted).all():
+        raise ValueError("Action replay streams contain NaN/Inf")
+
+    hybrid = original.copy()
+    hybrid[window_start:window_stop] = predicted
+    outside = np.concatenate(
+        (
+            hybrid[:window_start] - original[:window_start],
+            hybrid[window_stop:] - original[window_stop:],
+        ),
+        axis=0,
+    )
+    outside_max_abs = float(np.max(np.abs(outside))) if outside.size else 0.0
+    if outside_max_abs != 0.0:
+        raise RuntimeError("hybrid replay modified an Action outside the Mask window")
+    stacked = np.stack((original, hybrid), axis=1)
+    return stacked, hybrid, {
+        "episode_action_steps": int(original.shape[0]),
+        "masked_window_start": int(window_start),
+        "masked_window_stop": int(window_stop),
+        "masked_window_transitions": WINDOW_TRANSITIONS,
+        "pre_window_original_steps": int(window_start),
+        "post_window_original_steps": int(original.shape[0] - window_stop),
+        "outside_window_max_abs_difference": outside_max_abs,
+    }
+
+
 def _write_exact_initialization(
     path: Path, arrays: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
@@ -241,6 +290,35 @@ def _load_replay(path: Path) -> dict[str, np.ndarray]:
         }
     if not all(np.isfinite(value).all() for value in result.values()):
         raise ValueError(f"replay contains NaN/Inf: {path}")
+    result["physical_state"] = result["physics_state_v3"]
+    return result
+
+
+def _trajectory_region(
+    trajectory: dict[str, np.ndarray], start_action: int, stop_action: int
+) -> dict[str, np.ndarray]:
+    """Slice an Action interval and its inclusive boundary State frames."""
+
+    if start_action < 0 or stop_action <= start_action:
+        raise ValueError("trajectory region must contain at least one Action")
+    state_stop = stop_action + 1
+    state_fields = (
+        "physics_state_v3",
+        "joint_pos",
+        "joint_vel",
+        "root_pos",
+        "root_quat",
+        "root_lin_vel",
+        "root_ang_vel",
+        "body_pos",
+    )
+    result = {
+        name: np.asarray(trajectory[name][start_action:state_stop])
+        for name in state_fields
+    }
+    result["raw_action"] = np.asarray(
+        trajectory["raw_action"][start_action:stop_action]
+    )
     result["physical_state"] = result["physics_state_v3"]
     return result
 
@@ -411,26 +489,27 @@ def prepare(
     window_stop = window_start + WINDOW_TRANSITIONS
     with h5py.File(record["hdf5_path"], "r") as stream:
         episode = stream[f"data/{record['episode']}"]
-        if window_stop > int(record["steps"]):
+        episode_steps = int(record["steps"])
+        if window_stop > episode_steps:
             raise ValueError("selected H50-A window is shorter than T64")
-        states = read_physics_states(episode["states"], window_start, window_stop + 1)
-        original_canonical = np.asarray(
-            episode["actions/action_target_canonical"][window_start:window_stop], dtype=np.float32
+        full_states = read_physics_states(episode["states"], 0, episode_steps + 1)
+        full_original_canonical = np.asarray(
+            episode["actions/action_target_canonical"][:episode_steps], dtype=np.float32
         )
-        original_raw = np.asarray(
-            episode["actions/raw_policy_action"][window_start:window_stop], dtype=np.float32
+        full_original_raw = np.asarray(
+            episode["actions/raw_policy_action"][:episode_steps], dtype=np.float32
         )
-        processed_abs = np.asarray(
-            episode["actions/processed_joint_target_abs"][window_start:window_stop], dtype=np.float32
+        full_processed_abs = np.asarray(
+            episode["actions/processed_joint_target_abs"][:episode_steps], dtype=np.float32
         )
-        root_pos_world = np.asarray(
-            episode["replay/root_pos_w"][window_start : window_stop + 1], dtype=np.float32
+        full_root_pos_world = np.asarray(
+            episode["replay/root_pos_w"][: episode_steps + 1], dtype=np.float32
         )
-        root_quat = np.asarray(
-            episode["replay/root_quat_w"][window_start : window_stop + 1], dtype=np.float32
+        full_root_quat = np.asarray(
+            episode["replay/root_quat_w"][: episode_steps + 1], dtype=np.float32
         )
-        body_pos_world = np.asarray(
-            episode["replay/body_pos_w"][window_start : window_stop + 1], dtype=np.float32
+        full_body_pos_world = np.asarray(
+            episode["replay/body_pos_w"][: episode_steps + 1], dtype=np.float32
         )
         context = stream[f"contexts/{record['context_id']}"]
         context_arrays = {
@@ -465,6 +544,34 @@ def prepare(
             episode["actions/initial_processed_target_canonical"], dtype=np.float32
         )
 
+    expected_shapes = {
+        "states": (episode_steps + 1, 70),
+        "action_target_canonical": (episode_steps, 29),
+        "raw_policy_action": (episode_steps, 29),
+        "processed_joint_target_abs": (episode_steps, 29),
+        "root_pos_w": (episode_steps + 1, 3),
+        "root_quat_w": (episode_steps + 1, 4),
+    }
+    actual_shapes = {
+        "states": full_states.shape,
+        "action_target_canonical": full_original_canonical.shape,
+        "raw_policy_action": full_original_raw.shape,
+        "processed_joint_target_abs": full_processed_abs.shape,
+        "root_pos_w": full_root_pos_world.shape,
+        "root_quat_w": full_root_quat.shape,
+    }
+    failed_shapes = {
+        name: {"expected": expected_shapes[name], "actual": actual_shapes[name]}
+        for name in expected_shapes
+        if actual_shapes[name] != expected_shapes[name]
+    }
+    if failed_shapes:
+        raise ValueError(f"full recorded episode arrays have invalid shapes: {failed_shapes}")
+
+    original_canonical = full_original_canonical[window_start:window_stop]
+    if not np.allclose(original_canonical, target_action, rtol=1.0e-5, atol=1.0e-7):
+        raise RuntimeError("selected HDF Action window differs from the model target")
+
     nominal = resolve_parameter(schema["nominal_default_joint_pos"], env_id).reshape(29)
     action_scale = resolve_parameter(schema["action_scale"], env_id).reshape(29)
     action_clip_entry = schema.get("action_clip")
@@ -483,35 +590,38 @@ def prepare(
         action_clip,
         wrapper_clip,
     )
-    if window_start == 0:
-        previous_processed = initial_target_canonical + nominal
-        previous_raw = _raw_from_processed(
-            previous_processed,
-            action_scale,
-            context_arrays["action_offset"],
-            action_clip,
-            wrapper_clip,
-        )
-        previous_source = "episode initial processed target, inverted through recorded Action mapping"
-    else:
-        import h5py
+    replay_actions, hybrid_raw, replay_composition = compose_full_episode_replay_actions(
+        full_original_raw,
+        predicted_raw,
+        window_start,
+    )
 
-        with h5py.File(record["hdf5_path"], "r") as stream:
-            episode = stream[f"data/{record['episode']}"]
-            previous_raw = np.asarray(
-                episode["actions/raw_policy_action"][window_start - 1], dtype=np.float32
-            )
-            previous_processed = np.asarray(
-                episode["actions/processed_joint_target_abs"][window_start - 1], dtype=np.float32
-            )
-        previous_source = "recorded Action immediately before the selected window"
+    # Both Isaac runs begin at the true episode start.  The selected T64
+    # prediction may be in the middle of the episode, so using its S0 here
+    # would no longer reproduce the full recorded trajectory.
+    previous_processed = initial_target_canonical + nominal
+    previous_raw = _raw_from_processed(
+        previous_processed,
+        action_scale,
+        context_arrays["action_offset"],
+        action_clip,
+        wrapper_clip,
+    )
+    previous_source = "episode initial processed target, inverted through recorded Action mapping"
 
-    translation = np.asarray([root_pos_world[0, 0], root_pos_world[0, 1], 0.0], dtype=np.float32)
-    root_pos = root_pos_world - translation
-    body_pos = body_pos_world - translation[None, None]
-    joint_pos = states[:, :29] + nominal[None]
-    root_lin_vel_world = rotate_body_to_world(root_quat[0], states[0, 58:61])
-    root_ang_vel_world = rotate_body_to_world(root_quat[0], states[0, 61:64])
+    translation = np.asarray(
+        [full_root_pos_world[0, 0], full_root_pos_world[0, 1], 0.0],
+        dtype=np.float32,
+    )
+    root_pos = full_root_pos_world - translation
+    body_pos = full_body_pos_world - translation[None, None]
+    joint_pos = full_states[:, :29] + nominal[None]
+    root_lin_vel_world = rotate_body_to_world(
+        full_root_quat[0], full_states[0, 58:61]
+    )
+    root_ang_vel_world = rotate_body_to_world(
+        full_root_quat[0], full_states[0, 61:64]
+    )
 
     hdf_identity = {
         **_recorded_hdf_identity(dataset_run, record),
@@ -519,11 +629,11 @@ def prepare(
         "context_id": str(record["context_id"]),
     }
     episode_arrays = {
-        "states": states,
-        "original_raw": original_raw,
-        "processed_abs": processed_abs,
+        "states": full_states,
+        "original_raw": full_original_raw,
+        "processed_abs": full_processed_abs,
         "root_pos": root_pos,
-        "root_quat": root_quat,
+        "root_quat": full_root_quat,
         "body_pos": body_pos,
         **{f"episode_context_{name}": value for name, value in episode_context.items()},
     }
@@ -539,13 +649,13 @@ def prepare(
     init_arrays: dict[str, Any] = {
         "joint_names": np.asarray(schema["joint_names"]),
         "joint_pos": joint_pos[0],
-        "joint_vel": states[0, 29:58],
+        "joint_vel": full_states[0, 29:58],
         "root_pos_relative": root_pos[0],
-        "root_quat_wxyz": root_quat[0],
+        "root_quat_wxyz": full_root_quat[0],
         "root_lin_vel_world": root_lin_vel_world,
         "root_ang_vel_world": root_ang_vel_world,
         "body_pos_relative": body_pos[0],
-        "physics_state_v3": states[0],
+        "physics_state_v3": full_states[0],
         "nominal_default_joint_pos": nominal,
         "runtime_default_joint_pos": context_arrays["runtime_default_joint_pos"],
         "action_scale": action_scale,
@@ -587,6 +697,7 @@ def prepare(
     initialization_manifest.update(
         {
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "initialization_episode_frame": 0,
             "window_identity": window_identity,
             "window_identity_sha256": _identity_sha256(window_identity),
             "hdf_identity": hdf_identity,
@@ -606,23 +717,33 @@ def prepare(
     source_npz = output_run / SOURCE_RELATIVE_PATH
     _write_npz(
         source_npz,
-        physical_state=states,
-        physics_state_v3=states,
+        physical_state=full_states,
+        physics_state_v3=full_states,
         joint_pos=joint_pos,
-        joint_vel=states[:, 29:58],
+        joint_vel=full_states[:, 29:58],
         root_pos=root_pos,
-        root_quat=root_quat,
+        root_quat=full_root_quat,
         root_lin_vel=np.vstack(
-            [rotate_body_to_world(q, v) for q, v in zip(root_quat, states[:, 58:61], strict=True)]
+            [
+                rotate_body_to_world(q, v)
+                for q, v in zip(
+                    full_root_quat, full_states[:, 58:61], strict=True
+                )
+            ]
         ),
         root_ang_vel=np.vstack(
-            [rotate_body_to_world(q, v) for q, v in zip(root_quat, states[:, 61:64], strict=True)]
+            [
+                rotate_body_to_world(q, v)
+                for q, v in zip(
+                    full_root_quat, full_states[:, 61:64], strict=True
+                )
+            ]
         ),
         body_pos=body_pos,
-        raw_action=original_raw,
-        processed_action=processed_abs,
-        action_rel=original_canonical,
-        action_target_canonical=original_canonical,
+        raw_action=full_original_raw,
+        processed_action=full_processed_abs,
+        action_rel=full_original_canonical,
+        action_target_canonical=full_original_canonical,
         joint_names=np.asarray(schema["joint_names"]),
         action_default=context_arrays["runtime_default_joint_pos"],
         nominal_default_joint_pos=nominal,
@@ -667,25 +788,27 @@ def prepare(
                 for name in ("body_mass", "body_inertia", "body_com", "body_material", "ground_material")
             ]
         ).astype(np.float32),
-        replay_schema_version=np.asarray("sonic_h50a_exact_recorded_hdf_v1"),
+        replay_schema_version=np.asarray("sonic_h50a_exact_recorded_hdf_full_episode_v2"),
         nominal_source=np.asarray("training_hdf5_variant_context"),
     )
     _write_trajectory(
         output_run / SOURCE_TRAJECTORY_RELATIVE_PATH,
         joint_pos=joint_pos,
         root_pos=root_pos,
-        root_quat=root_quat,
+        root_quat=full_root_quat,
         fps=fps,
     )
     _write_npz(
         output_run / REPLAY_ACTIONS_RELATIVE_PATH,
-        raw_actions=np.stack((original_raw, predicted_raw), axis=1),
+        raw_actions=replay_actions,
         scenario_names=np.asarray(SCENARIOS),
+        masked_window_start=np.int64(window_start),
+        masked_window_stop=np.int64(window_stop),
     )
 
     motion_path, motion_provenance = _resolve_motion_file(record)
     request = {
-        "schema_version": "sonic_h50a_exact_init_action_replay_request_v1",
+        "schema_version": "sonic_h50a_exact_init_full_episode_action_replay_request_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dataset_run": str(dataset_run),
         "dataset_manifest_sha256": dataset_hash,
@@ -693,31 +816,48 @@ def prepare(
         "checkpoint_sha256": source["checkpoint_sha256"],
         **window_identity,
         "mask_name": "full_both",
-        "replay_steps": WINDOW_TRANSITIONS,
-        "post_window_replay_steps": 0,
+        "replay_steps": episode_steps,
+        "episode_steps": episode_steps,
+        "masked_window_start": window_start,
+        "masked_window_stop": window_stop,
+        "masked_window_transitions": WINDOW_TRANSITIONS,
+        "pre_window_replay_steps": window_start,
+        "post_window_replay_steps": episode_steps - window_stop,
         "seed": int(seed),
         "motion_file": str(motion_path),
         "motion_file_sha256": motion_provenance["sha256"],
         "motion_manifest": motion_provenance["manifest"],
         "selection_rule": selection_rule,
         "render_mode": "three_independent_videos_and_triptych",
+        "replay_composition": (
+            "original scenario uses recorded Actions for the full episode; H50-A scenario "
+            "uses recorded Actions outside the selected T64 full-both Mask window and "
+            "H50-A posterior-mean Actions inside it"
+        ),
     }
     atomic_write_json(output_run / "manifests/action_mask_request.json", request)
     replay_request = {
-        "schema_version": "sonic_action_replay_request_exact_init_v1",
+        "schema_version": "sonic_action_replay_request_exact_init_full_episode_v2",
         "representation": "physics_v4",
         "motion_key": str(selected["motion_key"]),
         "motion_file": str(motion_path),
         "motion_file_sha256": motion_provenance["sha256"],
         "raw_actions_file": str((output_run / REPLAY_ACTIONS_RELATIVE_PATH).resolve()),
         "raw_actions_sha256": file_sha256(output_run / REPLAY_ACTIONS_RELATIVE_PATH),
-        "steps": WINDOW_TRANSITIONS,
+        "steps": episode_steps,
+        "episode_steps": episode_steps,
+        "masked_window_start": window_start,
+        "masked_window_stop": window_stop,
+        "masked_window_transitions": WINDOW_TRANSITIONS,
+        "pre_window_original_steps": replay_composition["pre_window_original_steps"],
+        "post_window_original_steps": replay_composition["post_window_original_steps"],
         "num_envs": 2,
         "scenario_names": list(SCENARIOS),
         "source_capture": str(source_npz.resolve()),
         "control_dt": float(schema["simulation"]["control_dt"]),
         "latent_mode": "posterior_mean",
         "execution_mode": "two_serial_independent_single_environment_processes",
+        "h50a_action_mode": "hybrid_full_episode_original_outside_predicted_inside_mask_window",
         "exact_initialization_file": str(initialization_path.resolve()),
         "exact_initialization_file_sha256": initialization_manifest["file_sha256"],
         "exact_initialization_payload_sha256": payload_sha,
@@ -727,7 +867,7 @@ def prepare(
     }
     atomic_write_json(output_run / "manifests/action_replay_request.json", replay_request)
     offline = {
-        "format_version": "sonic_h50a_exact_init_offline_metrics_v1",
+        "format_version": "sonic_h50a_exact_init_full_episode_offline_metrics_v2",
         "selection": {**window_identity, "rule": selection_rule},
         "checkpoint": source,
         "dataset": {
@@ -749,10 +889,18 @@ def prepare(
             "saturated_element_count": int(saturated.sum()),
             "saturated_element_fraction": float(saturated.mean()),
         },
+        "full_episode": {
+            **replay_composition,
+            "state_frames": episode_steps + 1,
+            "duration_seconds": episode_steps * float(schema["simulation"]["control_dt"]),
+            "original_raw_sha256": _array_sha256(full_original_raw),
+            "hybrid_raw_sha256": _array_sha256(hybrid_raw),
+        },
         "initialization": initialization_manifest,
         "scope": (
-            "one seen H50-A T64 posterior/full-both window; exact historical initialization; "
-            "not conditional-prior, KL, sampling, or unseen-motion evaluation"
+            "one seen H50-A T64 posterior/full-both window inserted into its complete recorded "
+            "episode; exact episode-start initialization; not conditional-prior, KL, sampling, "
+            "or unseen-motion evaluation"
         ),
     }
     atomic_write_json(output_run / "manifests/h50a_exact_init_offline_metrics.json", offline)
@@ -764,7 +912,9 @@ def prepare(
         "checkpoint_step": source["optimizer_step"],
         "initialization_payload_sha256": payload_sha,
         "offline_action_rmse_rad": offline["action"]["physical_rad"]["rmse"],
-        "replay_steps": WINDOW_TRANSITIONS,
+        "replay_steps": episode_steps,
+        "masked_window_start": window_start,
+        "masked_window_stop": window_stop,
     }
 
 
@@ -914,6 +1064,16 @@ def _write_error_svg(path: Path, errors: dict[str, np.ndarray], fps: float) -> N
 def finalize(output_run: Path) -> dict[str, Any]:
     output_run = output_run.expanduser().resolve()
     replay_request = load_json(output_run / "manifests/action_replay_request.json")
+    episode_steps = int(replay_request["steps"])
+    window_start = int(replay_request["masked_window_start"])
+    window_stop = int(replay_request["masked_window_stop"])
+    if (
+        episode_steps <= 0
+        or window_start < 0
+        or window_stop - window_start != WINDOW_TRANSITIONS
+        or window_stop > episode_steps
+    ):
+        raise ValueError("full-episode replay request has an invalid Mask window")
     initialization = load_json(output_run / "manifests/exact_initialization.json")
     required = [
         output_run / "markers/action_mask_replay.ok",
@@ -991,14 +1151,66 @@ def finalize(output_run: Path) -> dict[str, Any]:
     with np.load(output_run / REPLAY_ACTIONS_RELATIVE_PATH, allow_pickle=False) as values:
         planned_raw = np.asarray(values["raw_actions"], dtype=np.float32)
     executed_raw = np.stack((replay[0]["raw_action"], replay[1]["raw_action"]), axis=1)
-    if planned_raw.shape != (WINDOW_TRANSITIONS, 2, 29) or executed_raw.shape != planned_raw.shape:
+    if planned_raw.shape != (episode_steps, 2, 29) or executed_raw.shape != planned_raw.shape:
         raise ValueError(
             f"exact replay Action shapes are invalid: planned={planned_raw.shape}, executed={executed_raw.shape}"
         )
     action_execution_max_abs = float(np.max(np.abs(planned_raw - executed_raw)))
+    outside_window = np.concatenate(
+        (
+            planned_raw[:window_start, 1] - planned_raw[:window_start, 0],
+            planned_raw[window_stop:, 1] - planned_raw[window_stop:, 0],
+        ),
+        axis=0,
+    )
+    outside_window_action_max_abs = (
+        float(np.max(np.abs(outside_window))) if outside_window.size else 0.0
+    )
+    if outside_window_action_max_abs != 0.0:
+        raise ValueError("H50-A hybrid replay changed Actions outside the Mask window")
     source_to_original = _trajectory_metrics(source, replay[0])
     source_to_h50a = _trajectory_metrics(source, replay[1])
     original_to_h50a = _trajectory_metrics(replay[0], replay[1])
+    source_window = _trajectory_region(source, window_start, window_stop)
+    original_window = _trajectory_region(replay[0], window_start, window_stop)
+    h50a_window = _trajectory_region(replay[1], window_start, window_stop)
+    region_metrics: dict[str, Any] = {
+        "masked_window": {
+            "action_start_inclusive": window_start,
+            "action_stop_exclusive": window_stop,
+            "recorded_hdf_to_original": _trajectory_metrics(
+                source_window, original_window
+            ),
+            "recorded_hdf_to_h50a": _trajectory_metrics(source_window, h50a_window),
+            "original_to_h50a": _trajectory_metrics(original_window, h50a_window),
+        }
+    }
+    if window_start > 0:
+        region_metrics["before_mask_window"] = {
+            "action_start_inclusive": 0,
+            "action_stop_exclusive": window_start,
+            "recorded_hdf_to_original": _trajectory_metrics(
+                _trajectory_region(source, 0, window_start),
+                _trajectory_region(replay[0], 0, window_start),
+            ),
+            "recorded_hdf_to_h50a": _trajectory_metrics(
+                _trajectory_region(source, 0, window_start),
+                _trajectory_region(replay[1], 0, window_start),
+            ),
+        }
+    if window_stop < episode_steps:
+        region_metrics["after_mask_window"] = {
+            "action_start_inclusive": window_stop,
+            "action_stop_exclusive": episode_steps,
+            "recorded_hdf_to_original": _trajectory_metrics(
+                _trajectory_region(source, window_stop, episode_steps),
+                _trajectory_region(replay[0], window_stop, episode_steps),
+            ),
+            "recorded_hdf_to_h50a": _trajectory_metrics(
+                _trajectory_region(source, window_stop, episode_steps),
+                _trajectory_region(replay[1], window_stop, episode_steps),
+            ),
+        }
     baseline_thresholds = {
         "joint_position_rmse_rad": 0.02,
         "root_position_rmse_m": 0.05,
@@ -1040,10 +1252,14 @@ def finalize(output_run: Path) -> dict[str, Any]:
     }
     execution_checks = {
         "two_serial_replay_artifacts": all(
-            replay[index]["joint_pos"].shape[0] == WINDOW_TRANSITIONS + 1
+            replay[index]["joint_pos"].shape[0] == episode_steps + 1
             for index in range(2)
         ),
+        "recorded_full_episode_frames": source["joint_pos"].shape[0]
+        == episode_steps + 1,
         "planned_raw_actions_executed": action_execution_max_abs <= 1.0e-6,
+        "hybrid_uses_original_actions_outside_mask_window": outside_window_action_max_abs
+        == 0.0,
         "two_initialization_reports": len(reports) == 2,
         "three_independent_videos": all(video_checks.values()),
         "per_frame_error_artifacts": error_npz.is_file() and error_svg.is_file(),
@@ -1070,7 +1286,7 @@ def finalize(output_run: Path) -> dict[str, Any]:
         )
 
     summary = {
-        "format_version": "sonic_h50a_exact_init_action_replay_summary_v1",
+        "format_version": "sonic_h50a_exact_init_full_episode_action_replay_summary_v2",
         "execution_pass": True,
         "initialization_identity_pass": initialization_identity_pass,
         "recorded_action_baseline_pass": recorded_baseline_pass,
@@ -1092,6 +1308,8 @@ def finalize(output_run: Path) -> dict[str, Any]:
             "h50a_metric_checks": h50a_metric_checks,
             "h50a_replay_pass_after_valid_baseline": h50a_replay_pass,
             "planned_executed_raw_action_max_abs": action_execution_max_abs,
+            "outside_mask_window_action_max_abs": outside_window_action_max_abs,
+            "regions": region_metrics,
             "first_threshold_crossing_frame": crossings,
             "per_frame_errors": str(error_npz),
             "error_curves": str(error_svg),
@@ -1108,8 +1326,8 @@ def finalize(output_run: Path) -> dict[str, Any]:
         "conclusion": conclusion,
         "unique_next_step": next_step,
         "scope": (
-            "one seen H50-A T64 posterior/full-both window; no conditional prior, random Mask, "
-            "sampling, KL, or unseen-motion claim"
+            "one complete recorded episode with one seen H50-A T64 posterior/full-both Action "
+            "window inserted; no conditional prior, random Mask, sampling, KL, or unseen-motion claim"
         ),
     }
     atomic_write_json(
@@ -1141,7 +1359,10 @@ def finalize(output_run: Path) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Replay one seen H50-A window from its recorded exact initialization"
+        description=(
+            "Replay a complete seen episode from its exact initialization, replacing one "
+            "T64 Action interval with H50-A posterior predictions"
+        )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     prepare_parser = subparsers.add_parser("prepare")
