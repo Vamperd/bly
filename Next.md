@@ -2,11 +2,13 @@
 
 最后更新：2026-09-14
 
-状态：正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，execution PASS、quality FAIL、best joint score `2.1918797`。在恢复M-F2设计前，当前先执行H50-A exact-init物理复核：旧run没有恢复采集时的随机初态和动力学参数，因此训练HDF/原Action差异尚不能归因于模型。新入口代码已就绪、Ubuntu待执行。M-R和KL仍被质量marker阻断；CPD、D1与CRA均为历史`SUPERSEDED`。
+状态：正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，execution PASS、quality FAIL、best joint score `2.1918797`。在恢复M-F2设计前，当前先执行H50-A exact-init物理复核。首次Ubuntu run `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_104705`在第一个Isaac进程、0 Action处因默认ground material prim缺失而工程失败；无模型结论。Windows已改为创建并绑定专用重放地面材质，当前待同步后从头重跑。M-R和KL仍被质量marker阻断；CPD、D1与CRA均为历史`SUPERSEDED`。
 
 ### 0.1 当前唯一执行项：精确初始化重放
 
 `posterior-h50-action-replay-exact-init`继续使用旧流程的两个独立`num_envs=1` Isaac进程，但两次reset后都加载同一份带SHA256的`exact_initialization.npz`。它恢复训练HDF中的首帧root/关节状态、世界速度、初始Action历史与target，以及关节和刚体动力学参数；每次在第一条Action前生成独立readback。训练HDF直接渲染，不重新仿真；original和H50-A各只重放64条Action，不追加窗口外步数。SONIC端的可选reset hook由外层补丁`sonic-repro-kit/patches/0009-feat-restore-exact-external-replay-initialization.patch`提供，普通replay不触发该路径。
+
+首次运行暴露出Isaac版本差异：配置声明的`{terrain}/physicsMaterial`并不保证存在。修复后不再硬编码该路径，而是发现实际Plane/Collision prim，创建`exactReplayPhysicsMaterial`并显式绑定，同时把collision/material路径与binding target写入readback。失败run不得续用；新run必须重新执行prepare与两次Isaac进程。
 
 初始化身份通过要求两次readback最大差`≤1e-6`，各自与HDF State/context最大差`≤1e-5`，姿态误差`≤1e-4°`，Action历史/target误差`≤1e-6`。随后original基线要求joint RMSE`≤0.02 rad`、root RMSE`≤0.05 m`、姿态max`≤5°`、body MPJPE`≤0.05 m`、contact一致率`≥95%`。原Action基线不通过时不得评价H50-A，只能调查尚未记录的PhysX隐藏状态。
 

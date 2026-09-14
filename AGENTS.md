@@ -780,7 +780,11 @@ RMSE`0.245825 rad`、root位置RMSE`0.251772 m`、姿态max`106.918°`、body MP
 能声明已见窗口Action记忆及中/右受控重放接近，不能声明复现训练轨迹或通过conditional prior/新Mask。
 
 旧重放没有恢复训练采集时的startup随机化与精确`S0`，因此新增独立
-`posterior-h50-action-replay-exact-init`复核路径，当前状态为Windows代码READY、Ubuntu待执行。
+`posterior-h50-action-replay-exact-init`复核路径。首次Ubuntu run
+`/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_104705`在第一个Isaac
+进程、0 Action处工程失败：场景不存在硬编码的`/World/ground/physicsMaterial`，因此没有初始化
+readback、视频或模型质量结论。Windows现已修复为发现实际Plane/Collision prim、创建并显式绑定
+专用`exactReplayPhysicsMaterial`；当前状态为修复READY、Ubuntu待新run。
 它从同一HDF窗口生成带payload/file SHA256的`exact_initialization.npz`，恢复root/关节状态、世界
 速度、Action历史与初始target、runtime default/limit/Kp/Kd/armature/friction以及body
 mass/inertia/COM/material和ground material。SONIC opt-in reset hook由外层`patches/0009`提供；
@@ -952,7 +956,7 @@ bash ./cvae_repro.sh validate-state-mask-video
 
 1. H50-A续训已经PASS；H50-B、CPD和D1均形成历史结果并被H50-SCVAE取代；SCVAE M-F已完成。
 2. `posterior-h50-action-replay`已完成；它支持H50-A已见窗口Action记忆和中/右受控重放接近，但训练记录/原Action重放基线FAIL，不得据此声称物理轨迹被复现。
-3. 当前先运行`posterior-h50-action-replay-exact-init`并核验原Action基线；完成结果回填后再恢复M-F2分阶段均值课程设计。不得原样续训M-F，也不得绕过缺失的M-F质量marker启动M-R或K1。
+3. 当前先同步ground material绑定修复并从头重跑`posterior-h50-action-replay-exact-init`；失败run不得复用。核验原Action基线并回填后再恢复M-F2分阶段均值课程设计。不得原样续训M-F，也不得绕过缺失的M-F质量marker启动M-R或K1。
 4. 应用并验证 `patches/0008` 后，只采集同一 32-motion 的 Physics v5 reference 子集；比较
    history、history+Action queue、history+runtime reference、再加 causal dynamics embedding。
    forward 分支严禁读取 reference，且 reference 扰动不得改变 forward 输出。

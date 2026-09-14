@@ -526,8 +526,10 @@ original与H50-A Action拆成两个串行的`num_envs=1`进程，但会让两个
 Action前加载同一份`exact_initialization.npz`，并分别保存初始化readback。训练HDF本身直接
 渲染为`recorded_hdf.mp4`；两次仿真分别渲染为`original_action_exact_init.mp4`和
 `h50a_action_exact_init.mp4`，只执行64条Action，不追加窗口外步数。SONIC嵌套仓库必须已经
-包含外层补丁`0009-feat-restore-exact-external-replay-initialization.patch`；该补丁只有在显式
-提供`external_replay_initialization_path`时生效，普通评测和历史重放保持不变。
+包含外层补丁`0009-feat-restore-exact-external-replay-initialization.patch`；该补丁只在显式提供
+`external_replay_initialization_path`时生效，普通评测和历史重放保持不变。地面材质不依赖Isaac
+版本相关的默认prim路径：initializer查找实际Plane或Collision prim，创建
+`exactReplayPhysicsMaterial`并显式绑定，其路径和binding target写入readback。
 
 ## 十、CVAE State Mask 运动学视频
 

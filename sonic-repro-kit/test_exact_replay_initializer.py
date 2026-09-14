@@ -88,6 +88,9 @@ class ExactReplayInitializationTest(unittest.TestCase):
             "root_physx_view.set_coms",
             "root_physx_view.set_material_properties",
             "_set_ground_material",
+            "exactReplayPhysicsMaterial",
+            "get_first_matching_child_prim",
+            "bind_physics_material",
             "write_root_state_to_sim",
             "write_joint_state_to_sim",
             "term.process_actions(previous_raw)",
@@ -103,6 +106,10 @@ class ExactReplayInitializationTest(unittest.TestCase):
         self.assertLess(source.index("write_root_state_to_sim"), source.index("raw.sim.forward()"))
         self.assertLess(source.index("term.process_actions(previous_raw)"), source.index("raw.sim.forward()"))
         self.assertLess(source.index("raw.sim.forward()"), source.index('"application_complete": True'))
+        self.assertNotIn(
+            'ground physics material prim is missing: {prim_path}',
+            source,
+        )
 
 
 if __name__ == "__main__":

@@ -211,27 +211,94 @@ def _set_actuator_parameters(robot: Any, values: dict[str, np.ndarray]) -> None:
             current[:] = restored
 
 
-def _set_ground_material(raw_env: Any, ground: np.ndarray) -> np.ndarray:
-    """Restore the plane's USD material and return the immediate USD readback."""
+def _set_ground_material(
+    raw_env: Any, ground: np.ndarray
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Bind a dedicated replay material to the actual plane and read it back.
 
-    from isaaclab.sim.utils.stage import get_current_stage
-    from pxr import UsdPhysics
+    Isaac Lab normally creates ``{terrain_path}/physicsMaterial`` for a plane,
+    but that implementation detail is not stable across the supported Isaac
+    builds.  The replay must not silently fall back to an unrelated global
+    material, so create a dedicated material and bind it to the discovered
+    ground collision prim explicitly.
+    """
+
+    from isaaclab.sim.utils import (
+        bind_physics_material,
+        get_current_stage,
+        get_first_matching_child_prim,
+    )
+    from pxr import UsdPhysics, UsdShade
 
     material_cfg = raw_env.cfg.scene.terrain.physics_material
+    if material_cfg is None:
+        raise RuntimeError("terrain physics material configuration is missing")
     material_cfg.static_friction = float(ground[0])
     material_cfg.dynamic_friction = float(ground[1])
     material_cfg.restitution = float(ground[2])
-    prim_path = f"{raw_env.cfg.scene.terrain.prim_path}/physicsMaterial"
-    prim = get_current_stage().GetPrimAtPath(prim_path)
+
+    stage = get_current_stage()
+    terrain_path = str(raw_env.cfg.scene.terrain.prim_path).rstrip("/")
+    terrain_prim = stage.GetPrimAtPath(terrain_path)
+    if not terrain_prim.IsValid():
+        raise RuntimeError(f"ground terrain prim is missing: {terrain_path}")
+
+    collision_prim = get_first_matching_child_prim(
+        terrain_path,
+        predicate=lambda candidate: candidate.GetTypeName() == "Plane",
+        stage=stage,
+    )
+    discovery = "type_name_plane"
+    if collision_prim is None:
+        collision_prim = get_first_matching_child_prim(
+            terrain_path,
+            predicate=lambda candidate: candidate.HasAPI(UsdPhysics.CollisionAPI),
+            stage=stage,
+        )
+        discovery = "usd_physics_collision_api"
+    if collision_prim is None:
+        descendants = [
+            str(candidate.GetPath())
+            for candidate in stage.Traverse()
+            if str(candidate.GetPath()) == terrain_path
+            or str(candidate.GetPath()).startswith(f"{terrain_path}/")
+        ]
+        raise RuntimeError(
+            "ground collision prim is missing under "
+            f"{terrain_path}; descendants={descendants}"
+        )
+
+    prim_path = f"{terrain_path}/exactReplayPhysicsMaterial"
+    prim = stage.GetPrimAtPath(prim_path)
     if not prim.IsValid():
-        raise RuntimeError(f"ground physics material prim is missing: {prim_path}")
+        material_cfg.func(prim_path, material_cfg)
+        prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        raise RuntimeError(f"failed to create exact replay ground material: {prim_path}")
+
     api = UsdPhysics.MaterialAPI(prim)
     if not api:
         api = UsdPhysics.MaterialAPI.Apply(prim)
     api.GetStaticFrictionAttr().Set(float(ground[0]))
     api.GetDynamicFrictionAttr().Set(float(ground[1]))
     api.GetRestitutionAttr().Set(float(ground[2]))
-    return np.asarray(
+    collision_path = str(collision_prim.GetPath())
+    binding_result = bind_physics_material(
+        collision_path, prim_path, stage=stage, stronger_than_descendants=True
+    )
+    binding_targets = [
+        str(target)
+        for target in UsdShade.MaterialBindingAPI(collision_prim)
+        .GetDirectBindingRel("physics")
+        .GetTargets()
+    ]
+    if prim_path not in binding_targets:
+        raise RuntimeError(
+            f"failed to bind exact replay material {prim_path} to {collision_path}; "
+            f"targets={binding_targets}"
+        )
+
+    readback = np.asarray(
         [
             api.GetStaticFrictionAttr().Get(),
             api.GetDynamicFrictionAttr().Get(),
@@ -239,6 +306,14 @@ def _set_ground_material(raw_env: Any, ground: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float32,
     )
+    return readback, {
+        "terrain_prim_path": terrain_path,
+        "collision_prim_path": collision_path,
+        "material_prim_path": prim_path,
+        "collision_discovery": discovery,
+        "binding_result": None if binding_result is None else bool(binding_result),
+        "binding_targets": binding_targets,
+    }
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -334,7 +409,9 @@ def apply_exact_replay_initialization(
         current = getter().clone()
         current[0] = torch.as_tensor(values[name], device=current.device, dtype=current.dtype)
         setter(current, env_ids_cpu)
-    ground_readback = _set_ground_material(raw, values["ground_material"])
+    ground_readback, ground_binding = _set_ground_material(
+        raw, values["ground_material"]
+    )
 
     origin = _numpy(raw.scene.env_origins[0])
     root_position = values["root_pos_relative"].copy()
@@ -474,6 +551,7 @@ def apply_exact_replay_initialization(
             )
             for name, value in actual_context.items()
         },
+        "ground_material_binding": ground_binding,
         "readback": {name: value.tolist() for name, value in readback.items()},
         "application_complete": True,
     }
