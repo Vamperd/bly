@@ -7,7 +7,7 @@
     "motion_count": 32,
     "window_transitions": 64,
     "stride": 64,
-    "max_windows": 2,
+    "max_windows": null,
     "max_episodes": 256,
     "num_workers": 0
   },
@@ -41,7 +41,7 @@
     "micro_batch": 2,
     "learning_rate": 0.0001,
     "weight_decay": 0.0,
-    "posterior": {"max_optimizer_steps": 2},
+    "posterior": {"max_optimizer_steps": 40000},
     "condition": {"max_optimizer_steps": 2},
     "kl": {"max_optimizer_steps": 2, "beta": 0.001, "beta_warmup_steps": 1000}
   }
