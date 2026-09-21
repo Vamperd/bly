@@ -210,17 +210,58 @@ def _standard_reconstruction_loss(output: Any, batch: dict[str, torch.Tensor]) -
     return torch.stack(values).mean()
 
 
+STATE_CONTINUOUS_FEATURE_NAMES = tuple(
+    [f"joint_pos_{index}" for index in range(29)]
+    + [f"joint_vel_{index}" for index in range(29)]
+    + [f"base_lin_vel_{index}" for index in range(3)]
+    + [f"base_ang_vel_{index}" for index in range(3)]
+    + [f"gravity_robot_{index}" for index in range(3)]
+    + ["base_height"]
+)
+ACTION_FEATURE_NAMES = tuple(f"action_{index}" for index in range(29))
+
+
+def _batch_value(batch: dict[str, Any], key: str, index: int, default: Any = None) -> Any:
+    value = batch.get(key, default)
+    if isinstance(value, torch.Tensor):
+        return value[index].item()
+    if isinstance(value, (list, tuple)):
+        return value[index]
+    return value
+
+
+def _window_identity(batch: dict[str, Any], index: int, ordinal: int) -> dict[str, Any]:
+    return {
+        "window_index": ordinal,
+        "motion_key": str(_batch_value(batch, "motion_key", index, "unknown")),
+        "episode_ref": str(_batch_value(batch, "episode_ref", index, "unknown")),
+        "variant_id": int(_batch_value(batch, "variant_id", index, -1)),
+        "window_start": int(_batch_value(batch, "window_start", index, -1)),
+    }
+
+
 @torch.no_grad()
 def _evaluate_full_sequence(
     model: HierarchicalStandardCVAETransformer,
     loader: Iterable[dict[str, Any]],
     device: torch.device,
-) -> dict[str, float]:
-    """Complete Stage-A evaluation over every selected window."""
+) -> dict[str, Any]:
+    """Complete Stage-A evaluation with global and tail-error diagnostics."""
     model.eval()
     state_sse = action_sse = contact_loss = 0.0
     state_count = action_count = contact_count = 0
     max_abs = 0.0
+    absolute_values: list[torch.Tensor] = []
+    state_absolute_values: list[torch.Tensor] = []
+    action_absolute_values: list[torch.Tensor] = []
+    state_feature_sse = torch.zeros(68, dtype=torch.float64)
+    state_feature_count = torch.zeros(68, dtype=torch.long)
+    state_feature_max = torch.zeros(68, dtype=torch.float32)
+    action_feature_sse = torch.zeros(29, dtype=torch.float64)
+    action_feature_count = torch.zeros(29, dtype=torch.long)
+    action_feature_max = torch.zeros(29, dtype=torch.float32)
+    window_rows: list[dict[str, Any]] = []
+    ordinal = 0
     for cpu_batch in loader:
         batch = _device_batch(cpu_batch, device)
         output = model(batch, stage="A")
@@ -240,6 +281,48 @@ def _evaluate_full_sequence(
         contact_valid = batch["valid_state"].bool()[..., None].expand_as(contact)
         contact_loss += float(contact.masked_select(contact_valid).sum().detach().cpu())
         contact_count += int(contact_valid.sum())
+        state_error_cpu = state_error.detach().float().cpu()
+        action_error_cpu = action_error.detach().float().cpu()
+        state_valid_cpu = state_valid.detach().cpu()
+        action_valid_cpu = action_valid.detach().cpu()
+        state_abs_cpu = state_error_cpu.abs().masked_select(state_valid_cpu)
+        action_abs_cpu = action_error_cpu.abs().masked_select(action_valid_cpu)
+        if state_abs_cpu.numel():
+            state_absolute_values.append(state_abs_cpu)
+            absolute_values.append(state_abs_cpu)
+        if action_abs_cpu.numel():
+            action_absolute_values.append(action_abs_cpu)
+            absolute_values.append(action_abs_cpu)
+        state_feature_sse += (state_error_cpu.square() * state_valid_cpu).sum(dim=(0, 1), dtype=torch.float64)
+        state_feature_count += state_valid_cpu.sum(dim=(0, 1)).to(torch.long)
+        state_feature_max = torch.maximum(
+            state_feature_max,
+            (state_error_cpu.abs() * state_valid_cpu).amax(dim=(0, 1)),
+        )
+        action_feature_sse += (action_error_cpu.square() * action_valid_cpu).sum(dim=(0, 1), dtype=torch.float64)
+        action_feature_count += action_valid_cpu.sum(dim=(0, 1)).to(torch.long)
+        action_feature_max = torch.maximum(
+            action_feature_max,
+            (action_error_cpu.abs() * action_valid_cpu).amax(dim=(0, 1)),
+        )
+        for index in range(state_error_cpu.shape[0]):
+            state_values = state_error_cpu[index].square().masked_select(state_valid_cpu[index])
+            action_values = action_error_cpu[index].square().masked_select(action_valid_cpu[index])
+            state_mse = float(state_values.mean()) if state_values.numel() else 0.0
+            action_mse = float(action_values.mean()) if action_values.numel() else 0.0
+            window_rows.append({
+                **_window_identity(cpu_batch, index, ordinal),
+                "state_rmse": state_mse ** 0.5,
+                "action_rmse": action_mse ** 0.5,
+                "combined_rmse": ((state_mse + action_mse) / 2.0) ** 0.5,
+                "max_abs": max(
+                    float(state_error_cpu[index].abs().masked_select(state_valid_cpu[index]).max())
+                    if state_values.numel() else 0.0,
+                    float(action_error_cpu[index].abs().masked_select(action_valid_cpu[index]).max())
+                    if action_values.numel() else 0.0,
+                ),
+            })
+            ordinal += 1
         max_abs = max(
             max_abs,
             float(state_error.masked_select(state_valid).abs().max().detach().cpu()) if state_valid.any() else 0.0,
@@ -248,12 +331,59 @@ def _evaluate_full_sequence(
     state_rmse = (state_sse / max(state_count, 1)) ** 0.5
     action_rmse = (action_sse / max(action_count, 1)) ** 0.5
     contact_bce = contact_loss / max(contact_count, 1)
+    all_absolute = torch.cat(absolute_values) if absolute_values else torch.zeros(1)
+    state_absolute = torch.cat(state_absolute_values) if state_absolute_values else torch.zeros(1)
+    action_absolute = torch.cat(action_absolute_values) if action_absolute_values else torch.zeros(1)
+
+    def quantile(values: torch.Tensor, level: float) -> float:
+        return float(torch.quantile(values, level).item())
+
+    def feature_rows(
+        sse: torch.Tensor,
+        count: torch.Tensor,
+        maximum: torch.Tensor,
+        names: tuple[str, ...],
+        domain: str,
+    ) -> list[dict[str, Any]]:
+        rows = []
+        for index, name in enumerate(names):
+            rows.append({
+                "domain": domain,
+                "feature_index": index,
+                "name": name,
+                "rmse": float((sse[index] / max(int(count[index]), 1)).sqrt()),
+                "max_abs": float(maximum[index]),
+                "count": int(count[index]),
+            })
+        return sorted(rows, key=lambda row: (row["rmse"], row["max_abs"]), reverse=True)
+
+    state_features = feature_rows(
+        state_feature_sse, state_feature_count, state_feature_max,
+        STATE_CONTINUOUS_FEATURE_NAMES, "state",
+    )
+    action_features = feature_rows(
+        action_feature_sse, action_feature_count, action_feature_max,
+        ACTION_FEATURE_NAMES, "action",
+    )
+    worst_window = max(window_rows, key=lambda row: row["combined_rmse"], default=None)
+    worst_window_by_max_abs = max(window_rows, key=lambda row: row["max_abs"], default=None)
     return {
         "total_loss": (state_sse / max(state_count, 1) + action_sse / max(action_count, 1) + contact_bce) / 3.0,
         "state_rmse": state_rmse,
         "action_rmse": action_rmse,
         "contact_bce": contact_bce,
         "max_abs": max_abs,
+        "continuous_abs_p95": quantile(all_absolute, 0.95),
+        "continuous_abs_p99": quantile(all_absolute, 0.99),
+        "state_abs_p95": quantile(state_absolute, 0.95),
+        "state_abs_p99": quantile(state_absolute, 0.99),
+        "action_abs_p95": quantile(action_absolute, 0.95),
+        "action_abs_p99": quantile(action_absolute, 0.99),
+        "worst_window": worst_window,
+        "worst_window_by_max_abs": worst_window_by_max_abs,
+        "worst_windows": sorted(window_rows, key=lambda row: row["combined_rmse"], reverse=True)[:10],
+        "worst_state_features": state_features[:10],
+        "worst_action_features": action_features[:10],
     }
 
 
@@ -280,6 +410,7 @@ def _checkpoint_contract(
     *,
     stage: str,
     maximum: int,
+    micro_batch: int,
     learning_rate: float,
     schedule_name: str,
     warmup_steps: int,
@@ -291,6 +422,7 @@ def _checkpoint_contract(
     return {
         "stage": stage,
         "max_steps": maximum,
+        "micro_batch": micro_batch,
         "learning_rate": learning_rate,
         "lr_schedule": schedule_name,
         "warmup_steps": warmup_steps,
@@ -333,6 +465,7 @@ def run_experiment(
     smoke: bool = False,
     kl_beta_override: float | None = None,
     max_steps_override: int | None = None,
+    micro_batch_override: int | None = None,
     learning_rate_override: float | None = None,
     lr_schedule: str | None = None,
     warmup_steps_override: int | None = None,
@@ -402,9 +535,16 @@ def run_experiment(
     model.to(device)
     training_cfg = config.get("training", {})
     loader_generator = torch.Generator().manual_seed(int(config.get("initialization_seed", 20260921)))
+    micro_batch = int(
+        micro_batch_override
+        if micro_batch_override is not None
+        else training_cfg.get("micro_batch", 2)
+    )
+    if micro_batch <= 0:
+        raise ValueError("micro batch must be positive")
     loader = DataLoader(
         Subset(dataset, indices),
-        batch_size=int(training_cfg.get("micro_batch", 2)),
+        batch_size=micro_batch,
         shuffle=True,
         num_workers=0,
         drop_last=False,
@@ -412,7 +552,7 @@ def run_experiment(
     )
     eval_loader = DataLoader(
         Subset(dataset, indices),
-        batch_size=int(training_cfg.get("micro_batch", 2)),
+        batch_size=micro_batch,
         shuffle=False,
         num_workers=0,
         drop_last=False,
@@ -486,7 +626,8 @@ def run_experiment(
         maximum = min(maximum, 2)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_multiplier)
     contract = _checkpoint_contract(
-        stage=stage_code, maximum=maximum, learning_rate=learning_rate,
+        stage=stage_code, maximum=maximum, micro_batch=micro_batch,
+        learning_rate=learning_rate,
         schedule_name=schedule_name, warmup_steps=warmup_steps,
         min_lr_ratio=min_lr_ratio, validation_interval=validation_interval,
         checkpoint_interval=checkpoint_interval, log_interval=log_interval,
@@ -684,7 +825,8 @@ def run_experiment(
                 print(
                     f"[stage={stage_code}] eval step={step} total={eval_metrics['total_loss']:.6g} "
                     f"state_rmse={eval_metrics['state_rmse']:.6g} action_rmse={eval_metrics['action_rmse']:.6g} "
-                    f"best_step={best_step}", flush=True,
+                    f"p99={eval_metrics['continuous_abs_p99']:.6g} "
+                    f"max_abs={eval_metrics['max_abs']:.6g} best_step={best_step}", flush=True,
                 )
                 model.train()
             elif step % checkpoint_interval == 0:
@@ -760,6 +902,7 @@ def run_experiment(
         "stage_parameter_counts": stage_counts,
         "training_overrides": {
             "max_steps": max_steps_override,
+            "micro_batch": micro_batch,
             "learning_rate": learning_rate,
             "lr_schedule": schedule_name,
             "warmup_steps": warmup_steps,
@@ -802,6 +945,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--init-run", type=Path)
     parser.add_argument("--kl-beta", type=float)
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--micro-batch", type=int)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--lr-schedule", choices=("constant", "cosine", "linear"))
     parser.add_argument("--warmup-steps", type=int)
@@ -826,6 +970,7 @@ def main(argv: list[str] | None = None) -> int:
         smoke=args.smoke,
         kl_beta_override=args.kl_beta,
         max_steps_override=args.max_steps,
+        micro_batch_override=args.micro_batch,
         learning_rate_override=args.learning_rate,
         lr_schedule=args.lr_schedule,
         warmup_steps_override=args.warmup_steps,

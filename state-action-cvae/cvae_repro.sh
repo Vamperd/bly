@@ -800,6 +800,7 @@ posterior_hierarchical_standard_cvae() {
   local init_run="${CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN:-}"
   local kl_beta="${CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA:-}"
   local max_steps="${CVAE_POSTERIOR_MAX_STEPS:-}"
+  local micro_batch="${CVAE_POSTERIOR_MICRO_BATCH:-}"
   local learning_rate="${CVAE_POSTERIOR_LEARNING_RATE:-}"
   local lr_schedule="${CVAE_POSTERIOR_LR_SCHEDULE:-}"
   local warmup_steps="${CVAE_POSTERIOR_WARMUP_STEPS:-}"
@@ -827,12 +828,15 @@ posterior_hierarchical_standard_cvae() {
     extra_args+=(--kl-beta "$kl_beta")
   fi
   [[ -z "$max_steps" ]] || extra_args+=(--max-steps "$max_steps")
+  [[ -z "$micro_batch" ]] || extra_args+=(--micro-batch "$micro_batch")
   [[ -z "$learning_rate" ]] || extra_args+=(--learning-rate "$learning_rate")
   [[ -z "$lr_schedule" ]] || extra_args+=(--lr-schedule "$lr_schedule")
   [[ -z "$warmup_steps" ]] || extra_args+=(--warmup-steps "$warmup_steps")
   [[ -z "$min_lr_ratio" ]] || extra_args+=(--min-lr-ratio "$min_lr_ratio")
   [[ -z "$max_steps" || "$max_steps" =~ ^[1-9][0-9]*$ ]] \
     || die "CVAE_POSTERIOR_MAX_STEPS must be a positive integer"
+  [[ -z "$micro_batch" || "$micro_batch" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_MICRO_BATCH must be a positive integer"
   [[ -z "$learning_rate" || "$learning_rate" =~ ^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]] \
     || die "CVAE_POSTERIOR_LEARNING_RATE must be positive numeric"
   [[ -z "$warmup_steps" || "$warmup_steps" =~ ^[0-9]+$ ]] \

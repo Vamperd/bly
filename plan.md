@@ -18,6 +18,9 @@
 - 未执行 Ubuntu 正式训练或质量评测；唯一下一步是由用户决定是否启动独立质量实验，不能把本轮工程 PASS 解读为模型质量结论。
 - 2026-09-21 用户在 Ubuntu 执行了 Stage A 非 smoke 入口，run 为 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260921_162141`，只完成默认 2 step；它仅是工程执行，不是重建能力结果。随后已将正式默认配置改为全部窗口、40k step，并新增命令行运行时覆盖步数/LR/scheduler/warm-up/min-LR-ratio；Windows `py_compile`、CLI help 与 6 项目标测试通过。该覆盖接口需在 Ubuntu 同步后运行验证。
 - 2026-09-21 训练记录改造：Stage A 现按旧 posterior capacity 方式逐步 flush `logs/metrics.jsonl`，每 1000 step 对全部 selected windows 做完整评测并以 `total_loss` 更新 `best.pt`，每 250 step 原子保存可恢复的 `last.pt`，同时刷新 `training_curves.svg` 与 `progress.json`。checkpoint 包含 optimizer/scheduler/RNG、训练合同和数据身份；`CVAE_POSTERIOR_RESUME_RUN` 严格恢复同一 run。Ctrl-C/异常路径保存 `last.pt` 并写 `cvae.interrupted`。Windows 目标 unittest、compile、CLI help 已通过；Ubuntu shell/真实 CUDA smoke 待同步验证。
+- 2026-09-22 已补充 Stage A 全量评测尾部诊断：连续误差 `p95/p99`、分域 p95/p99、最差窗口（按 combined RMSE 与 max abs）和最差 State/Action 特征写入每条 evaluation JSONL。Windows 7 项目标测试、compile 和 diff check 通过。现有 200K metrics 只有全局均值与 max_abs，无法回溯这些新诊断；需同步新代码后重新评测/训练。
+- 对已回传的 200K Stage-A `metrics.jsonl`，step 0→200000 的 State/Action RMSE 为 `0.081387/0.044812`→`0.039531/0.024431`，contact BCE 为 `5.25e-5`→`2.28e-6`，`max_abs` 为 `18.536`→`12.227`；训练无 NaN/Inf 且均值持续下降，但实际日志显示学习率约 `5e-6`→`2.5e-7`、`kl_beta=0`，不能把该 run 解释为配置中声明的 `1e-4` warm-up 从头对照实验。该旧日志不含 p95/p99、最差窗口或最差特征，后续分析不得补造这些数值。
+- 2026-09-22 新增 `CVAE_POSTERIOR_MICRO_BATCH/--micro-batch` 覆盖并纳入 checkpoint training contract；目标对照训练采用 batch 32、60k optimizer steps、`1e-4` 峰值、2k warm-up、cosine 到 `1e-6`，对应旧 H50-A 的约 1.92M 窗口样本暴露量。Ubuntu smoke/正式训练待执行。
 
 硬约束是：posterior与conditional prior只共享decoder参数，任何一次decoder调用只能接收其中一条路径的一组latent；二者绝不拼接、平均或attention融合。最终推理只允许`Mask条件 → p(z|c) → prior latent → D(z,c)`，不得调用posterior或回退到真值路径。
 

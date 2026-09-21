@@ -9,6 +9,7 @@ import torch
 from cvae_sa.models import HierarchicalStandardCVAETransformer, build_model
 from cvae_sa.posterior_hierarchical_standard_cvae import (
     _new_checkpoint,
+    _evaluate_full_sequence,
     hierarchical_kl,
     load_checkpoint,
     validate_checkpoint,
@@ -141,6 +142,23 @@ class HierarchicalStandardCVAETest(unittest.TestCase):
             torch.save({"format_version": "sonic_h50_standard_cvae_checkpoint_v1", "model": {}}, legacy)
             with self.assertRaisesRegex(ValueError, "architecture signature mismatch"):
                 load_checkpoint(model, legacy)
+
+    def test_full_evaluation_reports_tail_and_identity_diagnostics(self) -> None:
+        model = HierarchicalStandardCVAETransformer(config()).eval()
+        metrics = _evaluate_full_sequence(model, [batch(2)], torch.device("cpu"))
+        for key in (
+            "continuous_abs_p95", "continuous_abs_p99", "state_abs_p95",
+            "state_abs_p99", "action_abs_p95", "action_abs_p99",
+            "worst_window", "worst_window_by_max_abs", "worst_state_features",
+            "worst_action_features",
+        ):
+            self.assertIn(key, metrics)
+        self.assertEqual(len(metrics["worst_state_features"]), 10)
+        self.assertEqual(len(metrics["worst_action_features"]), 10)
+        self.assertIn(metrics["worst_window"]["window_index"], (0, 1))
+        self.assertIn(metrics["worst_window_by_max_abs"]["window_index"], (0, 1))
+        self.assertIn("combined_rmse", metrics["worst_window"])
+        self.assertIn("max_abs", metrics["worst_window_by_max_abs"])
 
 
 if __name__ == "__main__":
