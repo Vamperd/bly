@@ -89,12 +89,7 @@ class HierarchicalGaussianLatent:
 
 @dataclass
 class HierarchicalStandardCVAEOutput:
-    """One decoder pass plus the two separately encoded distributions.
-
-    ``global_latent`` and ``local_latents`` always come from exactly one
-    distribution selected by ``latent_source``.  The decoder never receives a
-    posterior/prior concatenation, average, or other fusion.
-    """
+    """Output of the 65-token hierarchical standard CVAE."""
 
     physical_state: torch.Tensor
     action: torch.Tensor
@@ -104,6 +99,28 @@ class HierarchicalStandardCVAEOutput:
     global_latent: torch.Tensor
     local_latents: torch.Tensor
     latent_source: str
+    condition: Any | None = None
+
+
+@dataclass
+class ConditionEncoding:
+    """Deterministic encoding of a masked 65-token condition."""
+
+    memory: torch.Tensor
+    global_latent: torch.Tensor
+    local_latents: torch.Tensor
+
+
+@dataclass
+class FusedHierarchicalLatent:
+    """Latent pair after global/local posterior-condition fusion."""
+
+    global_latent: torch.Tensor
+    local_latents: torch.Tensor
+    memory_global: torch.Tensor
+    memory_local: torch.Tensor
+    film_input: torch.Tensor
+    condition_memory: torch.Tensor | None = None
 
 
 class MLPTokenizer(nn.Module):
@@ -332,15 +349,17 @@ class HierarchicalDecoderStack(nn.Module):
         film_scale: torch.Tensor,
         film_shift: torch.Tensor,
     ) -> torch.Tensor:
-        for layer in self.layers:
+        for index, layer in enumerate(self.layers):
+            layer_scale = film_scale[:, index] if film_scale.ndim == 4 else film_scale
+            layer_shift = film_shift[:, index] if film_shift.ndim == 4 else film_shift
             value = layer(
                 value,
                 query_valid,
                 times,
                 memory,
                 memory_valid,
-                film_scale,
-                film_shift,
+                layer_scale,
+                layer_shift,
             )
         return self.norm(value)
 
@@ -2756,7 +2775,7 @@ class HierarchicalConditionalPriorTransformer(HierarchicalPosteriorTransformer):
         )
 
 
-class HierarchicalStandardCVAETransformer(HierarchicalConditionalPriorTransformer):
+class _LegacyHierarchicalStandardCVAETransformer(HierarchicalConditionalPriorTransformer):
     """Standard hierarchical conditional VAE used by the H50-SCVAE study.
 
     The posterior and conditional prior are separate encoders.  They share one
@@ -3020,6 +3039,487 @@ class HierarchicalStandardCVAETransformer(HierarchicalConditionalPriorTransforme
             latent_source="prior_sample" if sample else "prior_mean",
             epsilon=epsilon,
         )
+
+
+class GatedResidualMLP(nn.Module):
+    """Small gated residual projector used by both latent fusion paths."""
+
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int | None = None) -> None:
+        super().__init__()
+        hidden_dim = hidden_dim or max(output_dim, input_dim)
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+        self.gate = nn.Parameter(torch.zeros(()))
+        self.residual = nn.Linear(input_dim, output_dim) if input_dim != output_dim else nn.Identity()
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        gate = torch.sigmoid(self.gate)
+        return self.residual(value) + gate * (self.net(value) - self.residual(value))
+
+
+class HierarchicalStandardCVAETransformer(nn.Module):
+    """65-token hierarchical standard CVAE.
+
+    The implementation intentionally has no H50 migration or conditional-prior
+    Gaussian path.  Posterior latents are Gaussian only for KL-to-standard-normal;
+    condition latents are deterministic and are fused with posterior latents at
+    both memory-token and per-time FiLM paths.
+    """
+
+    ARCHITECTURE_VERSION = "65-token-hierarchical-standard-cvae-v1"
+    REQUIRED_STEPS = 65
+    REQUIRED_ACTION_STEPS = 64
+    STATE_DIM = 70
+    ACTION_DIM = ACTION_DIM
+    TOKEN_DIM = 99
+    CONDITION_TOKEN_DIM = 198
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.config = dict(config)
+        self.width = int(config.get("d_model", 448))
+        self.state_dim = int(config.get("state_dim", self.STATE_DIM))
+        self.global_latent_dim = int(config.get("global_latent_dim", 256))
+        self.local_latent_dim = int(config.get("local_latent_dim", 128))
+        self.local_chunks = int(config.get("local_chunks", 16))
+        self.chunk_transitions = int(config.get("chunk_transitions", 4))
+        self.max_state_steps = int(config.get("max_state_steps", self.REQUIRED_STEPS))
+        self.state_input_dim = int(config.get("state_input_dim", self.TOKEN_DIM))
+        self.condition_input_dim = int(config.get("condition_input_dim", self.CONDITION_TOKEN_DIM))
+        if (self.state_dim, self.state_input_dim, self.condition_input_dim) != (70, 99, 198):
+            raise ValueError("65-token CVAE requires state=70, state_input=99, condition_input=198")
+        if self.max_state_steps != 65 or self.local_chunks != 16 or self.chunk_transitions != 4:
+            raise ValueError("65-token CVAE requires 65 steps, 16 local chunks and four-step chunks")
+        if self.width % int(config.get("heads", 8)):
+            raise ValueError("d_model must be divisible by heads")
+        self.config.update({
+            "d_model": self.width,
+            "posterior_encoder_layers": int(config.get("posterior_encoder_layers", 6)),
+            "condition_encoder_layers": int(config.get("condition_encoder_layers", 6)),
+            "decoder_layers": int(config.get("decoder_layers", 8)),
+            "heads": int(config.get("heads", 8)),
+            "ffn_dim": int(config.get("ffn_dim", self.width * 4)),
+            "global_latent_dim": self.global_latent_dim,
+            "local_latent_dim": self.local_latent_dim,
+            "local_chunks": self.local_chunks,
+            "chunk_transitions": self.chunk_transitions,
+            "max_state_steps": self.max_state_steps,
+            "state_input_dim": self.state_input_dim,
+            "condition_input_dim": self.condition_input_dim,
+            "terminal_action_policy": config.get("terminal_action_policy", "zero_not_predicted"),
+            "fusion_type": config.get("fusion_type", "independent_gated_residual_mlp"),
+        })
+        dropout = float(config.get("dropout", 0.0))
+        heads = int(config.get("heads", 8))
+        ffn_dim = int(config.get("ffn_dim", self.width * 4))
+
+        self.posterior_input = nn.Linear(self.state_input_dim, self.width)
+        self.condition_input = nn.Linear(self.condition_input_dim, self.width)
+        self.time_embedding = nn.Embedding(self.max_state_steps, self.width)
+        self.posterior_cls = nn.Parameter(torch.zeros(1, 1, self.width))
+        self.condition_cls = nn.Parameter(torch.zeros(1, 1, self.width))
+        self.posterior_encoder = TransformerStack(
+            int(config.get("posterior_encoder_layers", 6)), self.width, heads, ffn_dim, dropout
+        )
+        self.condition_encoder = TransformerStack(
+            int(config.get("condition_encoder_layers", 6)), self.width, heads, ffn_dim, dropout
+        )
+        self.posterior_global_head = nn.Linear(self.width, self.global_latent_dim)
+        self.posterior_global_logvar_head = nn.Linear(self.width, self.global_latent_dim)
+        self.posterior_local_head = nn.Linear(self.width, self.local_latent_dim)
+        self.posterior_local_logvar_head = nn.Linear(self.width, self.local_latent_dim)
+        self.condition_global_head = nn.Linear(self.width, self.global_latent_dim)
+        self.condition_local_head = nn.Linear(self.width, self.local_latent_dim)
+        self.empty_local = nn.Parameter(torch.zeros(1, 1, self.width))
+
+        # Two independent fusion paths.  Local projectors share parameters across
+        # slots; the slot embedding makes each chunk identifiable.
+        self.local_slot_embedding = nn.Embedding(self.local_chunks, self.width)
+        self.memory_global_fusion = GatedResidualMLP(
+            self.global_latent_dim * 2, self.width, self.width * 2
+        )
+        self.memory_local_fusion = GatedResidualMLP(
+            self.local_latent_dim * 2 + self.width, self.width, self.width * 2
+        )
+        self.film_global_fusion = GatedResidualMLP(
+            self.global_latent_dim * 2, self.width, self.width * 2
+        )
+        self.film_local_fusion = GatedResidualMLP(
+            self.local_latent_dim * 2 + self.width, self.width, self.width * 2
+        )
+        self.memory_global_projection = nn.Linear(self.width, self.width)
+        self.memory_local_projection = nn.Linear(self.width, self.width)
+        self.film_global_projection = nn.Linear(self.width, self.width)
+        self.film_local_projection = nn.Linear(self.width, self.width)
+
+        self.decoder_query_base = nn.Parameter(torch.zeros(1, 1, self.width))
+        self.decoder_type_embedding = nn.Embedding(1, self.width)
+        self.decoder = HierarchicalDecoderStack(
+            int(config.get("decoder_layers", 8)), self.width, heads, ffn_dim, dropout
+        )
+        self.film_heads = nn.ModuleList(
+            nn.Linear(self.width, 2 * self.width)
+            for _ in range(int(config.get("decoder_layers", 8)))
+        )
+        self.state_continuous_output = nn.Linear(self.width, 68)
+        self.state_contact_output = nn.Linear(self.width, 2)
+        self.action_output = nn.Linear(self.width, ACTION_DIM)
+        for head in self.film_heads:
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
+        for parameter in (self.posterior_cls, self.condition_cls, self.empty_local, self.decoder_query_base):
+            nn.init.normal_(parameter, std=0.02)
+        nn.init.zeros_(self.posterior_global_logvar_head.weight)
+        nn.init.constant_(self.posterior_global_logvar_head.bias, -4.0)
+        nn.init.zeros_(self.posterior_local_logvar_head.weight)
+        nn.init.constant_(self.posterior_local_logvar_head.bias, -4.0)
+
+    @property
+    def decoder_layers(self) -> int:
+        return len(self.decoder.layers)
+
+    @staticmethod
+    def architecture_signature(config: dict[str, Any], parameter_count: int | None = None) -> dict[str, Any]:
+        keys = (
+            "d_model", "posterior_encoder_layers", "condition_encoder_layers", "decoder_layers",
+            "heads", "ffn_dim", "global_latent_dim", "local_latent_dim", "local_chunks",
+            "chunk_transitions", "max_state_steps", "state_input_dim", "condition_input_dim",
+        )
+        result = {key: config.get(key) for key in keys}
+        result.update({
+            "kind": "physics_hierarchical_standard_cvae_transformer",
+            "architecture_version": HierarchicalStandardCVAETransformer.ARCHITECTURE_VERSION,
+            "terminal_action_policy": config.get("terminal_action_policy", "zero_not_predicted"),
+            "fusion_type": config.get("fusion_type", "independent_gated_residual_mlp"),
+        })
+        if parameter_count is not None:
+            result["parameter_count"] = int(parameter_count)
+        return result
+
+    def _prepare_layout(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        state = batch["physical_state"]
+        action = batch["action"]
+        if state.ndim != 3 or tuple(state.shape[1:]) != (65, 70):
+            raise ValueError("physical_state must have shape [B,65,70]")
+        if action.ndim != 3 or tuple(action.shape[1:]) != (64, ACTION_DIM):
+            raise ValueError("action must have shape [B,64,29]")
+        action_padded = torch.cat((action, torch.zeros_like(action[:, :1])), dim=1)
+        valid_state = batch["valid_state"].bool()
+        valid_action = batch["valid_action"].bool()
+        if tuple(valid_state.shape) != (state.shape[0], 65) or tuple(valid_action.shape) != (state.shape[0], 64):
+            raise ValueError("valid State/Action masks have incompatible shapes")
+        valid_action_padded = torch.cat((valid_action, torch.zeros_like(valid_action[:, :1])), dim=1)
+        times = torch.arange(65, device=state.device)
+        return state, action_padded, valid_state, valid_action_padded
+
+    def local_chunk_ids(self, times: torch.Tensor) -> torch.Tensor:
+        """Return the fixed 16-slot mapping, with slot 15 covering t=60..64."""
+        return torch.div(times, self.chunk_transitions, rounding_mode="floor").clamp_max(self.local_chunks - 1)
+
+    def _expand_masks(
+        self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor | None, action_mask: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        state = batch["physical_state"]
+        action = batch["action"]
+        if state_mask is None:
+            state_mask = torch.zeros_like(state, dtype=torch.bool)
+        elif state_mask.shape == batch["valid_state"].shape:
+            state_mask = state_mask.bool()[..., None].expand_as(state)
+        elif state_mask.shape != state.shape:
+            raise ValueError("state_mask must be [B,65] or [B,65,70]")
+        if action_mask is None:
+            action_mask = torch.zeros_like(action, dtype=torch.bool)
+        elif action_mask.shape == batch["valid_action"].shape:
+            action_mask = action_mask.bool()[..., None].expand_as(action)
+        elif action_mask.shape != action.shape:
+            raise ValueError("action_mask must be [B,64] or [B,64,29]")
+        if bool((state_mask & ~batch["valid_state"].bool()[..., None]).any()):
+            raise ValueError("state_mask covers invalid padding")
+        if bool((action_mask & ~batch["valid_action"].bool()[..., None]).any()):
+            raise ValueError("action_mask covers invalid padding")
+        return state_mask.bool(), action_mask.bool()
+
+    def _posterior_tokens(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        state, action, valid_state, _ = self._prepare_layout(batch)
+        tokens = self.posterior_input(torch.cat((state, action), dim=-1))
+        times = torch.arange(65, device=state.device)
+        tokens = tokens + self.time_embedding(times)[None]
+        return tokens, valid_state, times
+
+    def _condition_tokens(
+        self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor | None, action_mask: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        state, action, valid_state, valid_action = self._prepare_layout(batch)
+        state_mask, action_mask = self._expand_masks(batch, state_mask, action_mask)
+        action_mask_padded = torch.cat((action_mask, torch.zeros_like(action_mask[:, :1])), dim=1)
+        state_values = state.masked_fill(state_mask, 0.0)
+        action_values = action.masked_fill(action_mask_padded, 0.0)
+        values = torch.cat((state_values, action_values), dim=-1)
+        bits = torch.cat((state_mask, action_mask_padded), dim=-1).to(values.dtype)
+        # The contract is per-feature interleaving: [value_0, mask_0,
+        # value_1, mask_1, ...], not a value block followed by a mask block.
+        paired = torch.stack((values, bits), dim=-1).flatten(-2)
+        tokens = self.condition_input(paired)
+        times = torch.arange(65, device=state.device)
+        tokens = tokens + self.time_embedding(times)[None]
+        return tokens, valid_state, times, state_mask, action_mask
+
+    def _pool_local(self, hidden: torch.Tensor, valid: torch.Tensor, head: nn.Module) -> torch.Tensor:
+        chunks: list[torch.Tensor] = []
+        times = torch.arange(65, device=hidden.device)
+        ids = self.local_chunk_ids(times)
+        for chunk in range(self.local_chunks):
+            members = (ids == chunk)[None] & valid
+            denominator = members.sum(dim=1, keepdim=True)
+            pooled = (hidden * members[..., None].to(hidden.dtype)).sum(dim=1)
+            pooled = pooled / denominator.clamp_min(1).to(hidden.dtype)
+            fallback = self.empty_local[:, 0].expand_as(pooled)
+            pooled = torch.where(denominator > 0, pooled, fallback)
+            chunks.append(pooled)
+        return head(torch.stack(chunks, dim=1))
+
+    def encode_posterior_distribution(
+        self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor | None = None, action_mask: torch.Tensor | None = None
+    ) -> HierarchicalGaussianLatent:
+        # Masks are deliberately ignored.  Keeping optional arguments provides a
+        # safe compatibility surface while making mask invariance explicit.
+        tokens, valid, times = self._posterior_tokens(batch)
+        cls = self.posterior_cls.expand(tokens.shape[0], -1, -1)
+        encoded = self.posterior_encoder(
+            torch.cat((cls, tokens), dim=1),
+            torch.cat((torch.ones_like(valid[:, :1]), valid), dim=1),
+            torch.cat((times.new_tensor([-1]), times)),
+            False,
+        )
+        data = encoded[:, 1:]
+        local_hidden = self._pool_local(data, valid, self.posterior_local_head)
+        global_hidden = encoded[:, 0]
+        return HierarchicalGaussianLatent(
+            global_mean=self.posterior_global_head(global_hidden),
+            global_logvar=self.posterior_global_logvar_head(global_hidden).clamp(-8.0, 4.0),
+            local_mean=local_hidden,
+            local_logvar=self.posterior_local_logvar_head(
+                # local_hidden is already projected; use pooled encoder features for logvar
+                self._pool_local(data, valid, nn.Identity())
+            ).clamp(-8.0, 4.0),
+        )
+
+    def encode_posterior(self, batch: dict[str, torch.Tensor], *args: Any, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        distribution = self.encode_posterior_distribution(batch)
+        return distribution.global_mean, distribution.local_mean
+
+    def encode_condition(
+        self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor | None, action_mask: torch.Tensor | None
+    ) -> ConditionEncoding:
+        tokens, valid, times, _, _ = self._condition_tokens(batch, state_mask, action_mask)
+        cls = self.condition_cls.expand(tokens.shape[0], -1, -1)
+        encoded = self.condition_encoder(
+            torch.cat((cls, tokens), dim=1),
+            torch.cat((torch.ones_like(valid[:, :1]), valid), dim=1),
+            torch.cat((times.new_tensor([-1]), times)),
+            False,
+        )
+        data = encoded[:, 1:]
+        return ConditionEncoding(
+            memory=data,
+            global_latent=self.condition_global_head(encoded[:, 0]),
+            local_latents=self._pool_local(data, valid, self.condition_local_head),
+        )
+
+    @staticmethod
+    def reparameterize(
+        distribution: HierarchicalGaussianLatent,
+        epsilon: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if epsilon is None:
+            epsilon = (torch.randn_like(distribution.global_mean), torch.randn_like(distribution.local_mean))
+        return (
+            distribution.global_mean + torch.exp(0.5 * distribution.global_logvar) * epsilon[0],
+            distribution.local_mean + torch.exp(0.5 * distribution.local_logvar) * epsilon[1],
+        )
+
+    def _fuse_pair(
+        self, global_latent: torch.Tensor, local_latents: torch.Tensor,
+        condition: ConditionEncoding | None,
+    ) -> FusedHierarchicalLatent:
+        if condition is None:
+            cg = torch.zeros_like(global_latent)
+            cl = torch.zeros_like(local_latents)
+            memory_global_source = global_latent
+            memory_local_source = local_latents
+            film_global_source = global_latent
+            film_local_source = local_latents
+        else:
+            cg, cl = condition.global_latent, condition.local_latents
+            memory_global_source = torch.cat((global_latent, cg), dim=-1)
+            memory_local_source = torch.cat((local_latents, cl), dim=-1)
+            film_global_source = memory_global_source
+            film_local_source = memory_local_source
+        if condition is None:
+            memory_global_source = torch.cat((global_latent, cg), dim=-1)
+            memory_local_source = torch.cat((local_latents, cl), dim=-1)
+            film_global_source = memory_global_source
+            film_local_source = memory_local_source
+        slots = self.local_slot_embedding.weight[None].expand(global_latent.shape[0], -1, -1)
+        local_input = torch.cat((memory_local_source, slots), dim=-1)
+        memory_global = self.memory_global_projection(self.memory_global_fusion(memory_global_source))
+        memory_local = self.memory_local_projection(self.memory_local_fusion(local_input))
+        film_global = self.film_global_projection(self.film_global_fusion(film_global_source))
+        film_local = self.film_local_projection(self.film_local_fusion(local_input))
+        ids = self.local_chunk_ids(torch.arange(65, device=global_latent.device))
+        film_input = film_global[:, None] + film_local[:, ids]
+        return FusedHierarchicalLatent(
+            global_latent, local_latents, memory_global, memory_local, film_input,
+            None if condition is None else condition.memory,
+        )
+
+    def fuse_latents(
+        self, posterior_latent: Any, condition_latent: ConditionEncoding | None = None
+    ) -> FusedHierarchicalLatent:
+        if isinstance(posterior_latent, HierarchicalGaussianLatent):
+            global_latent, local_latents = posterior_latent.global_mean, posterior_latent.local_mean
+        elif isinstance(posterior_latent, FusedHierarchicalLatent):
+            global_latent, local_latents = posterior_latent.global_latent, posterior_latent.local_latents
+        elif isinstance(posterior_latent, (tuple, list)) and len(posterior_latent) == 2:
+            global_latent, local_latents = posterior_latent
+        else:
+            raise ValueError("posterior_latent must be a distribution or (global, local) pair")
+        return self._fuse_pair(global_latent, local_latents, condition_latent)
+
+    def _decode(
+        self, batch: dict[str, torch.Tensor], fused: FusedHierarchicalLatent,
+        condition: ConditionEncoding | None,
+    ) -> HierarchicalDecodedOutput:
+        _, _, valid_state, _ = self._prepare_layout(batch)
+        memory_parts = []
+        memory_valid_parts = []
+        condition_memory = condition.memory if condition is not None else fused.condition_memory
+        if condition_memory is not None:
+            memory_parts.append(condition_memory)
+            memory_valid_parts.append(valid_state)
+        memory_parts.extend((fused.memory_global[:, None], fused.memory_local))
+        memory_valid_parts.extend((torch.ones(valid_state.shape[0], 1, dtype=torch.bool, device=valid_state.device), torch.ones(valid_state.shape[0], 16, dtype=torch.bool, device=valid_state.device)))
+        memory = torch.cat(memory_parts, dim=1)
+        memory_valid = torch.cat(memory_valid_parts, dim=1)
+        if memory.shape[1] not in (17, 82):
+            raise RuntimeError("hierarchical decoder memory must have length 17 or 82")
+        times = torch.arange(65, device=memory.device)
+        query = self.decoder_query_base + self.time_embedding(times)[None] + self.decoder_type_embedding.weight[0]
+        query = query.expand(memory.shape[0], -1, -1)
+        film = torch.stack([head(fused.film_input) for head in self.film_heads], dim=1)
+        film_scale, film_shift = film.chunk(2, dim=-1)
+        decoded = self.decoder(query, valid_state, times, memory, memory_valid, film_scale, film_shift)
+        state_contact_logits = self.state_contact_output(decoded)
+        physical_state = torch.cat((self.state_continuous_output(decoded), torch.sigmoid(state_contact_logits)), dim=-1)
+        action = self.action_output(decoded[:, :64])
+        return HierarchicalDecodedOutput(physical_state, action, state_contact_logits)
+
+    def decode_from_fused_latents(
+        self, batch: dict[str, torch.Tensor], fused: FusedHierarchicalLatent, condition: ConditionEncoding | None = None
+    ) -> HierarchicalDecodedOutput:
+        return self._decode(batch, fused, condition)
+
+    def decode_from_conditioned_latents(
+        self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor, action_mask: torch.Tensor,
+        global_latent: torch.Tensor, local_latents: torch.Tensor,
+    ) -> HierarchicalDecodedOutput:
+        condition = self.encode_condition(batch, state_mask, action_mask)
+        return self._decode(batch, self._fuse_pair(global_latent, local_latents, condition), condition)
+
+    def decode_from_canonical_latents(
+        self, global_latent: torch.Tensor, local_latents: torch.Tensor,
+        *, valid_state: torch.Tensor, valid_action: torch.Tensor,
+    ) -> HierarchicalDecodedOutput:
+        batch = {
+            "physical_state": torch.zeros(valid_state.shape[0], 65, 70, device=global_latent.device, dtype=global_latent.dtype),
+            "action": torch.zeros(valid_action.shape[0], 64, 29, device=global_latent.device, dtype=global_latent.dtype),
+            "valid_state": valid_state, "valid_action": valid_action,
+        }
+        return self._decode(batch, self._fuse_pair(global_latent, local_latents, None), None)
+
+    def forward(
+        self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor | None = None, action_mask: torch.Tensor | None = None,
+        *, stage: str = "C", latent_source: str | None = None,
+        epsilon: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> HierarchicalStandardCVAEOutput:
+        stage = stage.upper()
+        if latent_source is not None:
+            if latent_source == "posterior_mean":
+                stage = "A"
+            elif latent_source == "posterior_sample":
+                stage = "C"
+            elif latent_source in {"prior_mean", "condition_mean"}:
+                stage = "B"
+            elif latent_source in {"prior_sample", "condition_sample"}:
+                stage = "infer"
+            else:
+                raise ValueError("unknown latent_source")
+        posterior = self.encode_posterior_distribution(batch) if stage in {"A", "B", "C"} else None
+        condition = None if stage == "A" else self.encode_condition(batch, state_mask, action_mask)
+        if stage in {"A", "B"}:
+            global_latent, local_latents = posterior.global_mean, posterior.local_mean  # type: ignore[union-attr]
+        elif stage == "C":
+            global_latent, local_latents = self.reparameterize(posterior, epsilon)  # type: ignore[arg-type]
+        elif stage == "infer":
+            global_latent = torch.randn(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
+            local_latents = torch.randn(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
+        else:
+            raise ValueError("stage must be A, B, C or infer")
+        decoded = self._decode(batch, self._fuse_pair(global_latent, local_latents, condition), condition)
+        return HierarchicalStandardCVAEOutput(
+            decoded.physical_state, decoded.action, decoded.state_contact_logits,
+            posterior, None, global_latent, local_latents,
+            "posterior_mean" if stage == "A" else ("posterior_sample" if stage == "C" else ("standard_normal" if stage == "infer" else "posterior_mean")),
+            condition,
+        )
+
+    def infer_from_condition(
+        self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor, action_mask: torch.Tensor,
+        *, sample: bool = True, epsilon: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> HierarchicalStandardCVAEOutput:
+        condition = self.encode_condition(batch, state_mask, action_mask)
+        if sample:
+            if epsilon is None:
+                epsilon = (torch.randn(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype), torch.randn(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype))
+            global_latent, local_latents = epsilon
+        else:
+            global_latent = torch.zeros(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
+            local_latents = torch.zeros(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
+        decoded = self._decode(batch, self._fuse_pair(global_latent, local_latents, condition), condition)
+        return HierarchicalStandardCVAEOutput(decoded.physical_state, decoded.action, decoded.state_contact_logits, None, None, global_latent, local_latents, "standard_normal" if sample else "condition_mean", condition)
+
+    def infer_from_conditional_prior(self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor, action_mask: torch.Tensor, *, sample: bool = True, epsilon: tuple[torch.Tensor, torch.Tensor] | None = None) -> HierarchicalStandardCVAEOutput:
+        return self.infer_from_condition(batch, state_mask, action_mask, sample=sample, epsilon=epsilon)
+
+    def set_training_stage(self, stage: str) -> dict[str, int]:
+        stage = stage.upper()
+        if stage not in {"A", "B", "C"}:
+            raise ValueError("training stage must be A, B or C")
+        for name, parameter in self.named_parameters():
+            posterior = name.startswith("posterior_") or name in {"posterior_cls"}
+            parameter.requires_grad_(stage != "B" or not posterior)
+            if "logvar_head." in name:
+                parameter.requires_grad_(stage == "C")
+        # Stage A does not execute condition modules; freezing them makes accidental
+        # use visible in gradient checks while preserving random initialization.
+        if stage == "A":
+            for name, parameter in self.named_parameters():
+                if name.startswith("condition_") or name.startswith("condition_encoder") or name.startswith("condition_cls"):
+                    parameter.requires_grad_(False)
+        return {
+            "trainable": sum(parameter.numel() for parameter in self.parameters() if parameter.requires_grad),
+            "posterior": sum(parameter.numel() for name, parameter in self.named_parameters() if name.startswith("posterior") and parameter.requires_grad),
+            "condition": sum(parameter.numel() for name, parameter in self.named_parameters() if name.startswith("condition") and parameter.requires_grad),
+        }
+
+    def set_standard_training_phase(self, phase: str) -> dict[str, int]:
+        return self.set_training_stage("C" if phase == "kl" else "A")
+
+    def is_logvar_parameter(self, name: str) -> bool:
+        return "logvar_head." in name
 
 
 def build_model(config: dict[str, Any]) -> nn.Module:

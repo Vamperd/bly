@@ -1,12 +1,21 @@
 # State–Action Posterior 容量实验：精简计划与结果台账
 
-最后更新：2026-09-14
+最后更新：2026-09-21
 
-本文只记录具有研究意义的正式训练、正式比较、只读诊断和当前唯一下一步。两步 smoke 统一视为“开机自检”，不作为模型质量证据。当前阶段的完整执行合同见 [Next.md](Next.md)，面向读者的通俗说明见 [explain.md](explain.md)。
+本文只记录工程实现、编译、单测、checkpoint readback 和当前唯一下一步。模型合同见
+[model.md](model.md)；`Next.md`/`explain.md` 已停止维护，本台账不再依赖它们。
 
 ## 1. 当前状态与唯一下一步
 
-当前活动路线仍为 **H50-SCVAE 标准条件 CVAE**。H50-A精确初始化重放已在修复地面材质绑定后正式通过：两次初始化身份一致，原始Action能够复现训练HDF，且H50-A Action也在同一已见窗口通过重放。该结果只支持单窗口posterior Action记忆，不扩展为conditional prior或随机Mask结论。完整episode定性回放现已实现：只在选定T64窗口替换H50-A预测Action，窗口外保持原Action，进度条把替换区间标红；待在Ubuntu对三个已见motion分别执行。随后恢复M-F2设计；M-R与KL继续阻断，CPD、D1和CRA均为`SUPERSEDED`历史结果。
+当前活动路线为 **65-token 层级标准 CVAE**（`65-token-hierarchical-standard-cvae-v1`）。它直接替换历史 H50-SCVAE 语义，首次训练随机初始化；历史 H50 结果只读保留，不能作为新模型的 source、初始化或质量结论。
+
+本轮验收只覆盖输入布局、terminal Action、mask 隔离、hard chunk、阶段路由、有限前向/反向和 checkpoint 签名；不启动 Ubuntu 正式质量训练、扩大 motion 数量、Mask 研究或物理重放。
+
+### 2026-09-21 65-token 实现状态
+
+- 模型核心、三阶段路由、随机初始化 checkpoint 签名和 Shell 入口已实现。
+- Windows 工程核验 PASS：`py_compile`、模块 `--help`、目标模块 6 项 unittest；覆盖 shape、terminal Action、Mask 隔离、hard chunk、阶段冻结/反向、推理不调用 Posterior、checkpoint readback 与旧格式拒绝。Windows 当前没有可用 WSL/Git Bash，`bash -n` 无法执行（系统仅返回 WSL 安装提示），因此 Shell 语法需在 Ubuntu 同步后复核。全量 `unittest discover` 的其余 3 个失败仍是既有 Windows 环境缺少 `h5py` 的导入错误，与本模型无关。
+- 未执行 Ubuntu 正式训练或质量评测；唯一下一步是由用户决定是否启动独立质量实验，不能把本轮工程 PASS 解读为模型质量结论。
 
 硬约束是：posterior与conditional prior只共享decoder参数，任何一次decoder调用只能接收其中一条路径的一组latent；二者绝不拼接、平均或attention融合。最终推理只允许`Mask条件 → p(z|c) → prior latent → D(z,c)`，不得调用posterior或回退到真值路径。
 
@@ -320,15 +329,15 @@ S0、S25、F4B A/B/C、F4E、F4F G8/T129、F4G、H38及H50-SCVAE均执行过对�
 
 H50续训首次启动在训练前被准入检查拦截：旧summary的末三点评测对象没有稳定携带step字段，step实际位于`metrics.jsonl`外层。现改为从源JSONL核对`28000/29000/30000`并校验其score与summary一致；该次没有执行optimizer step，不形成模型结论。
 
-Windows代码READY或测试PASS只表示接口和静态合同通过，不写入正式实验结果表。CRA专项实现与入口已删除；CPD代码只为历史checkpoint读取兼容保留。SCVAE轻量测试覆盖66,129,571参数合同、H50-A model-only迁移、KL前logvar冻结、q读取真值、p/condition隐藏真值隔离、prior-only部署、单latent decoder调用、0.75/0.25重建、q-p stop-gradient对齐、KL手算、物理随机Mask双seed和共享epsilon。真实质量仍必须由Ubuntu新run决定。
+Windows代码READY或测试PASS只表示接口和静态合同通过，不写入正式实验结果表。旧 H50/SCVAE 测试只作为历史记录；当前目标测试覆盖 65-token shape、terminal Action、Mask 隔离、hard chunk、阶段冻结、标准正态推理和新 checkpoint 签名。真实质量仍必须由后续独立实验决定。
 
 ## 5. 当前执行与结果回填
 
-### 5.0 H50-SCVAE当前入口
+### 5.0 65-token 标准 CVAE 当前入口
 
-当前正式路线已由H50-CPD/D1切换为H50-SCVAE。根本验收对象仍是物理上可推测的完整State/Action token缺口；不使用element/feature或无规律散点Mask。decoder读取真实masked condition和一条latent，但在任何一次调用中都不允许融合q与p。
+当前正式路线为 65-token 层级标准 CVAE；根本工程验收对象是完整 State/Action 序列的输入布局、条件隔离和层级 latent 路由。
 
-模型、Mask、M-F/M-R/K1、marker和Ubuntu命令的详细活动合同见[Next.md](Next.md)。SCVAE smoke和正式M-F execution已经完成；审计确认q-p对齐通过、prior/posterior重建均失败。当前先执行不训练的H50-A exact-init重放；结果回填后只允许设计M-F2分阶段均值课程，不得原样续训、启动M-R或KL。下文旧H50-B、CPD和D1入口只保留为历史记录，不再执行。
+模型、Mask、marker和命令的历史活动合同已结束；当前 65-token 合同见[model.md](model.md)。下文旧 H50-B、CPD、D1 和 SCVAE 训练结果只保留为历史记录，不再执行。
 
 ### 5.1 H50-A续训结果与H50-B历史入口（已执行，不再使用）
 

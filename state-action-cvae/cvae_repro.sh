@@ -797,68 +797,42 @@ posterior_hierarchical_conditional_prior() {
 
 posterior_hierarchical_standard_cvae() {
   local stage="$1" smoke="$2" dataset_run="${CVAE_DATASET_RUN:-}"
-  local source_run="${CVAE_POSTERIOR_STANDARD_CVAE_SOURCE_RUN:-}"
   local init_run="${CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN:-}"
   local kl_beta="${CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA:-}"
   local config="$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_h50.json"
-  local prefix run_dir marker latest_key required_marker
+  local prefix run_dir marker latest_key python_stage
   [[ -z "${CVAE_CONFIG:-}" ]] \
     || die "posterior-hierarchical-standard-cvae uses its locked config; unset CVAE_CONFIG"
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
-  [[ -f "$dataset_run/markers/cvae_overfit_subset.ok" ]] \
-    || die "dedicated overfit subset marker is missing: $dataset_run"
-  [[ -n "$source_run" ]] || die "CVAE_POSTERIOR_STANDARD_CVAE_SOURCE_RUN is required"
-  [[ -f "$source_run/manifests/posterior_hierarchical_t64_summary.json" ]] \
-    || die "H50-A continuation summary is missing: $source_run"
-  [[ -f "$source_run/checkpoints/last.pt" ]] \
-    || die "H50-A continuation last.pt is missing: $source_run"
-  [[ -f "$source_run/markers/cvae_posterior_hierarchical_t64_autoencode_fit.ok" ]] \
-    || die "H50-A continuation fit marker is missing: $source_run"
+  case "$stage" in
+    fixed) python_stage="A" ;;
+    random) python_stage="B" ;;
+    kl) python_stage="C" ;;
+    *) die "invalid standard-CVAE stage: $stage" ;;
+  esac
   local extra_args=()
-  if [[ "$stage" == "fixed" ]]; then
-    [[ -z "$init_run" ]] \
-      || die "fresh standard-CVAE fixed training requires CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN to be unset"
-  else
-    [[ -n "$init_run" ]] \
-      || die "standard-CVAE $stage requires CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN"
-    [[ -f "$init_run/manifests/standard_cvae_summary.json" ]] \
-      || die "standard-CVAE initialization summary is missing: $init_run"
-    if [[ "$stage" == "random" ]]; then
-      required_marker="cvae_posterior_standard_cvae_fixed_mean_fit.ok"
-    elif [[ "$stage" == "kl" ]]; then
-      required_marker="cvae_posterior_standard_cvae_random_physical_mean_fit.ok"
-    else
-      die "invalid standard-CVAE stage: $stage"
-    fi
-    [[ -f "$init_run/markers/$required_marker" ]] \
-      || die "standard-CVAE initialization quality marker is missing: $required_marker"
-    extra_args+=(--init-run "$init_run")
-  fi
   [[ "$smoke" == "true" ]] && extra_args+=(--smoke)
+  [[ -z "$init_run" ]] || extra_args+=(--init-run "$init_run")
   if [[ -n "$kl_beta" ]]; then
-    [[ "$stage" == "kl" ]] \
-      || die "CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA is only valid for the KL entry"
-    [[ "$kl_beta" == "0.0001" || "$kl_beta" == "0.001" || "$kl_beta" == "0.01" ]] \
-      || die "KL beta override must be 0.0001, 0.001, or 0.01"
+    [[ "$stage" == "kl" ]] || die "CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA is only valid for the KL entry"
     extra_args+=(--kl-beta "$kl_beta")
   fi
-  prefix="cvae_posterior_hierarchical_standard_cvae_h50_${stage}"
+  prefix="cvae_posterior_hierarchical_standard_cvae_65_${stage}"
   [[ "$smoke" == "true" ]] && prefix="${prefix}_smoke"
   run_dir="$(new_run_dir "$prefix")"
   capture_environment "$run_dir"
   run_logged "$run_dir" posterior_hierarchical_standard_cvae.log \
     "$PYTHON" -m cvae_sa.posterior_hierarchical_standard_cvae \
       --dataset-run "$dataset_run" \
-      --source-run "$source_run" \
       --output-run "$run_dir" \
       --config "$config" \
-      --stage "$stage" \
+      --stage "$python_stage" \
       "${extra_args[@]}"
   marker="cvae_posterior_standard_cvae_execution.ok"
   [[ "$smoke" == "true" ]] && marker="cvae_posterior_standard_cvae_smoke.ok"
   [[ -f "$run_dir/markers/$marker" ]] \
     || die "standard-CVAE marker is missing: $marker"
-  latest_key="posterior_hierarchical_standard_cvae_h50_${stage}"
+  latest_key="posterior_hierarchical_standard_cvae_65_${stage}"
   [[ "$smoke" == "true" ]] && latest_key="${latest_key}_smoke"
   update_latest "$latest_key" "$run_dir"
   printf '%s\n' "$run_dir"
@@ -1409,6 +1383,7 @@ case "${1:-}" in
   posterior-hierarchical-prior-decoder-adapt) posterior_hierarchical_conditional_prior adapt false ;;
   posterior-hierarchical-standard-cvae-smoke) posterior_hierarchical_standard_cvae fixed true ;;
   posterior-hierarchical-standard-cvae-fixed) posterior_hierarchical_standard_cvae fixed false ;;
+  posterior-hierarchical-standard-cvae-condition) posterior_hierarchical_standard_cvae random false ;;
   posterior-hierarchical-standard-cvae-random-physical) posterior_hierarchical_standard_cvae random false ;;
   posterior-hierarchical-standard-cvae-kl) posterior_hierarchical_standard_cvae kl false ;;
   posterior-h50-action-replay) posterior_h50_action_replay ;;
@@ -1423,5 +1398,5 @@ case "${1:-}" in
   sample) sample_model ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|posterior-h50-action-replay-exact-init|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-condition|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|posterior-h50-action-replay-exact-init|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

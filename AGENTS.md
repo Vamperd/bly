@@ -1,5 +1,12 @@
 # SONIC Physics State–Action 研究：当前代理交接说明
 
+当前活动模型合同维护在 [model.md](model.md)，实验状态与工程验收台账维护在
+[plan.md](plan.md)。`Next.md` 和 `explain.md` 已停止维护，不得恢复或作为当前入口引用。
+
+2026-09-21 起，标准层级 CVAE 已切换为 `65-token-hierarchical-standard-cvae-v1`：Posterior
+输入 `[B,65,99]`、Condition 输入 `[B,65,198]`、hard chunk `60..64` 属于
+`local_15`，decoder memory 为有条件时 82 token。旧 H50 checkpoint 不迁移，首次训练随机初始化。
+
 本文档是 `bly` 工作区的首要交接入口。后续会话开始任何工作前必须完整阅读；其中“已验证事实”“代码已实现但待执行”“历史兼容路径”不可混为一谈。若实际 Git、文件或 Ubuntu 日志与本文冲突，以只读检查得到的当前事实为准，并更新本文。
 
 ## 1. 当前研究目标与边界
@@ -410,7 +417,7 @@ Ubuntu A/B工程smoke已完成。A run为
 全部通过，逐step训练身份SHA256一致。step-2 progression score为21.5601/21.5606且
 `quality_pass=false`，这是2-step smoke的预期质量状态，只证明真实HDF5/CUDA工程链路，不证明A/B效果。
 
-完整命令和回填合同见[Next.md](Next.md)与[plan.md](plan.md)。
+该历史路线不再执行；当前合同见[model.md](model.md)，台账见[plan.md](plan.md)。
 A正式10k已在run
 `/home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634`完整执行，源码
 `c1ae5f79111bf61ddace32073df8122dbbefec95`。`execution_pass=true`但`quality_pass=false`；8k/9k/10k
@@ -507,7 +514,7 @@ code ratio为95.65/94.85/119.93，证明code被强烈使用且平均重建较好
 F4E只排除了“posterior encoder是唯一根因”，没有证明256维code在理论上不足。当前禁止继续追加F4E
 步数、放宽单项门禁、扩32 motion、执行R128或实现KL。下一实验固定为F4F等预算拓扑比较：
 G8使用每window `8×256` global memory tokens（163,840 code标量），T129使用`129×16` per-time codes
-（165,120标量），差0.78%；同数据/Mask/loss/15k协议。完整合同见`Next.md`。
+（165,120标量），差0.78%；同数据/Mask/loss/15k协议。该历史合同已归档于`plan.md`。
 
 F4F已在Windows提交`302cb594c3e1c828256946110f6ba0aece36d8de`实现。基础posterior模型新增无参数
 decoder topology接口；G8以8个带slot embedding的前缀memory token注入，T129以同时间State/Action
@@ -570,7 +577,7 @@ source、F4E、fixture/window/motion、完整训练身份、optimizer、初始�
 
 ### 6.4.1 32-motion、T64层级posterior：历史H38/H50路线
 
-F4F比较已经以`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`收尾。当前活动合同已切换到[Next.md](Next.md)：
+F4F比较已经以`BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`收尾。该历史路线已结束，当前活动合同切换到[model.md](model.md)：
 先用F4G direct-output查表证明loss/Mask/evaluator上限，再运行H38层级posterior。不得追加F4F步数。
 其中“等待H38-R才实现prior”的旧限制已被后续H50-CPD设计明确取代；logvar、采样和KL仍必须等待
 确定性CPD双门禁通过。
@@ -596,7 +603,7 @@ bash ./cvae_repro.sh posterior-hierarchical-t64-random
 ```
 
 固定Mask仅为物理State gap、State rollout、Action gap、Full Action和短joint gap；R阶段使用相同语义的
-held-out Mask，不再使用element/feature/semantic Mask。fit门禁与H50触发规则必须以Next.md为准。
+held-out Mask，不再使用element/feature/semantic Mask。fit门禁与H50触发规则均为历史记录，不再作为当前入口。
 当前Windows posterior相关82项通过；全量发现135项中132项通过，另3项仅为既有Windows环境缺
 `h5py`的导入限制。新增覆盖H50续训准入、源指标复现、AdamW恢复和低LR尾段scheduler。后续Ubuntu
 F4G、F4G-O及H38/H50实验已实际运行；它们各自的
@@ -734,12 +741,11 @@ D1 run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_adap
 不得记作模型失败。Windows现已把T64/CPD全部p99计算替换为确定性CPU quantile，仍使用全部元素且不改变
 阈值，并通过16,777,217元素回归测试。Ubuntu同步后必须创建新run重跑，不得续用此次工程失败目录。
 
-### 6.4.1 当前活动覆盖：H50-SCVAE标准条件CVAE
+### 6.4.1 历史覆盖：H50-SCVAE标准条件CVAE
 
-截至2026-09-12，H50-CPD、D1和CRA均为`SUPERSEDED`历史路线，不得续训或作为当前初始化。
-当前唯一活动路线为`physics_hierarchical_standard_cvae_transformer`。H50-A step34000 `last.pt`只作
-model-only初始化；posterior、conditional prior、condition encoder和完整decoder随后共同训练，不再
-保持旧teacher latent或旧decoder函数。
+截至2026-09-12，H50-CPD、D1、CRA和H50-SCVAE均为历史路线，不得续训或作为当前初始化。
+当前活动路线是 `model.md` 中的 65-token 层级标准 CVAE；旧 H50 checkpoint、optimizer state 和
+source run 均明确拒绝。以下 H50 段落只保留历史实验事实。
 
 标准结构具有66,129,571参数：宽448，posterior/prior各6层，condition encoder 4层，decoder 8层，
 latent为`global[256]+local[16,128]`，另有q/p各自的global/local logvar头。KL前logvar冻结。decoder读取
@@ -753,7 +759,7 @@ Mask。
 M-F使用原8类固定物理Mask；M-R仅使用动态物理单缺口和2–3个彼此分离的物理多缺口，不包含散点、
 element/feature、full State或full both。full both仅为无信息诊断。只有M-R让prior/posterior mean、q-p
 对齐、固定bank和held-out物理随机bank连续三次通过，并确认高遮挡时latent未被完全忽略，才允许K1标准
-KL三路径比较。完整合同和Ubuntu命令以`Next.md`为准，正式结果回填`plan.md`。
+KL三路径比较。该历史合同已归档，当前正式结果统一回填`plan.md`。
 
 Windows已实现四个新入口：`posterior-hierarchical-standard-cvae-smoke`、`...-fixed`、
 `...-random-physical`、`...-kl`。Ubuntu smoke run
