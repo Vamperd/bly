@@ -16,6 +16,8 @@
 - 模型核心、三阶段路由、随机初始化 checkpoint 签名和 Shell 入口已实现。
 - Windows 工程核验 PASS：`py_compile`、模块 `--help`、目标模块 6 项 unittest；覆盖 shape、terminal Action、Mask 隔离、hard chunk、阶段冻结/反向、推理不调用 Posterior、checkpoint readback 与旧格式拒绝。Windows 当前没有可用 WSL/Git Bash，`bash -n` 无法执行（系统仅返回 WSL 安装提示），因此 Shell 语法需在 Ubuntu 同步后复核。全量 `unittest discover` 的其余 3 个失败仍是既有 Windows 环境缺少 `h5py` 的导入错误，与本模型无关。
 - 未执行 Ubuntu 正式训练或质量评测；唯一下一步是由用户决定是否启动独立质量实验，不能把本轮工程 PASS 解读为模型质量结论。
+- 2026-09-21 用户在 Ubuntu 执行了 Stage A 非 smoke 入口，run 为 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260921_162141`，只完成默认 2 step；它仅是工程执行，不是重建能力结果。随后已将正式默认配置改为全部窗口、40k step，并新增命令行运行时覆盖步数/LR/scheduler/warm-up/min-LR-ratio；Windows `py_compile`、CLI help 与 6 项目标测试通过。该覆盖接口需在 Ubuntu 同步后运行验证。
+- 2026-09-21 训练记录改造：Stage A 现按旧 posterior capacity 方式逐步 flush `logs/metrics.jsonl`，每 1000 step 对全部 selected windows 做完整评测并以 `total_loss` 更新 `best.pt`，每 250 step 原子保存可恢复的 `last.pt`，同时刷新 `training_curves.svg` 与 `progress.json`。checkpoint 包含 optimizer/scheduler/RNG、训练合同和数据身份；`CVAE_POSTERIOR_RESUME_RUN` 严格恢复同一 run。Ctrl-C/异常路径保存 `last.pt` 并写 `cvae.interrupted`。Windows 目标 unittest、compile、CLI help 已通过；Ubuntu shell/真实 CUDA smoke 待同步验证。
 
 硬约束是：posterior与conditional prior只共享decoder参数，任何一次decoder调用只能接收其中一条路径的一组latent；二者绝不拼接、平均或attention融合。最终推理只允许`Mask条件 → p(z|c) → prior latent → D(z,c)`，不得调用posterior或回退到真值路径。
 

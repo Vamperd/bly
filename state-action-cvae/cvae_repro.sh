@@ -68,7 +68,7 @@ run_logged() {
   local run_dir="$1" log_name="$2"
   shift 2
   set +e
-  "$@" 2>&1 | tee "$run_dir/logs/$log_name"
+  "$@" 2>&1 | tee -a "$run_dir/logs/$log_name"
   local code=${PIPESTATUS[0]}
   set -e
   printf '%s\n' "$code" > "$run_dir/manifests/exit_code.txt"
@@ -799,8 +799,17 @@ posterior_hierarchical_standard_cvae() {
   local stage="$1" smoke="$2" dataset_run="${CVAE_DATASET_RUN:-}"
   local init_run="${CVAE_POSTERIOR_STANDARD_CVAE_INIT_RUN:-}"
   local kl_beta="${CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA:-}"
+  local max_steps="${CVAE_POSTERIOR_MAX_STEPS:-}"
+  local learning_rate="${CVAE_POSTERIOR_LEARNING_RATE:-}"
+  local lr_schedule="${CVAE_POSTERIOR_LR_SCHEDULE:-}"
+  local warmup_steps="${CVAE_POSTERIOR_WARMUP_STEPS:-}"
+  local min_lr_ratio="${CVAE_POSTERIOR_MIN_LR_RATIO:-}"
+  local validation_interval="${CVAE_POSTERIOR_VALIDATION_INTERVAL:-}"
+  local checkpoint_interval="${CVAE_POSTERIOR_CHECKPOINT_INTERVAL:-}"
+  local log_interval="${CVAE_POSTERIOR_LOG_INTERVAL:-}"
+  local resume_run="${CVAE_POSTERIOR_RESUME_RUN:-}"
   local config="$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_h50.json"
-  local prefix run_dir marker latest_key python_stage
+  local prefix run_dir marker latest_key python_stage root
   [[ -z "${CVAE_CONFIG:-}" ]] \
     || die "posterior-hierarchical-standard-cvae uses its locked config; unset CVAE_CONFIG"
   [[ -n "$dataset_run" ]] || die "CVAE_DATASET_RUN is required"
@@ -817,10 +826,43 @@ posterior_hierarchical_standard_cvae() {
     [[ "$stage" == "kl" ]] || die "CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA is only valid for the KL entry"
     extra_args+=(--kl-beta "$kl_beta")
   fi
+  [[ -z "$max_steps" ]] || extra_args+=(--max-steps "$max_steps")
+  [[ -z "$learning_rate" ]] || extra_args+=(--learning-rate "$learning_rate")
+  [[ -z "$lr_schedule" ]] || extra_args+=(--lr-schedule "$lr_schedule")
+  [[ -z "$warmup_steps" ]] || extra_args+=(--warmup-steps "$warmup_steps")
+  [[ -z "$min_lr_ratio" ]] || extra_args+=(--min-lr-ratio "$min_lr_ratio")
+  [[ -z "$max_steps" || "$max_steps" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_MAX_STEPS must be a positive integer"
+  [[ -z "$learning_rate" || "$learning_rate" =~ ^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]] \
+    || die "CVAE_POSTERIOR_LEARNING_RATE must be positive numeric"
+  [[ -z "$warmup_steps" || "$warmup_steps" =~ ^[0-9]+$ ]] \
+    || die "CVAE_POSTERIOR_WARMUP_STEPS must be a non-negative integer"
+  [[ -z "$validation_interval" || "$validation_interval" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_VALIDATION_INTERVAL must be a positive integer"
+  [[ -z "$checkpoint_interval" || "$checkpoint_interval" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_CHECKPOINT_INTERVAL must be a positive integer"
+  [[ -z "$log_interval" || "$log_interval" =~ ^[1-9][0-9]*$ ]] \
+    || die "CVAE_POSTERIOR_LOG_INTERVAL must be a positive integer"
+  [[ -z "$resume_run" || -f "$resume_run/checkpoints/last.pt" ]] \
+    || die "CVAE_POSTERIOR_RESUME_RUN last.pt is missing: $resume_run"
+  [[ -z "$resume_run" || -z "$init_run" ]] \
+    || die "CVAE_POSTERIOR_RESUME_RUN cannot be combined with INIT_RUN"
+  [[ -z "$validation_interval" ]] || extra_args+=(--validation-interval "$validation_interval")
+  [[ -z "$checkpoint_interval" ]] || extra_args+=(--checkpoint-interval "$checkpoint_interval")
+  [[ -z "$log_interval" ]] || extra_args+=(--log-interval "$log_interval")
+  [[ -z "$resume_run" ]] || extra_args+=(--resume-run "$resume_run")
   prefix="cvae_posterior_hierarchical_standard_cvae_65_${stage}"
   [[ "$smoke" == "true" ]] && prefix="${prefix}_smoke"
-  run_dir="$(new_run_dir "$prefix")"
-  capture_environment "$run_dir"
+  if [[ -n "$resume_run" ]]; then
+    run_dir="$(realpath -m -- "$resume_run")"
+    root="$(resolved_runs_root)"
+    [[ "$run_dir" == "$root/"* ]] || die "resume run must remain under $root: $run_dir"
+    [[ -d "$run_dir" ]] || die "resume run directory is missing: $run_dir"
+    mkdir -p -- "$run_dir"/{logs,videos,data,checkpoints,manifests,markers,plots}
+  else
+    run_dir="$(new_run_dir "$prefix")"
+    capture_environment "$run_dir"
+  fi
   run_logged "$run_dir" posterior_hierarchical_standard_cvae.log \
     "$PYTHON" -m cvae_sa.posterior_hierarchical_standard_cvae \
       --dataset-run "$dataset_run" \

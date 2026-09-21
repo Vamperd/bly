@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
+import signal
+import time
 from typing import Any, Iterable, Iterator
 
 import torch
@@ -15,7 +19,7 @@ from .models import (
     build_model,
 )
 from .posterior_direct_output import assert_output_isolated
-from .posterior_t64_protocol import make_physical_masks
+from .posterior_t64_protocol import _svg, make_physical_masks
 from .util import (
     atomic_torch_save,
     atomic_write_json,
@@ -114,6 +118,11 @@ def _new_checkpoint(
     *,
     stage: str,
     step: int,
+    training_contract: dict[str, Any] | None = None,
+    best_step: int | None = None,
+    best_metrics: dict[str, Any] | None = None,
+    dataset_identity: dict[str, Any] | None = None,
+    data_loader_generator: torch.Generator | None = None,
 ) -> dict[str, Any]:
     count = sum(parameter.numel() for parameter in model.parameters())
     return {
@@ -126,6 +135,19 @@ def _new_checkpoint(
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "training_contract": training_contract,
+        "best_optimizer_step": best_step,
+        "best_metrics": best_metrics,
+        "dataset_identity": dataset_identity,
+        "rng_state": {
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "data_loader_generator": (
+                data_loader_generator.get_state()
+                if data_loader_generator is not None
+                else None
+            ),
+        },
     }
 
 
@@ -188,6 +210,118 @@ def _standard_reconstruction_loss(output: Any, batch: dict[str, torch.Tensor]) -
     return torch.stack(values).mean()
 
 
+@torch.no_grad()
+def _evaluate_full_sequence(
+    model: HierarchicalStandardCVAETransformer,
+    loader: Iterable[dict[str, Any]],
+    device: torch.device,
+) -> dict[str, float]:
+    """Complete Stage-A evaluation over every selected window."""
+    model.eval()
+    state_sse = action_sse = contact_loss = 0.0
+    state_count = action_count = contact_count = 0
+    max_abs = 0.0
+    for cpu_batch in loader:
+        batch = _device_batch(cpu_batch, device)
+        output = model(batch, stage="A")
+        state_error = output.physical_state[..., :68] - batch["physical_state"][..., :68]
+        action_error = output.action - batch["action"]
+        state_valid = batch["valid_state"].bool()[..., None].expand_as(state_error)
+        action_valid = batch["valid_action"].bool()[..., None].expand_as(action_error)
+        state_sse += float(state_error.square().masked_select(state_valid).sum().detach().cpu())
+        action_sse += float(action_error.square().masked_select(action_valid).sum().detach().cpu())
+        state_count += int(state_valid.sum())
+        action_count += int(action_valid.sum())
+        contact = F.binary_cross_entropy_with_logits(
+            output.state_contact_logits,
+            batch["physical_state"][..., 68:70],
+            reduction="none",
+        )
+        contact_valid = batch["valid_state"].bool()[..., None].expand_as(contact)
+        contact_loss += float(contact.masked_select(contact_valid).sum().detach().cpu())
+        contact_count += int(contact_valid.sum())
+        max_abs = max(
+            max_abs,
+            float(state_error.masked_select(state_valid).abs().max().detach().cpu()) if state_valid.any() else 0.0,
+            float(action_error.masked_select(action_valid).abs().max().detach().cpu()) if action_valid.any() else 0.0,
+        )
+    state_rmse = (state_sse / max(state_count, 1)) ** 0.5
+    action_rmse = (action_sse / max(action_count, 1)) ** 0.5
+    contact_bce = contact_loss / max(contact_count, 1)
+    return {
+        "total_loss": (state_sse / max(state_count, 1) + action_sse / max(action_count, 1) + contact_bce) / 3.0,
+        "state_rmse": state_rmse,
+        "action_rmse": action_rmse,
+        "contact_bce": contact_bce,
+        "max_abs": max_abs,
+    }
+
+
+def _append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        handle.flush()
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def _checkpoint_contract(
+    *,
+    stage: str,
+    maximum: int,
+    learning_rate: float,
+    schedule_name: str,
+    warmup_steps: int,
+    min_lr_ratio: float,
+    validation_interval: int,
+    checkpoint_interval: int,
+    log_interval: int,
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "max_steps": maximum,
+        "learning_rate": learning_rate,
+        "lr_schedule": schedule_name,
+        "warmup_steps": warmup_steps,
+        "min_lr_ratio": min_lr_ratio,
+        "validation_interval": validation_interval,
+        "checkpoint_interval": checkpoint_interval,
+        "log_interval": log_interval,
+    }
+
+
+def _render_training_plot(output_run: Path, records: list[dict[str, Any]]) -> str:
+    train_rows = [row for row in records if row.get("phase") == "train"]
+    eval_rows = [
+        row for row in records
+        if row.get("phase") == "evaluation" and "total_loss" in row
+    ]
+    path = output_run / "plots/training_curves.svg"
+    _svg(
+        path,
+        "65-token Posterior training",
+        "Train and complete-sequence evaluation losses (log10 scale)",
+        [
+            ("Train loss", [(row["optimizer_step"], row["loss"]) for row in train_rows], "#9ecae1"),
+            ("Eval total", [(row["optimizer_step"], row["total_loss"]) for row in eval_rows], "#08519c"),
+            ("Eval State RMSE", [(row["optimizer_step"], row["state_rmse"]) for row in eval_rows], "#238b45"),
+            ("Eval Action RMSE", [(row["optimizer_step"], row["action_rmse"]) for row in eval_rows], "#d95f0e"),
+        ],
+    )
+    return str(path)
+
+
 def run_experiment(
     dataset_run: Path,
     output_run: Path,
@@ -198,6 +332,15 @@ def run_experiment(
     init_run: Path | None = None,
     smoke: bool = False,
     kl_beta_override: float | None = None,
+    max_steps_override: int | None = None,
+    learning_rate_override: float | None = None,
+    lr_schedule: str | None = None,
+    warmup_steps_override: int | None = None,
+    min_lr_ratio_override: float | None = None,
+    validation_interval_override: int | None = None,
+    checkpoint_interval_override: int | None = None,
+    log_interval_override: int | None = None,
+    resume_run: Path | None = None,
 ) -> dict[str, Any]:
     """Run only the engineering-safe 65-token training path."""
     del source_run
@@ -258,70 +401,341 @@ def run_experiment(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     training_cfg = config.get("training", {})
+    loader_generator = torch.Generator().manual_seed(int(config.get("initialization_seed", 20260921)))
     loader = DataLoader(
         Subset(dataset, indices),
         batch_size=int(training_cfg.get("micro_batch", 2)),
         shuffle=True,
         num_workers=0,
         drop_last=False,
+        generator=loader_generator,
     )
+    eval_loader = DataLoader(
+        Subset(dataset, indices),
+        batch_size=int(training_cfg.get("micro_batch", 2)),
+        shuffle=False,
+        num_workers=0,
+        drop_last=False,
+    )
+    learning_rate = float(
+        learning_rate_override
+        if learning_rate_override is not None
+        else training_cfg.get("learning_rate", 1e-4)
+    )
+    if learning_rate <= 0.0:
+        raise ValueError("learning rate must be positive")
+    schedule_name = str(lr_schedule or training_cfg.get("lr_schedule", "constant")).lower()
+    if schedule_name not in {"constant", "cosine", "linear"}:
+        raise ValueError("lr schedule must be constant, cosine, or linear")
+    maximum = int(
+        max_steps_override
+        if max_steps_override is not None
+        else training_cfg.get(stage_name, {}).get("max_optimizer_steps", 1)
+    )
+    if maximum <= 0:
+        raise ValueError("max optimizer steps must be positive")
+    warmup_steps = int(
+        warmup_steps_override
+        if warmup_steps_override is not None
+        else training_cfg.get("warmup_steps", 0)
+    )
+    if warmup_steps < 0:
+        raise ValueError("warmup steps cannot be negative")
+    min_lr_ratio = float(
+        min_lr_ratio_override
+        if min_lr_ratio_override is not None
+        else training_cfg.get("min_lr_ratio", 0.01)
+    )
+    if not 0.0 < min_lr_ratio <= 1.0:
+        raise ValueError("minimum LR ratio must be in (0, 1]")
+    validation_interval = int(
+        validation_interval_override
+        if validation_interval_override is not None
+        else training_cfg.get("validation_interval", 1000)
+    )
+    checkpoint_interval = int(
+        checkpoint_interval_override
+        if checkpoint_interval_override is not None
+        else training_cfg.get("checkpoint_interval", 250)
+    )
+    log_interval = int(
+        log_interval_override
+        if log_interval_override is not None
+        else training_cfg.get("log_interval", 20)
+    )
+    if validation_interval <= 0 or checkpoint_interval <= 0 or log_interval <= 0:
+        raise ValueError("validation, checkpoint, and log intervals must be positive")
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
-        lr=float(training_cfg.get("learning_rate", 1e-4)),
+        lr=learning_rate,
         weight_decay=0.0,
     )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
-    maximum = 2 if smoke else int(training_cfg.get(stage_name, {}).get("max_optimizer_steps", 1))
-    iterator = _infinite(loader)
-    records: list[dict[str, Any]] = []
-    for step in range(1, maximum + 1):
-        cpu_batch = next(iterator)
-        batch = _device_batch(cpu_batch, device)
-        if stage_code == "A":
-            output = model(batch, stage="A")
-        else:
-            state_mask, action_mask, _ = make_physical_masks(
-                cpu_batch, int(config.get("training_mask_seed", 20260920))
-            )
-            output = model(batch, state_mask.to(device), action_mask.to(device), stage=stage_code)
-        reconstruction = _standard_reconstruction_loss(output, batch)
-        if output.posterior is not None:
-            kl = hierarchical_kl(output.posterior)
-        else:
-            zero = reconstruction * 0.0
-            kl = {"total": zero, "global": zero, "local": zero}
-        target_beta = (
-            float(kl_beta_override)
-            if kl_beta_override is not None
-            else float(training_cfg.get("kl", {}).get("beta", 1e-3))
+    def lr_multiplier(step: int) -> float:
+        if warmup_steps and step < warmup_steps:
+            return max((step + 1) / warmup_steps, 1e-8)
+        if schedule_name == "constant":
+            return 1.0
+        progress = min(
+            max((step - warmup_steps) / max(maximum - warmup_steps, 1), 0.0),
+            1.0,
         )
-        beta_warmup = max(1, int(training_cfg.get("kl", {}).get("beta_warmup_steps", 1)))
-        beta = 0.0 if stage_code != "C" else target_beta * min(step / beta_warmup, 1.0)
-        loss = reconstruction + beta * kl["total"]
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_([parameter for parameter in model.parameters() if parameter.requires_grad], 1.0)
-        optimizer.step()
-        scheduler.step()
-        records.append({
-            "step": step,
-            "loss": float(loss.detach().cpu()),
-            "reconstruction": float(reconstruction.detach().cpu()),
-            "kl": float(kl["total"].detach().cpu()),
-            "finite": bool(torch.isfinite(loss)),
-        })
-        if smoke:
-            break
+        if schedule_name == "linear":
+            return 1.0 - progress * (1.0 - min_lr_ratio)
+        return min_lr_ratio + 0.5 * (1.0 - min_lr_ratio) * (1.0 + math.cos(progress * math.pi))
+    if smoke:
+        maximum = min(maximum, 2)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_multiplier)
+    contract = _checkpoint_contract(
+        stage=stage_code, maximum=maximum, learning_rate=learning_rate,
+        schedule_name=schedule_name, warmup_steps=warmup_steps,
+        min_lr_ratio=min_lr_ratio, validation_interval=validation_interval,
+        checkpoint_interval=checkpoint_interval, log_interval=log_interval,
+    )
+    dataset_identity = {
+        "dataset_run": str(dataset_run),
+        "dataset_manifest_sha256": file_sha256(dataset_run / "manifests/dataset_manifest.json")
+        if (dataset_run / "manifests/dataset_manifest.json").is_file() else None,
+        "selected_window_count": len(indices),
+        "window": window,
+        "stride": stride,
+    }
+    metrics_path = output_run / "logs/metrics.jsonl"
+    records = _read_jsonl(metrics_path)
+    start_step = 0
+    best_step: int | None = None
+    best_metrics: dict[str, Any] | None = None
+    best_score = math.inf
+    resume_source = None
+    if resume_run is not None:
+        resume_source = Path(resume_run).expanduser().resolve()
+        if resume_source != output_run:
+            raise ValueError("resume-run must be the output run itself; refusing split-brain resume")
+        resume_checkpoint = output_run / "checkpoints/last.pt"
+        if not resume_checkpoint.is_file():
+            raise FileNotFoundError(f"resume checkpoint is missing: {resume_checkpoint}")
+        checkpoint = load_checkpoint(model, resume_checkpoint)
+        if checkpoint.get("stage") != stage_code:
+            raise ValueError("resume checkpoint stage does not match requested stage")
+        if checkpoint.get("training_contract") != contract:
+            raise ValueError("resume checkpoint training contract differs; keep CLI overrides unchanged")
+        if checkpoint.get("dataset_identity") != dataset_identity:
+            raise ValueError("resume checkpoint dataset identity differs")
+        model.load_state_dict(checkpoint["model"], strict=True)
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        if checkpoint.get("scheduler") is not None:
+            scheduler.load_state_dict(checkpoint["scheduler"])
+        start_step = int(checkpoint.get("optimizer_step", 0))
+        if start_step >= maximum:
+            raise ValueError(f"resume checkpoint is already at step {start_step}, maximum is {maximum}")
+        best_step = checkpoint.get("best_optimizer_step")
+        best_metrics = checkpoint.get("best_metrics")
+        if best_metrics:
+            best_score = float(best_metrics["total_loss"])
+        rng_state = checkpoint.get("rng_state") or {}
+        if rng_state.get("torch") is not None:
+            torch.set_rng_state(rng_state["torch"])
+        if torch.cuda.is_available() and rng_state.get("cuda") is not None:
+            torch.cuda.set_rng_state_all(rng_state["cuda"])
+        if rng_state.get("data_loader_generator") is not None:
+            loader_generator.set_state(rng_state["data_loader_generator"])
+        records = [
+            row for row in records
+            if int(row.get("optimizer_step", 0)) <= start_step
+        ]
+        atomic_write_text(
+            metrics_path,
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records),
+        )
+    elif records:
+        raise ValueError("metrics.jsonl exists without --resume-run; refusing to overwrite a partial run")
 
-    checkpoint = _new_checkpoint(model, optimizer, scheduler, {"model": model_cfg}, stage=stage_code, step=records[-1]["step"])
-    atomic_torch_save(output_run / "checkpoints/last.pt", checkpoint)
-    atomic_torch_save(output_run / "checkpoints/best.pt", checkpoint)
+    def save_last(step: int) -> None:
+        checkpoint = _new_checkpoint(
+            model, optimizer, scheduler, {"model": model_cfg}, stage=stage_code,
+            step=step, training_contract=contract, best_step=best_step,
+            best_metrics=best_metrics, dataset_identity=dataset_identity,
+            data_loader_generator=loader_generator,
+        )
+        atomic_torch_save(output_run / "checkpoints/last.pt", checkpoint)
+
+    def save_best(step: int, metrics: dict[str, Any]) -> None:
+        checkpoint = _new_checkpoint(
+            model, optimizer, scheduler, {"model": model_cfg}, stage=stage_code,
+            step=step, training_contract=contract, best_step=step,
+            best_metrics=metrics, dataset_identity=dataset_identity,
+            data_loader_generator=loader_generator,
+        )
+        atomic_torch_save(output_run / "checkpoints/best.pt", checkpoint)
+
+    iterator = _infinite(loader)
+    if start_step == 0:
+        model.eval()
+        initial_metrics = _evaluate_full_sequence(model, eval_loader, device)
+        initial_metrics["optimizer_step"] = 0
+        initial_metrics["evaluation_scope"] = "complete selected-window Stage-A sequence"
+        initial_row = {"phase": "evaluation", **initial_metrics}
+        _append_jsonl(metrics_path, initial_row)
+        records.append(initial_row)
+        best_score = float(initial_metrics["total_loss"])
+        best_step = 0
+        best_metrics = initial_metrics
+        save_best(0, initial_metrics)
+        save_last(0)
+        start_row = {
+            "phase": "lifecycle", "event": "training_started",
+            "optimizer_step": 0, "max_steps": maximum,
+            "validation_interval": validation_interval,
+            "checkpoint_interval": checkpoint_interval,
+            "log_interval": log_interval,
+        }
+        _append_jsonl(metrics_path, start_row)
+        records.append(start_row)
+        _render_training_plot(output_run, records)
+        atomic_write_json(output_run / "manifests/progress.json", {
+            "status": "running", "optimizer_step": 0, "max_steps": maximum,
+            "best_step": best_step, "best_metrics": best_metrics,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        print(
+            f"[stage={stage_code}] training started: steps={maximum} "
+            f"validation_interval={validation_interval} checkpoint_interval={checkpoint_interval} "
+            f"log_interval={log_interval}", flush=True,
+        )
+    else:
+        resume_row = {
+            "phase": "lifecycle", "event": "training_resumed",
+            "optimizer_step": start_step, "max_steps": maximum,
+        }
+        _append_jsonl(metrics_path, resume_row)
+        records.append(resume_row)
+        print(f"[stage={stage_code}] resumed from step={start_step}/{maximum}", flush=True)
+    model.train()
+    last_step = start_step
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
+    try:
+        for step in range(start_step + 1, maximum + 1):
+            started = time.perf_counter()
+            cpu_batch = next(iterator)
+            batch = _device_batch(cpu_batch, device)
+            if stage_code == "A":
+                output = model(batch, stage="A")
+            else:
+                state_mask, action_mask, _ = make_physical_masks(
+                    cpu_batch, int(config.get("training_mask_seed", 20260920))
+                )
+                output = model(batch, state_mask.to(device), action_mask.to(device), stage=stage_code)
+            reconstruction = _standard_reconstruction_loss(output, batch)
+            if output.posterior is not None:
+                kl = hierarchical_kl(output.posterior)
+            else:
+                zero = reconstruction * 0.0
+                kl = {"total": zero, "global": zero, "local": zero}
+            target_beta = float(kl_beta_override if kl_beta_override is not None else training_cfg.get("kl", {}).get("beta", 1e-3))
+            beta_warmup = max(1, int(training_cfg.get("kl", {}).get("beta_warmup_steps", 1)))
+            beta = 0.0 if stage_code != "C" else target_beta * min(step / beta_warmup, 1.0)
+            loss = reconstruction + beta * kl["total"]
+            if not bool(torch.isfinite(loss)):
+                raise FloatingPointError(f"non-finite loss at optimizer step {step}")
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            gradient_norm = torch.nn.utils.clip_grad_norm_([parameter for parameter in model.parameters() if parameter.requires_grad], 1.0)
+            optimizer.step()
+            scheduler.step()
+            last_step = step
+            row = {
+                "phase": "train", "optimizer_step": step,
+                "loss": float(loss.detach().cpu()),
+                "reconstruction": float(reconstruction.detach().cpu()),
+                "kl": float(kl["total"].detach().cpu()),
+                "kl_beta": beta, "learning_rate": optimizer.param_groups[0]["lr"],
+                "gradient_norm_before_clip": float(gradient_norm),
+                "step_seconds": time.perf_counter() - started,
+                "cuda_max_memory_bytes": torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0,
+            }
+            _append_jsonl(metrics_path, row)
+            records.append(row)
+            if step % log_interval == 0 or step == 1:
+                print(
+                    f"[stage={stage_code}] step={step}/{maximum} loss={row['loss']:.6g} "
+                    f"reconstruction={row['reconstruction']:.6g} lr={row['learning_rate']:.3g} "
+                    f"grad={row['gradient_norm_before_clip']:.3g} step_s={row['step_seconds']:.2f}",
+                    flush=True,
+                )
+            if step % validation_interval == 0 or step == maximum:
+                model.eval()
+                eval_metrics = _evaluate_full_sequence(model, eval_loader, device)
+                eval_metrics["optimizer_step"] = step
+                eval_metrics["evaluation_scope"] = "complete selected-window Stage-A sequence"
+                _append_jsonl(metrics_path, {"phase": "evaluation", **eval_metrics})
+                records.append({"phase": "evaluation", **eval_metrics})
+                if float(eval_metrics["total_loss"]) < best_score:
+                    best_score = float(eval_metrics["total_loss"])
+                    best_step = step
+                    best_metrics = eval_metrics
+                    save_best(step, eval_metrics)
+                save_last(step)
+                _render_training_plot(output_run, records)
+                atomic_write_json(output_run / "manifests/progress.json", {
+                    "status": "running", "optimizer_step": step, "max_steps": maximum,
+                    "best_step": best_step, "best_metrics": best_metrics,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+                print(
+                    f"[stage={stage_code}] eval step={step} total={eval_metrics['total_loss']:.6g} "
+                    f"state_rmse={eval_metrics['state_rmse']:.6g} action_rmse={eval_metrics['action_rmse']:.6g} "
+                    f"best_step={best_step}", flush=True,
+                )
+                model.train()
+            elif step % checkpoint_interval == 0:
+                save_last(step)
+                _render_training_plot(output_run, records)
+                atomic_write_json(output_run / "manifests/progress.json", {
+                    "status": "running", "optimizer_step": step, "max_steps": maximum,
+                    "best_step": best_step, "best_metrics": best_metrics,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+    except KeyboardInterrupt:
+        save_last(last_step)
+        _render_training_plot(output_run, records)
+        atomic_write_json(output_run / "manifests/progress.json", {
+            "status": "interrupted", "optimizer_step": last_step, "max_steps": maximum,
+            "best_step": best_step, "best_metrics": best_metrics,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        atomic_write_text(output_run / "markers/cvae.interrupted", "INTERRUPTED\n")
+        raise
+    except Exception:
+        save_last(last_step)
+        _render_training_plot(output_run, records)
+        atomic_write_json(output_run / "manifests/progress.json", {
+            "status": "failed", "optimizer_step": last_step, "max_steps": maximum,
+            "best_step": best_step, "best_metrics": best_metrics,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
+
+    save_last(last_step)
+    _render_training_plot(output_run, records)
+    atomic_write_json(output_run / "manifests/progress.json", {
+        "status": "completed", "optimizer_step": last_step, "max_steps": maximum,
+        "best_step": best_step, "best_metrics": best_metrics,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
     readback = validate_checkpoint(
         output_run / "checkpoints/last.pt",
         {"stage": stage_code, "parameters": parameter_total},
     )
     if not readback["passed"]:
         raise RuntimeError("65-token CVAE checkpoint readback failed")
+    best_readback = validate_checkpoint(
+        output_run / "checkpoints/best.pt",
+        {"stage": stage_code, "parameters": parameter_total},
+    )
+    if not best_readback["passed"]:
+        raise RuntimeError("65-token CVAE best checkpoint readback failed")
     summary = {
         "format_version": SUMMARY_FORMAT,
         "architecture_version": model.ARCHITECTURE_VERSION,
@@ -330,7 +744,7 @@ def run_experiment(
         "execution_pass": True,
         "quality_pass": None,
         "smoke": smoke,
-        "completed_optimizer_steps": records[-1]["step"],
+        "completed_optimizer_steps": last_step,
         "model_contract": {
             **model_cfg,
             "actual_parameter_count": parameter_total,
@@ -344,16 +758,33 @@ def run_experiment(
             "hard_chunk_ranges": [[4 * i, 4 * i + 3] for i in range(15)] + [[60, 64]],
         },
         "stage_parameter_counts": stage_counts,
+        "training_overrides": {
+            "max_steps": max_steps_override,
+            "learning_rate": learning_rate,
+            "lr_schedule": schedule_name,
+            "warmup_steps": warmup_steps,
+            "min_lr_ratio": min_lr_ratio,
+        },
         "records": records,
+        "best_step": best_step,
+        "best_metrics": best_metrics,
+        "validation_interval": validation_interval,
+        "checkpoint_interval": checkpoint_interval,
+        "log_interval": log_interval,
+        "resume_run": str(resume_source) if resume_source is not None else None,
+        "training_plot": str(output_run / "plots/training_curves.svg"),
         "checkpoint_readback": readback,
-        "source_checkpoint": "none; random initialization",
+        "best_checkpoint_readback": best_readback,
+        "source_checkpoint": (
+            str(resume_source / "checkpoints/last.pt") if resume_source is not None
+            else (str(init_run) if init_run is not None else "none; random initialization")
+        ),
         "unique_next_step": "ENGINEERING_REVIEW_ONLY",
     }
     atomic_write_json(output_run / "manifests/standard_cvae_summary.json", summary)
     atomic_write_json(output_run / "manifests/model_signature.json", _model_signature(model_cfg, parameter_total))
-    with (output_run / "logs" / "metrics.jsonl").open("w", encoding="utf-8") as handle:
-        for row in records:
-            handle.write(json.dumps(row) + "\n")
+    for stale_marker in ("cvae.interrupted", "cvae.failed"):
+        (output_run / "markers" / stale_marker).unlink(missing_ok=True)
     marker = "cvae_posterior_standard_cvae_smoke.ok" if smoke else "cvae_posterior_standard_cvae_execution.ok"
     atomic_write_text(output_run / "markers" / marker, "PASS\n")
     dataset.close()
@@ -370,6 +801,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stage", choices=("fixed", "random", "kl", "A", "B", "C"), required=True)
     parser.add_argument("--init-run", type=Path)
     parser.add_argument("--kl-beta", type=float)
+    parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--lr-schedule", choices=("constant", "cosine", "linear"))
+    parser.add_argument("--warmup-steps", type=int)
+    parser.add_argument("--min-lr-ratio", type=float)
+    parser.add_argument("--validation-interval", type=int)
+    parser.add_argument("--checkpoint-interval", type=int)
+    parser.add_argument("--log-interval", type=int)
+    parser.add_argument("--resume-run", type=Path)
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args(argv)
 
@@ -385,6 +825,15 @@ def main(argv: list[str] | None = None) -> int:
         init_run=args.init_run,
         smoke=args.smoke,
         kl_beta_override=args.kl_beta,
+        max_steps_override=args.max_steps,
+        learning_rate_override=args.learning_rate,
+        lr_schedule=args.lr_schedule,
+        warmup_steps_override=args.warmup_steps,
+        min_lr_ratio_override=args.min_lr_ratio,
+        validation_interval_override=args.validation_interval,
+        checkpoint_interval_override=args.checkpoint_interval,
+        log_interval_override=args.log_interval,
+        resume_run=args.resume_run,
     )
     print("65-token hierarchical standard CVAE: PASS (engineering execution complete)")
     print(json.dumps({
