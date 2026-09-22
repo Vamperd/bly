@@ -21,6 +21,9 @@
 - 2026-09-22 已补充 Stage A 全量评测尾部诊断：连续误差 `p95/p99`、分域 p95/p99、最差窗口（按 combined RMSE 与 max abs）和最差 State/Action 特征写入每条 evaluation JSONL。Windows 7 项目标测试、compile 和 diff check 通过。现有 200K metrics 只有全局均值与 max_abs，无法回溯这些新诊断；需同步新代码后重新评测/训练。
 - 对已回传的 200K Stage-A `metrics.jsonl`，step 0→200000 的 State/Action RMSE 为 `0.081387/0.044812`→`0.039531/0.024431`，contact BCE 为 `5.25e-5`→`2.28e-6`，`max_abs` 为 `18.536`→`12.227`；训练无 NaN/Inf 且均值持续下降，但实际日志显示学习率约 `5e-6`→`2.5e-7`、`kl_beta=0`，不能把该 run 解释为配置中声明的 `1e-4` warm-up 从头对照实验。该旧日志不含 p95/p99、最差窗口或最差特征，后续分析不得补造这些数值。
 - 2026-09-22 新增 `CVAE_POSTERIOR_MICRO_BATCH/--micro-batch` 覆盖并纳入 checkpoint training contract；目标对照训练采用 batch 32、60k optimizer steps、`1e-4` 峰值、2k warm-up、cosine 到 `1e-6`，对应旧 H50-A 的约 1.92M 窗口样本暴露量。Ubuntu smoke/正式训练待执行。
+- 2026-09-22 修正标准 CVAE 评测路由：此前完整评测函数固定调用 Stage A，可能使 B 阶段的 masked-condition 训练仍被记录为 posterior 指标；现按 Stage A/B/C 路由，B/C 使用 `training_mask_seed` 的条件 Mask，evaluation 记录 `evaluation_stage` 和 masked-condition scope。Windows compile、diff check 与 8 项目标测试通过；需同步后再启动 B。
+- 2026-09-22 按用户要求将 Stage B 改为 condition-only：B forward 完全不执行 Posterior Encoder，不使用 posterior latent，不计算 KL；随机初始化 B 是推荐的独立链路检验，A-init 只作为后续“共享 Decoder 初始化影响”的对照。summary 新增 `stage_route`，显式记录 posterior/condition/memory/FiLM/KL 是否执行。
+- B evaluation 现额外写入条件 Mask seed、窗口 `mask_name` 和 `mask_breakdown`，用于区分 Condition Encoder 总体失败与单个物理 Mask 家族失败。
 
 硬约束是：posterior与conditional prior只共享decoder参数，任何一次decoder调用只能接收其中一条路径的一组latent；二者绝不拼接、平均或attention融合。最终推理只允许`Mask条件 → p(z|c) → prior latent → D(z,c)`，不得调用posterior或回退到真值路径。
 

@@ -3342,39 +3342,56 @@ class HierarchicalStandardCVAETransformer(nn.Module):
         )
 
     def _fuse_pair(
-        self, global_latent: torch.Tensor, local_latents: torch.Tensor,
+        self, global_latent: torch.Tensor | None, local_latents: torch.Tensor | None,
         condition: ConditionEncoding | None,
     ) -> FusedHierarchicalLatent:
         if condition is None:
+            if global_latent is None or local_latents is None:
+                raise ValueError("posterior latents are required without a condition")
             cg = torch.zeros_like(global_latent)
             cl = torch.zeros_like(local_latents)
-            memory_global_source = global_latent
-            memory_local_source = local_latents
-            film_global_source = global_latent
-            film_local_source = local_latents
+            active_global = global_latent
+            active_local = local_latents
+            memory_global_source = torch.cat((global_latent, cg), dim=-1)
+            memory_local_source = torch.cat((local_latents, cl), dim=-1)
+            film_global_source = memory_global_source
+            film_local_source = memory_local_source
         else:
             cg, cl = condition.global_latent, condition.local_latents
-            memory_global_source = torch.cat((global_latent, cg), dim=-1)
-            memory_local_source = torch.cat((local_latents, cl), dim=-1)
+            if global_latent is None or local_latents is None:
+                # Condition-only Stage B: the first half of each fusion input
+                # is an explicit zero placeholder, never a posterior output.
+                posterior_global = torch.zeros_like(cg)
+                posterior_local = torch.zeros_like(cl)
+                active_global = cg
+                active_local = cl
+            else:
+                posterior_global = global_latent
+                posterior_local = local_latents
+                active_global = global_latent
+                active_local = local_latents
+            memory_global_source = torch.cat((posterior_global, cg), dim=-1)
+            memory_local_source = torch.cat((posterior_local, cl), dim=-1)
             film_global_source = memory_global_source
             film_local_source = memory_local_source
-        if condition is None:
-            memory_global_source = torch.cat((global_latent, cg), dim=-1)
-            memory_local_source = torch.cat((local_latents, cl), dim=-1)
-            film_global_source = memory_global_source
-            film_local_source = memory_local_source
-        slots = self.local_slot_embedding.weight[None].expand(global_latent.shape[0], -1, -1)
+        slots = self.local_slot_embedding.weight[None].expand(active_global.shape[0], -1, -1)
         local_input = torch.cat((memory_local_source, slots), dim=-1)
         memory_global = self.memory_global_projection(self.memory_global_fusion(memory_global_source))
         memory_local = self.memory_local_projection(self.memory_local_fusion(local_input))
         film_global = self.film_global_projection(self.film_global_fusion(film_global_source))
         film_local = self.film_local_projection(self.film_local_fusion(local_input))
-        ids = self.local_chunk_ids(torch.arange(65, device=global_latent.device))
+        ids = self.local_chunk_ids(torch.arange(65, device=active_global.device))
         film_input = film_global[:, None] + film_local[:, ids]
         return FusedHierarchicalLatent(
-            global_latent, local_latents, memory_global, memory_local, film_input,
+            active_global, active_local, memory_global, memory_local, film_input,
             None if condition is None else condition.memory,
         )
+
+    def fuse_condition_only(
+        self, condition: ConditionEncoding
+    ) -> FusedHierarchicalLatent:
+        """Fuse only deterministic condition latents for the isolated B stage."""
+        return self._fuse_pair(None, None, condition)
 
     def fuse_latents(
         self, posterior_latent: Any, condition_latent: ConditionEncoding | None = None
@@ -3457,22 +3474,36 @@ class HierarchicalStandardCVAETransformer(nn.Module):
                 stage = "infer"
             else:
                 raise ValueError("unknown latent_source")
-        posterior = self.encode_posterior_distribution(batch) if stage in {"A", "B", "C"} else None
-        condition = None if stage == "A" else self.encode_condition(batch, state_mask, action_mask)
-        if stage in {"A", "B"}:
+        if stage == "A":
+            posterior = self.encode_posterior_distribution(batch)
+            condition = None
             global_latent, local_latents = posterior.global_mean, posterior.local_mean  # type: ignore[union-attr]
+            fused = self._fuse_pair(global_latent, local_latents, None)
+        elif stage == "B":
+            # Isolated condition-chain experiment: Posterior Encoder is not
+            # executed, and no posterior latent or KL term is produced.
+            posterior = None
+            condition = self.encode_condition(batch, state_mask, action_mask)
+            global_latent, local_latents = condition.global_latent, condition.local_latents
+            fused = self.fuse_condition_only(condition)
         elif stage == "C":
+            posterior = self.encode_posterior_distribution(batch)
+            condition = self.encode_condition(batch, state_mask, action_mask)
             global_latent, local_latents = self.reparameterize(posterior, epsilon)  # type: ignore[arg-type]
+            fused = self._fuse_pair(global_latent, local_latents, condition)
         elif stage == "infer":
+            posterior = None
+            condition = self.encode_condition(batch, state_mask, action_mask)
             global_latent = torch.randn(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
             local_latents = torch.randn(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
+            fused = self._fuse_pair(global_latent, local_latents, condition)
         else:
             raise ValueError("stage must be A, B, C or infer")
-        decoded = self._decode(batch, self._fuse_pair(global_latent, local_latents, condition), condition)
+        decoded = self._decode(batch, fused, condition)
         return HierarchicalStandardCVAEOutput(
             decoded.physical_state, decoded.action, decoded.state_contact_logits,
             posterior, None, global_latent, local_latents,
-            "posterior_mean" if stage == "A" else ("posterior_sample" if stage == "C" else ("standard_normal" if stage == "infer" else "posterior_mean")),
+            "posterior_mean" if stage == "A" else ("posterior_sample" if stage == "C" else ("standard_normal" if stage == "infer" else "condition_mean")),
             condition,
         )
 

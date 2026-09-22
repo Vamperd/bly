@@ -47,6 +47,9 @@ def batch(size: int = 2) -> dict[str, torch.Tensor | list[str]]:
         "valid_state": torch.ones(size, 65, dtype=torch.bool),
         "valid_action": torch.ones(size, 64, dtype=torch.bool),
         "motion_key": [f"motion-{i}" for i in range(size)],
+        "variant_id": [0 for _ in range(size)],
+        "window_start": [0 for _ in range(size)],
+        "episode_ref": [f"episode-{i}" for i in range(size)],
     }
 
 
@@ -130,6 +133,25 @@ class HierarchicalStandardCVAETest(unittest.TestCase):
         self.assertIsNone(output.posterior)
         self.assertEqual(output.latent_source, "standard_normal")
 
+    def test_stage_b_is_condition_only(self) -> None:
+        model = HierarchicalStandardCVAETransformer(config()).eval()
+        value = batch()
+        state_mask = torch.zeros(2, 65, 70, dtype=torch.bool)
+        action_mask = torch.zeros(2, 64, 29, dtype=torch.bool)
+        state_mask[:, 10, :] = True
+        action_mask[:, 5, :] = True
+        model.encode_posterior_distribution = (  # type: ignore[method-assign]
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("Stage B must not execute Posterior Encoder")
+            )
+        )
+        output = model(value, state_mask, action_mask, stage="B")
+        self.assertIsNone(output.posterior)
+        self.assertEqual(output.latent_source, "condition_mean")
+        self.assertIsNotNone(output.condition)
+        self.assertEqual(tuple(output.global_latent.shape), (2, 16))
+        self.assertEqual(tuple(output.local_latents.shape), (2, 16, 8))
+
     def test_checkpoint_readback_and_legacy_rejection(self) -> None:
         model = HierarchicalStandardCVAETransformer(config())
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -159,6 +181,19 @@ class HierarchicalStandardCVAETest(unittest.TestCase):
         self.assertIn(metrics["worst_window_by_max_abs"]["window_index"], (0, 1))
         self.assertIn("combined_rmse", metrics["worst_window"])
         self.assertIn("max_abs", metrics["worst_window_by_max_abs"])
+
+    def test_masked_condition_evaluation_uses_condition_stage(self) -> None:
+        model = HierarchicalStandardCVAETransformer(config()).eval()
+        metrics = _evaluate_full_sequence(
+            model,
+            [batch(2)],
+            torch.device("cpu"),
+            stage="B",
+            mask_seed=20260920,
+        )
+        self.assertEqual(metrics["evaluation_stage"], "B")
+        self.assertEqual(metrics["condition_mask_seed"], 20260920)
+        self.assertTrue(metrics["mask_breakdown"])
 
 
 if __name__ == "__main__":

@@ -245,8 +245,22 @@ def _evaluate_full_sequence(
     model: HierarchicalStandardCVAETransformer,
     loader: Iterable[dict[str, Any]],
     device: torch.device,
+    *,
+    stage: str = "A",
+    mask_seed: int | None = None,
 ) -> dict[str, Any]:
-    """Complete Stage-A evaluation with global and tail-error diagnostics."""
+    """Complete evaluation with global and tail-error diagnostics.
+
+    Stage A evaluates the complete-sequence posterior path.  Stages B/C must
+    evaluate the masked condition path; otherwise their metrics would silently
+    measure the easier posterior reconstruction instead of the requested
+    condition-encoder task.
+    """
+    stage = stage.upper()
+    if stage not in {"A", "B", "C"}:
+        raise ValueError("evaluation stage must be A, B or C")
+    if stage != "A" and mask_seed is None:
+        raise ValueError("masked condition evaluation requires mask_seed")
     model.eval()
     state_sse = action_sse = contact_loss = 0.0
     state_count = action_count = contact_count = 0
@@ -264,7 +278,19 @@ def _evaluate_full_sequence(
     ordinal = 0
     for cpu_batch in loader:
         batch = _device_batch(cpu_batch, device)
-        output = model(batch, stage="A")
+        mask_names: list[str] | None = None
+        if stage == "A":
+            output = model(batch, stage="A")
+        else:
+            state_mask, action_mask, mask_names = make_physical_masks(
+                cpu_batch, int(mask_seed),
+            )
+            output = model(
+                batch,
+                state_mask.to(device),
+                action_mask.to(device),
+                stage=stage,
+            )
         state_error = output.physical_state[..., :68] - batch["physical_state"][..., :68]
         action_error = output.action - batch["action"]
         state_valid = batch["valid_state"].bool()[..., None].expand_as(state_error)
@@ -315,6 +341,7 @@ def _evaluate_full_sequence(
                 "state_rmse": state_mse ** 0.5,
                 "action_rmse": action_mse ** 0.5,
                 "combined_rmse": ((state_mse + action_mse) / 2.0) ** 0.5,
+                "mask_name": mask_names[index] if mask_names is not None else None,
                 "max_abs": max(
                     float(state_error_cpu[index].abs().masked_select(state_valid_cpu[index]).max())
                     if state_values.numel() else 0.0,
@@ -367,7 +394,26 @@ def _evaluate_full_sequence(
     )
     worst_window = max(window_rows, key=lambda row: row["combined_rmse"], default=None)
     worst_window_by_max_abs = max(window_rows, key=lambda row: row["max_abs"], default=None)
+    mask_breakdown: dict[str, dict[str, Any]] = {}
+    for row in window_rows:
+        name = row.get("mask_name")
+        if not name:
+            continue
+        group = mask_breakdown.setdefault(
+            str(name),
+            {"count": 0, "state_rmse": [], "action_rmse": [], "combined_rmse": [], "max_abs": []},
+        )
+        group["count"] += 1
+        for key in ("state_rmse", "action_rmse", "combined_rmse", "max_abs"):
+            group[key].append(float(row[key]))
+    for group in mask_breakdown.values():
+        for key in ("state_rmse", "action_rmse", "combined_rmse", "max_abs"):
+            values = group.pop(key)
+            group[f"mean_{key}"] = sum(values) / max(len(values), 1)
+            group[f"worst_{key}"] = max(values, default=0.0)
     return {
+        "evaluation_stage": stage,
+        "condition_mask_seed": int(mask_seed) if mask_seed is not None else None,
         "total_loss": (state_sse / max(state_count, 1) + action_sse / max(action_count, 1) + contact_bce) / 3.0,
         "state_rmse": state_rmse,
         "action_rmse": action_rmse,
@@ -382,6 +428,7 @@ def _evaluate_full_sequence(
         "worst_window": worst_window,
         "worst_window_by_max_abs": worst_window_by_max_abs,
         "worst_windows": sorted(window_rows, key=lambda row: row["combined_rmse"], reverse=True)[:10],
+        "mask_breakdown": mask_breakdown,
         "worst_state_features": state_features[:10],
         "worst_action_features": action_features[:10],
     }
@@ -711,9 +758,19 @@ def run_experiment(
     iterator = _infinite(loader)
     if start_step == 0:
         model.eval()
-        initial_metrics = _evaluate_full_sequence(model, eval_loader, device)
+        initial_metrics = _evaluate_full_sequence(
+            model,
+            eval_loader,
+            device,
+            stage=stage_code,
+            mask_seed=int(config.get("training_mask_seed", 20260920)),
+        )
         initial_metrics["optimizer_step"] = 0
-        initial_metrics["evaluation_scope"] = "complete selected-window Stage-A sequence"
+        initial_metrics["evaluation_scope"] = (
+            "complete selected-window Stage-A posterior sequence"
+            if stage_code == "A"
+            else f"complete selected-window Stage-{stage_code} masked-condition sequence"
+        )
         initial_row = {"phase": "evaluation", **initial_metrics}
         _append_jsonl(metrics_path, initial_row)
         records.append(initial_row)
@@ -805,9 +862,19 @@ def run_experiment(
                 )
             if step % validation_interval == 0 or step == maximum:
                 model.eval()
-                eval_metrics = _evaluate_full_sequence(model, eval_loader, device)
+                eval_metrics = _evaluate_full_sequence(
+                    model,
+                    eval_loader,
+                    device,
+                    stage=stage_code,
+                    mask_seed=int(config.get("training_mask_seed", 20260920)),
+                )
                 eval_metrics["optimizer_step"] = step
-                eval_metrics["evaluation_scope"] = "complete selected-window Stage-A sequence"
+                eval_metrics["evaluation_scope"] = (
+                    "complete selected-window Stage-A posterior sequence"
+                    if stage_code == "A"
+                    else f"complete selected-window Stage-{stage_code} masked-condition sequence"
+                )
                 _append_jsonl(metrics_path, {"phase": "evaluation", **eval_metrics})
                 records.append({"phase": "evaluation", **eval_metrics})
                 if float(eval_metrics["total_loss"]) < best_score:
@@ -900,6 +967,15 @@ def run_experiment(
             "hard_chunk_ranges": [[4 * i, 4 * i + 3] for i in range(15)] + [[60, 64]],
         },
         "stage_parameter_counts": stage_counts,
+        "stage_route": {
+            "posterior_encoder_executed": stage_code in {"A", "C"},
+            "posterior_latent_used": stage_code in {"A", "C"},
+            "condition_encoder_executed": stage_code in {"B", "C"},
+            "condition_latent_used": stage_code in {"B", "C"},
+            "condition_memory_used": stage_code in {"B", "C"},
+            "film_used": True,
+            "kl_enabled": stage_code == "C",
+        },
         "training_overrides": {
             "max_steps": max_steps_override,
             "micro_batch": micro_batch,
