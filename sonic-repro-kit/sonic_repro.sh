@@ -1219,6 +1219,12 @@ phase_replay_action_mask() {
     > "$run_dir/logs/action_replay_slices.log"
 
   local scenario_index scenario_id action_slice hydra_dir exact_init_report
+  local replay_recorder="action_replay_recorder.ActionReplayTrajectoryRecorderCfg"
+  if [[ "$(json_manifest_optional_value "$request" replay65_guard)" == "True" \
+      || "$(json_manifest_optional_value "$request" replay65_guard)" == "true" ]]; then
+    [[ -n "$exact_init_file" ]] || die "replay65 requires exact initialization"
+    replay_recorder="replay65_recorder.Replay65RecorderCfg"
+  fi
   for ((scenario_index = 0; scenario_index < num_envs; scenario_index++)); do
     printf -v scenario_id '%06d' "$scenario_index"
     action_slice="$slice_dir/$scenario_id.actions.npz"
@@ -1256,7 +1262,7 @@ phase_replay_action_mask() {
         ++manager_env.config.terrain_type=plane \
         "~manager_env/recorders=empty" \
         ++manager_env.recorders.dataset_export_mode=0 \
-        "++manager_env.recorders.trajectory._target_=action_replay_recorder.ActionReplayTrajectoryRecorderCfg" \
+        "++manager_env.recorders.trajectory._target_=$replay_recorder" \
         "++manager_env.recorders.trajectory.save_path=$output_dir" \
         "++manager_env.recorders.trajectory.environment_id_offset=$scenario_index" \
         ++manager_env.observations.policy.enable_corruption=False \

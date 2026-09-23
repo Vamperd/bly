@@ -1,438 +1,305 @@
-# State–Action Posterior 容量实验：精简计划与结果台账
+# 65-token CVAE：当前 A／B 实验计划与结果
 
 最后更新：2026-09-23
 
-本文记录工程实现、编译、单测、checkpoint readback、已执行实验结果和当前唯一下一步。模型合同见
-[model.md](model.md)；`Next.md`/`explain.md` 已停止维护，本台账不再依赖它们。
+只保留当前65-token A/B的实验路径、概要结果及下一步；历史条目仅从本文移除，
+任何历史run、checkpoint、数据和源码均未删除。结构合同见[model.md](model.md)，
+必要反常证据见[process.md](process.md)，交接入口为[AGENTS.md](AGENTS.md)。
 
-## 1. 当前状态与唯一下一步
+## 1. 当前状态与路线
 
-### 2026-09-23 实验协议v2修正：Windows实现，Ubuntu待核验
+架构为 `65-token-hierarchical-standard-cvae-v1`，协议为 `65-token-experiment-v2`。
+参数64,377,959；99/198输入、16个hard chunk、latent、FiLM及原重建loss保持不变。
 
-本节为活动状态；下方2026-09-21/22与H50各节保留当时事实，不再作为活动协议。
-模型架构仍为 `65-token-hierarchical-standard-cvae-v1`，协议为 `65-token-experiment-v2`。
-旧A保留；正在运行的旧B让其完成并标记 `legacy_batch_position_dependent_mask`；A额外60k未启动。
+```text
+A90k + model-only再训练60k：完成，封存为完整输入参考
+B-fixed：1 motion / 16窗口 / 128fixture / 20k，完成
+B-dynamic：同16窗口 / 20k，完成，固定及另一Mask bank均显著改善
+→ 建议下一步：32-motion全部T64窗口，随机初始化B-fixed，120k上限，分段审核
+→ B-fixed审核后，再独立启动同规模B-dynamic
+回放按用户选择暂缓；恢复时仍先原始Action双基线，物理结论不可跳过此门槛
+```
 
-| 项目 | 当前状态与边界 |
+本次支持扩大**数据范围**，不支持扩大模型或直接进入最终随机生成阶段。
+16窗口均来自同一motion；动态训练后bank可能与训练采样重合，不称新motion泛化或严格未见Mask。
+本次两轮summary的quality_pass仍为null，工程PASS不等于预注册质量PASS。
+32-motion为新的独立condition-only容量实验，不加载A或16窗口B权重，不绕过数据身份校验。
+以下第2～4节为A及B-fixed已完成记录；最新B-dynamic和下一步见第5～7节。
+
+## 2. A：完整序列 Posterior 重建基线
+
+数据为 `/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506`；
+32 motion、256 episode，在T64配置下重建1,504个已见训练窗口。
+Posterior mean → 层级latent → Decoder；不使用Condition，KL=0。
+以下误差除特别标注外均在归一化连续特征空间。
+
+| 项目 | A90k | 从A90k权重初始化再训练60k |
+|---|---:|---:|
+| optimizer step / best step | 90000 / 90000 | 60000 / 60000 |
+| full reconstruction loss | 1.77765898e-5 | 6.98823541e-6 |
+| State RMSE | 0.00588709 | 0.00373420 |
+| Action RMSE | 0.00431750 | 0.00264767 |
+| 联合continuous p99 | 0.01698315 | 0.01124605 |
+| 联合continuous max_abs | 0.21955711 | 0.13111076 |
+
+原始A：
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260922_014417`。
+
+再训练A：
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260923_012104`。
+
+两次batch均为32、warm-up 2k、cosine末端1e-6；峰值分别为1e-4和2e-5。
+后60k只加载模型权重，重新初始化AdamW和调度器，**不是保留optimizer的无缝续训**。
+最终best=last；只读重评位于
+`/home/helloworld/bly/runs/cvae_v2_reassessment_gweSqTsw`，原始／best／last数值复现，
+contact准确率100%。历史身份缺失字段保留unknown，不声称精确恢复。
+
+loss下降60.69%，max下降40.28%，不能再描述为“max无法下降”。
+原最大点为 `confusion_103__A045 / variant7 / start384 / t46 / joint_vel_14`，
+归一化0.219557对应约0.240674 rad/s。
+后最大点变为同motion的 `variant3 / start448 / t64 / joint_vel_28`，
+归一化0.131111对应约0.074355 rad/s。两次全局最大值不是同一个坐标；
+normalization未发现近零速度std。局部速度变化拟合不足是候选机制，不能据此确认chunk边界或容量瓶颈。
+详细证据与缺失的同坐标对照见process.md。A封存为参考，不要求尾部先归零才能推进B。
+
+## 3. B-fixed：本次训练身份与工程核验
+
+训练run：
+`/home/helloworld/bly/runs/cvae_v2_B_fixed_w16_s20000_0XqzpnZ5`。
+
+回传目录：`C:/Users/86136/Desktop/replay/diagnostic_report`。
+核对summary、provenance、selected_windows、progress、全部20,000条训练记录、
+41次完整评测的摘要、最终分区／family／尾部及step19500消融。
+回传索引1,390个文件hash全部匹配；10个相关源码文件hash与当前Windows实现一致。
+记录的源码commit为 `b64df6499fab832246117521427548069dbba501`。
+
+| 合同 | 实际值 |
 |---|---|
-| 窗口/Mask | 稳定source/episode/motion/variant/start/长度哈希；B-fixed每窗口八fixture；B-dynamic使用step和sample ordinal；保存双bank坐标/hash |
-| 评测 | full/masked/visible、全部feature、分域top100和原始元素去重、物理值/逐t/chunk/重叠帧、固定及最差曲线与速度lag诊断 |
-| C | 四路独立评测、默认8样本、独立epsilon/RNG；全样本期望误差/方差/energy；draw0另报完整尾部；best按部署energy |
-| 训练/恢复 | 不改架构/loss；采样排列/游标与全部RNG入v2 checkpoint；resume/continue/model-only严格区分；保留AdamW续训接口 |
-| 工程安全 | SIGINT/SIGTERM安全边界；梯度非有限阻止更新；更新中异常不覆盖last；fsync+原子replace；last先于best；OS锁防双写 |
-| 审核/产物 | 实际LR、nextLR、分项loss/KL/梯度/样本摘要；quality仅告警；分阶段best、best_reconstruction、last；严格前向readback；流式日志和图 |
-| 交付 | 新增cvae_tools evaluate/monitor/export-report；只读评测不修改源run；同步三份文档；无Ubuntu正式训练/重评结果 |
+| 阶段／初始化 | B condition-only；随机初始化；无A/source checkpoint |
+| 实际数据范围 | 1 motion、4个variant/episode、16窗口；不是整个32-motion集合 |
+| motion | baby_full_diaper_walk_ff_360_loop_R_001__A462 |
+| 窗口分布 | variants 0/1/2各start 0、64、128、192、220；variant3仅start0 |
+| Mask | 16窗口×8家族=128固定fixture；每窗口每家族只有一个固定坐标组合 |
+| 训练预算 | 20000步，batch32，累计640000样本暴露，即每fixture平均5000次 |
+| 学习率 | 首步5e-8；2000步到1e-4；cosine至末步1e-6 |
+| 记录频率 | 每步JSONL；500步完整评测；250步恢复点；50步控制台刷新 |
+| seed | initialization 20260921；training Mask 20260920 |
+| 参数 | 总64,377,959；可训练49,501,351；posterior可训练参数0 |
+| 损失／选择 | full State连续／Action／contact等权重建；best按八family等权masked域均值MSE |
 
-Windows已执行小模型A/B/C短程前反向、B/C中断恢复与连续训练参数一致性、AdamW续训step延续、
-B-dynamic独立初始化、只读评测与ZIP回传测试；模拟optimizer半更新异常时last保持前一安全边界。
-最终目标测试17/17 PASS（v2协议8项+既有65-token模型9项）；全量发现177项，174 PASS，
-其余3项仅因既有Windows环境缺 `h5py` 无法导入。Python compileall、CLI help、
-配置加载、64,377,959参数meta构建和git diff --check通过。
-本机bash指向未配置Linux发行版的WSL，Shell语法核验未执行；需Ubuntu运行bash -n。
-不将Windows合成数据测试写成真实HDF5/CUDA通过，不安装依赖绕过既有环境边界。
-一轮测试曾遇Windows索引器短暂锁文件，已加入有界原子替换重试并把测试产物放入忽略的runs目录；
-失败残留保留在 `runs/protocol_v2_failed_windows_test`，未删除用户数据或工作区外文件。
+20,000步逐步记录均为posterior调用0、condition调用1；KL及加权KL全为0；
+step连续，顶层数值日志无NaN/Inf。主要Condition、融合、projection、FiLM、decoder、输出模块均记录到梯度。
+`empty_local` 无梯度是全有效chunk下未触发空块fallback的正常情况，不是断路证据。
+耗时约93分钟，执行完成，末次quality warnings为空，但告警为空不等价于已验证新Mask能力。
 
-已验证事实：A90k的联合max_abs=0.2195571065，p99=0.0169831514，80k→90k最大值仍下降约9.15%；
-normalization速度std约0.3170..1.9636，不存在近零std证据。
-候选原因仍包括局部峰值、时间偏移、尾部优化不足或窗口上下文差异；不能从RMSE前十表确认最大值域/feature。
-缺失证据是准确argmax及原始曲线，必须以只读重评补齐。历史B原日志不能宣称exact固定Mask。
+best=last=step20000，严格模型／optimizer／scheduler step／固定前向读回通过；
+两checkpoint的记录SHA256均为
+`e22931f3420cb7cf4a53a6bca500e4eaf2baf165f43722ac5a425e590daf6fe7`。
 
-**唯一下一步：同步Windows代码，在Ubuntu固定环境完成工程smoke，再只读重评旧A/B并回传diagnostic_report.zip。**
-命令统一见 `model.md` 第5节。之后分别审核B-fixed随机初始化、B-dynamic及独立C；阶段间不自动运行。
+数据normalization SHA256：
+`dad2270cb8466b5616cc6db63d49b065c0bebea65ac0440e60ccd82b6c918995`。
+selected_windows SHA256：
+`05e0e9932f93528f77bb0d0fe2e5e22b1b10152689c673e3c32108a858d00a39`。
 
-当前活动路线为 **65-token 层级标准 CVAE**（`65-token-hierarchical-standard-cvae-v1`）。它直接替换历史 H50-SCVAE 语义，首次训练随机初始化；历史 H50 结果只读保留，不能作为新模型的 source、初始化或质量结论。
+证据边界：本次审核了回传结果与源码身份，没有在Windows重新执行源HDF5/checkpoint。
+回传包未包含源run的 `data/fixed_mask_bank.json`、`data/heldout_mask_bank.json`；
+当前源码export-report只加入data中的normalization，故不能把“包hash正确”写成“完整bank逐项重算一致”。
+代表曲线含实际Mask、摘要有坐标重合统计，已足够定位本次主要问题；后续回传需额外附这两个bank文件。
 
-初始工程验收覆盖输入布局、terminal Action、mask 隔离、hard chunk、阶段路由、有限前向/反向和 checkpoint 签名；其后已单独完成 65-token Stage A 的 Ubuntu 质量训练。B/C、扩大 motion 数量、Mask 研究和物理重放仍不因本次 A 结果自动启动。
+## 4. B：结果、趋势与解释
 
-### 2026-09-21 65-token 实现状态
+### 4.1 已见fixed与另一Mask bank
 
-- 模型核心、三阶段路由、随机初始化 checkpoint 签名和 Shell 入口已实现。
-- Windows 工程核验 PASS：`py_compile`、模块 `--help`、目标模块 6 项 unittest；覆盖 shape、terminal Action、Mask 隔离、hard chunk、阶段冻结/反向、推理不调用 Posterior、checkpoint readback 与旧格式拒绝。Windows 当前没有可用 WSL/Git Bash，`bash -n` 无法执行（系统仅返回 WSL 安装提示），因此 Shell 语法需在 Ubuntu 同步后复核。全量 `unittest discover` 的其余 3 个失败仍是既有 Windows 环境缺少 `h5py` 的导入错误，与本模型无关。
-- Stage A 正式质量训练已完成并在下方回填；Stage B condition-only 训练尚未形成结果。A 的结果只证明完整序列 posterior reconstruction，不证明 Condition Encoder、随机 latent 或未见 motion 泛化。
-- 2026-09-21 用户在 Ubuntu 执行了 Stage A 非 smoke 入口，run 为 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260921_162141`，只完成默认 2 step；它仅是工程执行，不是重建能力结果。随后已将正式默认配置改为全部窗口、40k step，并新增命令行运行时覆盖步数/LR/scheduler/warm-up/min-LR-ratio；Windows `py_compile`、CLI help 与 6 项目标测试通过。该覆盖接口需在 Ubuntu 同步后运行验证。
-- 2026-09-21 训练记录改造：Stage A 现按旧 posterior capacity 方式逐步 flush `logs/metrics.jsonl`，每 1000 step 对全部 selected windows 做完整评测并以 `total_loss` 更新 `best.pt`，每 250 step 原子保存可恢复的 `last.pt`，同时刷新 `training_curves.svg` 与 `progress.json`。checkpoint 包含 optimizer/scheduler/RNG、训练合同和数据身份；`CVAE_POSTERIOR_RESUME_RUN` 严格恢复同一 run。Ctrl-C/异常路径保存 `last.pt` 并写 `cvae.interrupted`。Windows 目标 unittest、compile、CLI help 已通过；Ubuntu shell/真实 CUDA smoke 待同步验证。
-- 2026-09-22 已补充 Stage A 全量评测尾部诊断：连续误差 `p95/p99`、分域 p95/p99、最差窗口（按 combined RMSE 与 max abs）和最差 State/Action 特征写入每条 evaluation JSONL。Windows 7 项目标测试、compile 和 diff check 通过。现有 200K metrics 只有全局均值与 max_abs，无法回溯这些新诊断；需同步新代码后重新评测/训练。
-- 对已回传的 200K Stage-A `metrics.jsonl`，step 0→200000 的 State/Action RMSE 为 `0.081387/0.044812`→`0.039531/0.024431`，contact BCE 为 `5.25e-5`→`2.28e-6`，`max_abs` 为 `18.536`→`12.227`；训练无 NaN/Inf 且均值持续下降，但实际日志显示学习率约 `5e-6`→`2.5e-7`、`kl_beta=0`，不能把该 run 解释为配置中声明的 `1e-4` warm-up 从头对照实验。该旧日志不含 p95/p99、最差窗口或最差特征，后续分析不得补造这些数值。
-- 2026-09-22 新增 `CVAE_POSTERIOR_MICRO_BATCH/--micro-batch` 覆盖并纳入 checkpoint training contract；Stage A 正式训练实际采用 batch 32、90k optimizer steps、`1e-4` 峰值、2k warm-up、cosine 到 `1e-6`（`min_lr_ratio=0.01`）。
-- 2026-09-22 修正标准 CVAE 评测路由：此前完整评测函数固定调用 Stage A，可能使 B 阶段的 masked-condition 训练仍被记录为 posterior 指标；现按 Stage A/B/C 路由，B/C 使用 `training_mask_seed` 的条件 Mask，evaluation 记录 `evaluation_stage` 和 masked-condition scope。Windows compile、diff check 与 8 项目标测试通过；需同步后再启动 B。
-- 2026-09-22 按用户要求将 Stage B 改为 condition-only：B forward 完全不执行 Posterior Encoder，不使用 posterior latent，不计算 KL；随机初始化 B 是推荐的独立链路检验，A-init 只作为后续“共享 Decoder 初始化影响”的对照。summary 新增 `stage_route`，显式记录 posterior/condition/memory/FiLM/KL 是否执行。
-- B evaluation 现额外写入条件 Mask seed、窗口 `mask_name` 和 `mask_breakdown`，用于区分 Condition Encoder 总体失败与单个物理 Mask 家族失败。
+| 归一化连续指标 | 已见fixed | held-out bank（包含19个重合fixture） |
+|---|---:|---:|
+| family等权masked MSE | 5.293105e-7 | 1.695675e-4 |
+| full State RMSE | 0.00078724 | 0.01154769 |
+| full Action RMSE | 0.00056938 | 0.00859879 |
+| masked State RMSE | 0.00098331 | 0.01348454 |
+| masked Action RMSE | 0.00070615 | 0.00778734 |
+| masked State p99 | 0.00311462 | 0.04381449 |
+| masked Action p99 | 0.00219759 | 0.02752260 |
+| masked State max | 0.00796247 | 0.68288028 |
+| masked Action max | 0.00489709 | 0.25016236 |
+| full State / Action max | 0.01223171 / 0.00561768 | 0.76220381 / 0.37027586 |
+| contact准确率 | 100% | 100% |
 
-硬约束是：posterior与conditional prior只共享decoder参数，任何一次decoder调用只能接收其中一条路径的一组latent；二者绝不拼接、平均或attention融合。最终推理只允许`Mask条件 → p(z|c) → prior latent → D(z,c)`，不得调用posterior或回退到真值路径。
+fixed完整loss为7.174677e-7；所有masked连续元素误差均小于0.01。
+完整State仅2个元素超过0.01，均为可见元素的原始网络输出；正式补全保留可见真值，
+所以不能把full max 0.012232当成隐藏区域最大误差。
+该点为variant2/start128/t39的joint_vel_17，约0.0079895 rad/s。
 
-当前已确认：
+held-out使用同一批已见窗口，不是新motion测试，并同时改变缺口位置及部分长度。
+128项中19项坐标与fixed相同：16个full_action和3个state_rollout。
+真正不同坐标的109项，masked State/Action RMSE为0.01452174/0.01357753。
+full_action两bank结果相同是Mask相同的必然结果，不是全Action新条件泛化成功。
 
-- F4G direct-output smoke 已完成；两步误差没有实验意义。
-- 正式 F4G 已在1,504个T64窗口、12,032个fixtures上跑满5k，但`fit`质量FAIL。所有主要指标持续单调改善，说明索引、Mask和loss确实产生有效梯度；失败不能归因于encoder、latent或decoder。
-- 5k只让每个fixture平均被采样约106次。答案表从零初始化，而State存在绝对值约42的归一化目标；当前LR累计位移不足，最坏State仍主导门禁。因此该run更直接反映“独立查表参数的稀疏优化不足”，尚不能据此判定evaluator上限不可达。
-- F4G-O已在相同1,504个T64窗口、12,032个fixtures上以0 optimizer step取得`quality_pass=true`、`best_fit_score=1.0`。这证明数据身份、Mask target、loss和evaluator存在解析可达解；原F4G失败被定位为稀疏独立查表优化不足。
-- H38工程smoke已在前2个window上完成2步前向、反向、评测和checkpoint链路；`quality_pass=false`与score不构成容量结论。
-- H38-A已在32 motion、T64上从随机初始化跑满30k，`quality_pass=false`、best fit score为`2.4948489`。最佳global State/Action RMSE为`0.024948/0.017838`，worst-window为`0.041763/0.025360`，p99/max abs为`0.075243/0.784172`，contact 100%，zero/cross-window/cross-motion latent ratio为`46.69/50.64/57.85`。
-- 新fit门禁现固定为global State/Action≤`0.02`、每类worst-window State/Action≤`0.04`、p99≤`0.08`、max abs只报告、contact 100%、latent ratio≥10。历史summary与marker保持原样，仅作事后重算。
-- H38-A按新门禁仍FAIL，score `1.24742`由global State控制；worst State也为阈值`1.044`倍，p99已通过。Action、contact和latent依赖通过。
-- H38-B已从H38-A的`best_fit.pt`做model-only初始化，在1,504个T64窗口、12,032个固定物理Mask fixture上跑满60k；execution PASS但质量FAIL，最佳点仍为最后step60000，fit score为`2.4990567`。
-- H38-B最佳global State/Action RMSE为`0.024991/0.016406`，worst-window为`0.047077/0.025066`，p99/max abs为`0.081572/1.611736`，contact 100%，zero/cross-window/cross-motion latent ratio为`18.83/21.42/24.47`。官方门禁由global State的2.499倍控制。
-- H38-B按新门禁仍FAIL，score为`1.24953`并由global State控制；worst State和p99分别为新阈值的`1.177/1.020`倍。Action、contact和三种latent依赖通过。
-- H38-B相对H38-A的global Action改善约8.0%，但global State几乎不变，worst State和p99分别恶化约12.7%和8.4%。A与B的Mask分布不同，因此该比例只作结构诊断，不能当作严格配对优劣。B中`state_rollout`最难，worst State `0.047077`、max abs `1.611736`。
-- H50-A已从随机初始化训练30k，execution PASS但质量FAIL；run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_20260909_120934`，源码`fd7928f26b1a12dfa6e01218c7defd9d5ffe2166`。最佳点是step30000，fit score `1.03707`；global State/Action为`0.020202/0.015074`，worst State/Action为`0.041483/0.022078`，p99/max为`0.060677/0.715894`，contact 100%，三种latent ratio为`56.32/62.06/70.89`。
-- H50-A只差global State 1.01%和worst State 3.71%；28k/29k/30k score为`1.06244→1.04331→1.03707`，所有主要连续指标仍改善。相对同任务H38-A，H50把global State/Action和p99改善约19.0%/15.5%/19.4%，但worst State只改善0.67%；最差feature全部落在29维joint velocity区间。这支持了一次受控尾段续训，不证明加宽已经解决最坏窗口。
-- H50-A尾段续训已在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256`完成，源码`bf6d14c3848ffc1c544a56195cf07d3a2188c863`。它从原H50-A `last.pt`恢复模型与AdamW，在绝对step 34000因step32000/33000/34000连续三次fit PASS提前结束；`quality_pass=true`，但`strict_memory_pass=false`且`legacy_exact_pass=false`。
-- H50-A已见窗口Action重放已在run `/home/helloworld/bly/runs/cvae_posterior_h50a_seen_window_action_replay_20260913_230317`完整执行，源码`0f39e35424b3d616e52418c20ae8b13e324f81d8`，execution marker与577 KiB三栏MP4完整。它读取step34000 `last.pt`，预注册选择`baby_full_diaper_walk_ff_360_loop_R_001__A462 / variant 0 / start 0 / T64`并使用训练内`full_both`。预测Action的normalized RMSE为`0.015191`，映射后物理RMSE/MAE/p99/max为`0.005441/0.003955/0.017329/0.025134 rad`。
-- 同一reset/runtime context下，原Action重放与预测Action重放的关节位置RMSE为`0.008448 rad`，root位置RMSE `0.003229 m`、root姿态mean/max `0.672°/2.010°`、body MPJPE `0.004635 m`、contact一致率`99.13%`；planned/executed raw Action、两次mapping和两次runtime context的max差均为0。这支持该已见窗口的Action数值记忆及受控重放接近。
-- 训练记录与原Action重放的基线检查FAIL：关节位置RMSE `0.245825 rad`、root位置RMSE `0.251772 m`、root姿态max `106.918°`、body MPJPE `0.418972 m`、contact一致率`77.39%`。因此左栏与中栏的巨大差距属于采集/重放初态、环境或上下文未复现问题；正式物理结论只能比较共享条件的中/右两栏。该实验不检验conditional prior、新Mask、采样或未见motion。
-- 精确初始化复核首次Ubuntu run `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_104705`完成离线准备并选择同一`baby_full_diaper...A462 / variant 0 / start 0 / T64`窗口；checkpoint step34000、初始化payload SHA256为`e5263b782a8707b39ec8f126b34c46cf60bf2ed550a23c288ce92e028aa59865`，预测Action物理RMSE仍为`0.005441 rad`。第一个Isaac进程尚未执行Action就在恢复ground material时失败：当前场景不存在硬编码的`/World/ground/physicsMaterial`。因此该run是`ENGINEERING FAIL`，没有readback、视频或模型质量结论。Windows已修复为创建独立`exactReplayPhysicsMaterial`并绑定到实际Plane/Collision prim；同步后必须创建新run从头重跑，不复用失败目录。
-- 修复后的正式exact-init run `/home/helloworld/bly/runs/cvae_posterior_h50a_action_replay_exact_init_20260914_112412`已经通过：`execution_pass=true`、`initialization_identity_pass=true`、`recorded_action_baseline_pass=true`，结论为`ORIGINAL_AND_H50A_ACTION_REPLAY_PASS_ON_ONE_SEEN_WINDOW`。三份65帧、50 Hz、1.3秒的独立视频及可选三栏视频均已生成；source commit和详细逐轨迹数值尚未回传。该结果证明旧重放的主要问题确实在初始化/环境复现，并支持该单个已见窗口的H50-A posterior Action物理重放；不证明其他motion、conditional prior、新Mask或采样能力。
-- 2026-09-14新增完整episode扩展（代码READY、Ubuntu未执行）：精确初始化改为真正的episode第0帧；original使用整段原Action，H50-A使用“窗口外原Action+窗口内64步预测Action”的混合序列。准备和收尾阶段都强制验证窗口外Action最大差为0；渲染帧数由episode长度决定，底部进度条以红色标记预测区间，并分别报告窗口前、窗口内和窗口后的轨迹误差。该扩展只改变定性视频长度和归因清晰度，不增加模型补全范围。
-- 三个完整episode run随后显示原Action长程开环重放会累计偏差，且一个run初始化身份失败；这不能归因于H50-A。2026-09-14新增可选`replay_scope=window`短程模式（代码READY、Ubuntu未执行），从所选窗口真实S0与前一Action target初始化并只运行64步。下一步只对`body_stretch_v003_001__A362`和`body_stretch_4_002__A054`作额外定性短视频，不把结果升级为conditional prior或随机Mask门禁。
-- `best_fit.pt`停留在首次PASS的step32000：global State/Action `0.019671/0.014758`、worst State/Action `0.039847/0.021575`、p99/max abs `0.058849/0.693393`、contact 100%，zero/cross-window/cross-motion ratio `57.84/63.67/72.73`。step34000的对应连续指标进一步改善到`0.019080/0.014412`、`0.037716/0.021309`和p99 `0.057103`；但fit score通过后下限为1.0，保存条件只接受更低score，因此没有覆盖`best_fit.pt`。当前预注册B合同仍从step32000的`best_fit.pt`做model-only初始化。
-- H50-B已从上述`best_fit.pt`做model-only初始化，在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_fixed_20260910_012003`跑满60k，源码`bf6d14c3848ffc1c544a56195cf07d3a2188c863`。execution完成但`quality_pass=false`，best位于step60000，fit score `1.0192181`；唯一失败项是global State `0.020384`，比`0.02`高1.92%。global Action `0.013908`、worst State/Action `0.034900/0.021335`、p99 `0.066332`、contact 100%及latent ratio `19.48/22.66/25.88`均通过。
-- B在52k→60k的score为`1.72360→1.21865→1.03544→1.02523→1.01922`，所有主连续指标在末段持续改善；但下降速度随学习率衰减而放缓。8类Mask中最难的是`state_rollout`，worst State `0.034900`，已经低于门槛。
-- B没有保持A的full-both能力：同一checkpoint在B step0的full-both State/Action为`0.019671/0.014758`，到step60000变为`0.060442/0.016711`，max abs从`0.693393`恶化到`21.894020`，contact从100%降到`99.9519%`。52k→60k的full-both State仅`0.060971→0.060442`，处于明显平台。由于B训练bank不含full-both且重启高学习率，这构成condition适配伴随的A能力遗忘。
-- H50-R路线已取消：H50-B没有质量PASS，且直接condition融合会破坏H50-A的canonical解码能力。
-- H50-CRA在正式训练前被设计复审判定为错误方向并取消。它会让完整posterior latent始终承担答案、condition只做decoder侧修正，不能回答“Mask条件能否独立预测latent”。CRA没有Ubuntu正式结果，不形成模型结论。
-- H50-CPD代码现已在Windows实现：Mask后的可见序列只进入新的conditional prior encoder，预测一个global和16个local latent；冻结的H50-A decoder只接收这些latent和有效长度，不直接读取可见值或Mask。Ubuntu工程smoke run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_smoke_20260911_022214`已完成2 step并报告`execution complete`；这只证明真实数据/CUDA/训练链路可运行。`quality_pass=false`、`latent_alignment_pass=false`、score `168.52648`及`STOP_CONDITIONAL_PRIOR_LATENT_ALIGNMENT_FAILED`均来自2-step通用质量判断，不构成conditional prior失败结论。source commit和完整marker尚未回传。
+| Mask家族 | fixed masked State / Action RMSE | held-out masked State / Action RMSE |
+|---|---:|---:|
+| state_gap_4 | 0.000739 / — | 0.006718 / — |
+| state_gap_16 | 0.000765 / — | 0.006976 / — |
+| state_rollout | 0.001059 / — | 0.007834 / — |
+| action_gap_4 | — / 0.000481 | — / 0.002939 |
+| action_gap_16 | — / 0.000523 | — / 0.006461 |
+| full_action | — / 0.000775 | — / 0.000775（坐标重合） |
+| joint_gap_2 | 0.000711 / 0.000565 | 0.009210 / 0.005099 |
+| joint_gap_8 | 0.000787 / 0.000554 | 0.039645 / 0.024864 |
 
-- H50-SCVAE正式M-F run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547`已跑满60k，源码`0029f8c637d041dbf9613db0c8b3188e32c09359`；execution marker存在、质量marker缺失并保留`cvae.failed`。最佳点为step60000。prior mean的global State/Action为`0.043838/0.026704`，worst State/Action为`0.074567/0.041620`，p99/max abs为`0.137523/1.299885`，contact 100%，score`2.191880`；posterior mean对应`0.038486/0.023520`、`0.058044/0.034188`、`0.120053/0.999769`、contact 100%，score`1.924321`。
-- q-p对齐不是当前失败项：step60000的global/local标准化RMSE为`0.052575/0.080972`，cosine为`0.999920/0.999921`，alignment gate通过，且`latent_ignored=false`。prior相对posterior只差约14%–28%，而posterior自身仍由global State与p99等指标卡住。因此证据支持“联合均值训练没有先建立可靠的posterior/decoder重建底座”，不支持“只需让prior继续追posterior”或“latent完全没被使用”。最难项集中在State：prior的`state_rollout/state_gap_4/joint_gap_8` worst State为`0.074567/0.063739/0.058842`；posterior对应`0.058044/0.056352/0.054296`。prior的`full_action` Action仅轻微超门槛，为`0.041620`。
-- 56k→58k→60k的joint score仅`2.22781→2.20783→2.19188`，末段仍改善但速度很慢，且学习率已经接近调度下限；原样延长不足以形成有区分力的实验。M-R、KL和直接续训继续阻断。
+“—”表示零目标，不能解释为零误差。state_rollout给定整段Action，不是严格因果逐步rollout。
+full_action完整State可见，本次没有“State和Action全部隐藏”的训练任务；
+因此本次不支持“全无条件补全太苛刻”的解释。
 
-H50-CPD固定读取H50-A续训run的step34000 `last.pt`。51,005,283参数的H50-A teacher/base与decoder先全部冻结；新增6层、宽448的conditional prior共14,779,456参数，总计65,784,739参数。teacher以完整序列产生canonical latent作为监督，student以Mask序列预测同拓扑latent，再由严格canonical decoder接口输出完整序列。
+### 4.2 训练趋势与局部尾部
 
-正式P0/P1/P2首次启动曾在step0因PyTorch大张量`quantile()`限制停止，且没有optimizer更新；修复后正式run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_train_20260911_023356`已跑满50k，源码`e7522c9f6262d02cc9fbaa7eee89e0104530377f`。execution和latent marker存在，质量marker为`cvae.failed`；H50-A源checkpoint SHA256为`18bfc7be...bae2`，teacher cache为`d76d9d65...fd24`，冻结base前后hash一致且无梯度，last checkpoint读回SHA256为`f0b228ab...355e`。
+| step | fixed masked选择MSE | held-out masked选择MSE |
+|---|---:|---:|
+| 2000 | 7.580342e-4 | 2.793537e-3 |
+| 5000 | 1.242308e-4 | 1.083487e-3 |
+| 10000 | 3.192058e-5 | 4.100892e-4 |
+| 15000 | 1.462790e-6 | 1.741985e-4 |
+| 18000 | 7.242458e-7 | 1.705905e-4 |
+| 20000 | 5.293105e-7 | 1.695675e-4 |
 
-CPD的latent门禁连续三次通过，最终global/local标准化RMSE为`0.04757/0.07825`、cosine为`0.99898/0.99732`、相对cross-window/cross-motion donor误差比为`0.06404/0.05424`；best latent在step50000、score`0.95255`。但重建明显失败：最终held-out随机Mask global State/Action为`0.10133/0.06431`、worst-window为`0.67653/0.47690`、p99`0.35953`、contact`99.9699%`，score`16.9132`；固定物理Mask对应`0.07018/0.04200`、`0.41619/0.22672`、p99`0.23126`、contact`99.9989%`，score`10.4047`。best joint在step48000、score`16.8382`。最终三次几乎平台，不能靠继续P2合理外推到门禁。
+15k→20k fixed改善63.81%，held-out仅改善2.66%；
+held-out最小值在14500步为1.683863e-4，最终约高0.70%。
+因此固定记忆仍变好，但新Mask迁移已接近平台；不能把原样增加fixed步数视为已经有证据的主要解法。
 
-最难随机Mask为`random_both_90`，worst State/Action`0.67653/0.47690`；固定Mask最难为`joint_gap_8`，为`0.41619/0.22672`。teacher保持始终PASS，student latent替换ratio最终为`13.74/15.08/17.25`。这支持“prior latent已接近teacher，但原decoder对off-manifold小偏差敏感”，不支持“conditional prior已经能良好补全”。full-both prior为无信息诊断，State/Action`1.38375/1.16703`，不控制PASS。正式唯一下一步为预注册D1 latent接口适配。
+held-out最差为fixture55/window6：variant1、start64、joint_gap_8家族。
+实际隐藏Action t37..46（10步）、State t38..46（9帧），而fixed此家族为8步Action缺口。
+该fixture masked State/Action RMSE为0.120357/0.074133，
+贡献整个held-out bank各域masked平方误差的51.73%/59.58%。
+masked State最大点为t38的joint_vel_14，0.682880归一化误差约对应0.748559 rad/s；
+masked Action最大点为t37的action_17，0.250162归一化误差约对应0.0319165 rad。
 
-D1随后在run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_prior_h50_cpd_adapt_20260911_184842`启动，源码`0315b7d13780eeacb5937cc2bad78be2df964708`，从正式CPD `best_latent.pt`（SHA256 `555d2af2...2fcc`）model-only初始化。第一次训练后完整评测step2000即触发保护并安全停止；只完成2k而非12k，last checkpoint读回SHA256为`c2f7d8db...519f`。唯一失败check是current/reference decoder输出的functional State RMSE `0.0021167>0.002`，超5.84%；functional Action`0.0010045`、p99`0.006774`、contact一致性和全部teacher真值指标仍PASS，故没有“明显真值能力遗忘”的证据，但按预注册硬门禁必须拒绝。
+该处同时移位且加长，当前证据不能拆分“新位置”“新长度”和局部运动难度各自的作用。
+full max的两个最大元素反而可见，说明新Mask也能扰动网络在缺口外的原始输出；
+正式回放必须保留可见值，但这并不能修复隐藏区域自身的0.682880/0.250162尾部。
 
-D1 step2000并未改善student主任务：随机Mask score由`16.9132`恶化至`18.2707`，固定Maskscore由`10.4047`改善至`9.8390`，latent仍单点评测PASS但global/local误差从`0.04757/0.07825`轻微恶化至`0.04860/0.07869`。summary的最终`latent_alignment_pass=false`只因不足三次评测；best仍为step0。正式结论为`STOP_DECODER_ADAPTATION_REJECTED`：不延长、不原样重跑D1，不进入D2/KL。该结果支持重新审查“teacher latent的欧氏/cosine接近是否等价于decoder可用”，下一方案必须保持Mask信息只能经latent传递。
+step19500的依赖性消融使用variant0的4个不同窗口、相同state_gap_4家族：
+基线full State/Action MSE为3.35e-7/1.83e-7；
+global置换为3.11e-5/2.56e-5，local置换0.740/0.321，
+condition memory置换0.00181/0.00158，FiLM置零0.637/0.485。
+这些结果支持相关路径确实影响重建，不支持“latent完全没使用”；
+消融仅测局部依赖性，不能排名模块重要性或证明latent对全部任务表达充分。
 
-F4G smoke报告语义修复的历史提交为`2feab9687ee8f91d48cb9425fb4c28ed697f8bde`。H50-SCVAE实现当前位于Windows工作树；正式Ubuntu run仍以用户同步后由run写入的`source_commit.txt`为准，不预填提交号。
+### 4.3 结论分级
 
-固定推进顺序：
+已验证：独立condition-only链路能够高度拟合这16窗口的128固定fixture；
+日志、分区指标、尾部定位和读回比只看full loss更充分。
+fixed数据量小且只含1 motion，不能与A全32-motion误差直接比较并宣称B优于A。
 
-```text
-H38-A 完整序列重建（已FAIL，仅作latent压力诊断）
-→ H38-B 固定物理 Mask（已FAIL）
-→ H50-A 30k参数规模复核（近门槛FAIL，末段仍改善）
-→ H50-A受控续训（step 34000三连fit PASS）
-→ H50-B固定Mask（60k；仅global State超1.92%，但full-both明显遗忘）
-→ H50-CRA（CANCELLED/SUPERSEDED，未正式运行）
-→ H50-CPD smoke（工程PASS；无质量结论）
-→ P0/P1/P2冻结decoder蒸馏（50k完成；latent PASS、重建FAIL）
-→ D1受控latent接口适配（step2000触发teacher保持拒绝，已停止）
-→ CPD/D1/CRA统一标记SUPERSEDED，不再续训
-→ H50-SCVAE smoke（工程PASS；无质量结论）
-→ M-F原8类固定物理Mask均值训练（60k完成；q-p对齐PASS，q/p重建均FAIL）
-→ H50-A单个已见full-both窗口Action物理重放（execution PASS；Action与受控轨迹接近，训练记录重放基线FAIL）
-→ H50-A同窗口exact-init三次独立视频复核（正式PASS；单窗口posterior Action重放成立）
-→ M-F2分阶段均值课程设计（exact-init回填后的下一步；尚未实现或执行）
-→ M-R动态单缺口及2–3个物理多缺口均值训练（BLOCKED）
-→ K1标准KL与posterior mean/sample、prior sample三条独立路径对照
-```
+候选原因：每窗口每family只见一种固定Mask，模型对缺口坐标／长度适应不足；
+联合缺失State与Action比单域缺失更易暴露这种局限。
+当前不优先支持参数容量不足，也不能把所有误差归因于训练步数不够。
 
-H38-A不再是H38-B的硬门槛：A的全遮挡任务信息更少，只用于latent压力诊断。H50-A显示约32%的参数增长显著降低平均State与p99，但最差State窗口几乎未变。15k续训是针对“只差3.71%且末段仍单调改善”的一次预注册例外；不允许再追加第二次续训或H64阶梯。
+尚缺证据：同16窗口动态训练后的迁移表现、多motion规模下的固定记忆、
+同窗口同长度只移位对照、原始Action基线及模型物理回放。
+上述证据补齐前不换loss、latent、pooling或模型宽度。
 
-## 2. 固定研究合同
+## 5. B-dynamic：20k回传审核
 
-### 2.1 我们正在验证什么
+run：`/home/helloworld/bly/runs/cvae_v2_B_dynamic_w16_s20000_HlVrXXXJ`。
+回传：`C:/Users/86136/Desktop/replay/B dynamic 16`。
+诊断包1,361项hash匹配；10个相关源码hash与Windows一致；两bank各128fixture的内容hash均通过。
+归一化与16窗口身份和B-fixed一致，step0精确复现B-fixed最后的两bank评测。
+固定bank hash为 `125ae17a3ac98989035dc19be7530fece8591f1b88357d096d64984aa9579fb8`，
+另一bank为 `f755b53cce35a34b692381f7c2e8960f0f5973fcd6946b53456f5bba4b936635`。
+这也补齐了上次报告缺少bank坐标的证据。
 
-早期阶段验证posterior reconstruction capacity：posterior encoder读取完整真值并编码latent。当前H50-SCVAE改为标准联合训练：posterior读取完整序列与当前Mask，conditional prior只读取Mask后的可见序列，二者分别产生latent并用同一decoder参数独立重建；decoder还读取真实masked condition，但永远看不到被遮挡真值。
+从B-fixed step20000 best.pt做model-only初始化，重新建立AdamW/调度器；
+新run局部step20000，source checkpoint另记20000，不能将当前cumulative_step字段当作全谱系训练总数。
+KL=0，20000条记录posterior调用0、condition调用1，无非有限顶层数值，读回通过。
+配置micro_batch32，但**实际每步batch16**：dynamic sampler仅16个window且不跨epoch补齐batch。
+实际暴露320000，不是640000；此前启动说明对实际batch的预期需以此更正。
+这不是梯度丢失，但固定→动态比较同时受额外训练、优化器重启、调度及实际batch变化影响，
+因此只能确认本轮方案有效，不能将全部改善严格归因于Mask变量。
 
-因此：
+| 指标（normalized masked） | B-fixed末点另一bank | B-dynamic末点同bank |
+|---|---:|---:|
+| State RMSE | 0.01348454 | 0.00058543 |
+| Action RMSE | 0.00778734 | 0.00039055 |
+| State p99 | 0.04381449 | 0.00200471 |
+| Action p99 | 0.02752260 | 0.00120443 |
+| State max | 0.68288028 | 0.00665534 |
+| Action max | 0.25016236 | 0.00350285 |
+| masked contact accuracy | 100% | 100% |
+| joint_gap_8家族 State / Action RMSE | 0.03964516 / 0.02486406 | 0.00083416 / 0.00057132 |
 
-- 历史posterior通过只证明模型能记住并解码已见序列，不能证明只看Mask条件也能补全。
-- SCVAE的prior路径通过才支持“已见序列上的物理Mask条件能够形成可用层级latent并完成补全”；posterior只参与训练和评测，最终推理不调用它。
-- 通过不能证明未见 motion 泛化。
-- `KL=0` 时不要求 latent 接近某个可随机采样的分布，也不能把随机 latent 当作有效生成结果。
-- 只有后续 conditional prior 在不读取被遮挡真值时通过，才可以讨论真实的条件生成能力。
+另一bank整体State/Action RMSE下降95.66%/94.98%，max下降99.03%/98.60%。
+原异常fixture55的masked State/Action RMSE由0.120357/0.074133降至0.001134/0.000848；
+其masked max为0.005328/0.003411。其余联合缺口也改善，不是仅修复一个点。
+与原fixed坐标不同的109fixture最终masked State/Action为0.00056758/0.00039835；
+“new”标签仅指与原fixed不同，不能证明未被dynamic抽到。
 
-### 2.2 数据与序列
+原fixed bank最终masked State/Action RMSE为0.00073464/0.00037982，max为0.00835478/0.00330624；
+没有固定记忆持续退化的证据。前期warm-up附近有反弹，之后恢复。
+best按fixed分数在19500步，另一bank最佳为最后20000步：
+19500→20000 fixed选择MSE仅恶化0.385%，同时full loss和另一bank选择MSE改善。
+因此末次 `masked_worsens_while_full_improves` 是小幅指标分歧告警，不是训练崩溃；
+保留best/last，不需为消除这条告警而追加训练。
 
-训练数据固定来自：
+step19500的global/local/memory/FiLM消融仍显示重建依赖，范围仅4个窗口。
+训练工程完整；小数据集条件链路与动态Mask适应能力获得支持，
+不证明多motion容量、动作物理可行或最终CVAE随机生成。
 
-```text
-/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
-```
+## 6. 下一步：32-motion B-fixed预算与人工评估标准
 
-该子集包含 32 个 motion，每个 motion 有 8 个 completed variant，共 256 个 episode；全部属于记忆基准，不是独立验证集。
+建议从随机初始化开始，不从16窗口checkpoint热启动：当前训练初始化严格要求相同窗口身份，
+直接加载会明确报identity mismatch。不要用legacy开关绕过已知不匹配。
+当前默认配置 `configs/posterior_hierarchical_standard_cvae_h50.json` 已为65-token架构；
+data为T64、stride64、max_windows=null、max_episodes256。
+实际窗口由数据索引决定，motion_count字段本身不执行抽样；启动前核对32 motion、256 episode、
+预计1504窗口，并由完整selected_windows和fixture表记录覆盖。
 
-序列关系固定为：
-
-```text
-S0, A0, S1, A1, ..., A(T-1), ST
-```
-
-其中 `State_t + Action_t → State_(t+1)`。State 为 70 维：68 个连续物理量和 2 个脚接触标签；Action 为 29 维关节目标。数据频率为 50 Hz，所以 T64 约覆盖 1.28 秒，T128 约覆盖 2.56 秒。
-
-历史 T16/T128 实验使用各自固定窗口；当前 H38 路线固定为 T64、stride 64、`random_crop=false`。
-
-### 2.3 模型代际
-
-| 代际 | 核心结构 | 参数/记忆形式 | 用途 |
-|---|---|---:|---|
-| 最简 posterior Transformer | 共享双向 encoder + 单 global latent + 双向 decoder | 6.7M，latent 256 | 验证最小结构能否记忆小数据 |
-| 25M posterior Transformer | encoder 6层、decoder 8层、宽度384 | 25,453,411，单 latent 256 | 检验扩大统一模型后的容量 |
-| F4C gated decoder | 在原 decoder 每层重复加入 global latent | 25,456,483 | 检查 latent 只注入一次是否是问题 |
-| F4E auto-decoder | 每个 window 直接学习一个共享256维 code，绕过 encoder | 80×256 code + 原 decoder | 区分 encoder 问题与 code/decoder 问题 |
-| F4F-G8 | 每个 window 学8个256维 memory token | 每窗口2,048个 code 标量 | 检查多个全局 token 是否更易广播信息 |
-| F4F-T129 | 每个 window 的每个时间位置学习16维 code | 每窗口2,064个 code 标量 | 检查时间局部注入是否更合适 |
-| F4G / F4G-O direct output | 每个 window 对应完整 State/Action/contact 输出；F4G梯度学习，F4G-O直接复制真值 | 无 encoder、latent、decoder | 分开验证稀疏查表优化和解析 evaluator 上限 |
-| H38 hierarchical | 独立 posterior/condition encoder + global/local latent + cross-attention/FiLM decoder | 37,574,883 | 历史T64层级容量实验 |
-| H50-A | H38同结构，宽度扩大到448 | 51,005,283 | 已通过canonical posterior autoencoding fit |
-| H50-CPD | 冻结H50-A + 独立conditional prior；canonical decoder不读condition | 65,784,739 | `SUPERSEDED`历史蒸馏路线 |
-| H50-SCVAE | 联合训练q/p/condition encoder/共享decoder；q/p分开解码 | 66,129,571 | 当前标准conditional VAE路线；最终仅prior推理 |
-
-H38 的 latent 为一个 256 维 global code 加 16 个 128 维 local code；每个 local code覆盖4个 transition。decoder 的每一层都能读取条件和17个 latent token，并再次接收 global/local FiLM 条件，避免所有时序细节只通过一个输入 token 传播。
-
-### 2.4 Mask 合同
-
-早期纯容量实验使用10类固定 Mask，包括完整 State、完整 Action、完整 State+Action以及 element/time/feature/semantic Mask。这些 Mask 只用于检验记忆和查询能力，不要求条件在物理上唯一可辨识。
-
-H38/H50-B使用8类物理结构 Mask：
-
-| Mask | 可见信息与目标 |
+| 项目 | 本轮建议 |
 |---|---|
-| State gap 4/16 | 遮挡连续 State，保留两侧边界和对应 Action |
-| State rollout | 只保留 S0 和全部 Action，预测后续 State |
-| Action gap 4/16 | 遮挡连续 Action，保留完整 State 和缺口前历史 |
-| Full Action | 完整 State 可见，遮挡全部 Action |
-| Joint gap 2/8 | 同时遮挡短 Action 段和内部 State，保留前后 State 边界 |
+| stage / Mask / 初始化 | B / fixed / 随机；不调用Posterior、不开KL |
+| 数据 | 同32-motion数据集全部1504个T64窗口；每窗口8类fixture，共12032 |
+| 预算 | 上限120000步，batch32；预计384万样本暴露，每fixture约319次 |
+| LR | warm-up2000到1e-4，cosine最终1e-6；原loss、weight decay和结构不变 |
+| 工程记录 | 每步JSONL不裁剪；50步控制台；500步last；5000步完整双bank评测 |
+| 中间审核 | 30k / 60k / 90k / 120k；新run启动前及step0核对身份、fixture数和路由 |
 
-当前SCVAE的M-F使用这8类固定Mask。M-R只扩展为这些物理Mask的动态起点/长度，以及2–3个互不重叠、间隔至少一个完整可见transition的物理缺口；禁止独立散点、feature/element、full State与full both。独立seed的held-out bank每窗口含8个动态单缺口、4个双缺口和4个三缺口。它仍不是未见motion泛化实验，也不声称穷举全部Mask组合。
+窗口/fixture规模比小fixed增加94倍，预算只增加6倍；不能保证120k达到小实验约1e-3的精度。
+本轮检验更宽松的规模推进标准，而不是要求复制小实验完美记忆。
+无证据支持仅为追求等暴露直接训练约188万步；先用中间曲线判断是否需要受控延长。
+全窗口采样为window均匀，不是motion严格等权；完整覆盖全部motion/variant，
+后续若某motion显著支配误差，单独报告其窗口数与误差，不能悄悄改采样分布。
 
-### 2.5 Loss、指标与门禁
+建议在启动前记录人工审核协议 `B32-fixed-review-v1`，以下均为normalized、有效元素统计：
 
-训练 loss 固定为存在项等权平均：
-
-```text
-State continuous MSE + Action MSE + contact BCE
-```
-
-指标含义：
-
-- RMSE：整体误差的平方均值开根号，越小越好。
-- max abs：所有连续输出中的最大单点绝对误差。
-- p99 abs：99%的连续误差都不超过的值，比单个最大值更稳定。
-- contact accuracy：左右脚接触分类正确率。
-- latent dependence：正确 latent 相比置零或换成其他窗口 latent 能改善多少倍；至少10倍才认为模型确实依赖 latent。
-
-三套门禁互不替代：
-
-| 门禁 | State/Action要求 | 尾部要求 | contact/latent | 用途 |
-|---|---|---|---|---|
-| `fit` | global RMSE≤`2e-2`；每类 worst-window RMSE≤`4e-2` | p99 abs≤`8e-2`；max只报告 | contact 100%；H38/H50 latent ratio≥10 | 当前规模推进 |
-| `strict_memory` | worst RMSE≤`1e-2` | max abs≤`1e-2` | contact 100%；latent ratio≥10 | 更严格诊断 |
-| `legacy_exact` | worst RMSE≤`1e-4` | max abs≤`1e-3` | contact 100%；latent ratio≥10 | 历史近无损标准 |
-
-`progression` 或 `fit` PASS 只能表述为“达到推进精度”，不能称为完美拟合。execution marker只说明程序完整执行，不说明质量通过。
-
-## 3. 正式实验结果
-
-### 3.1 6.7M 最简模型：先证明小规模可记忆
-
-| ID | 数据/训练 | 关键结果 | 状态与意义 | 正式 run |
-|---|---|---|---|---|
-| F1 | 1 motion、T16、全部144窗口、40k | State/Action `0.05842/0.02495`，max `0.75203` | `INVALID`：训练与评测的7类partial Mask坐标不同，只能视为新Mask诊断，不能证明fixed记忆失败 | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_114833` |
-| D1 | 1 motion、T16、单窗口、10 Mask、34k | State/Action `4.719e-5/8.075e-5`，max `2.255e-4`，contact 100%，zero/swapped `10342.86/54.62` | `PASS legacy_exact`：证明单窗口可以被单global latent模型近乎无损记住 | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_w1_20260831_150654` |
-| F1R | 1 motion、T16、144窗口、40k | State/Action `0.003641/0.002903`，max `0.017851` | `FAIL exact`：平均已很低，但最差单点仍未达到旧严格门禁 | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_20260831_202012` |
-| W4 | 1 motion、T16、4窗口、40k | State/Action `1.610e-4/1.194e-4`，max `6.158e-4` | `FAIL exact / PASS progression诊断`：非常接近exact，说明暴露次数对小数据记忆很重要 | run路径未完整回传，保留为待补充 |
-| P1 | 1 motion、T16、144窗口、最多100k | State/Action `0.002243/0.001460`，max `0.009938`，zero `610.99` | `PASS progression`：6.7M模型能在较长训练后达到推进精度，但不是完美拟合 | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t16_s100000_gprogression_20260901_105145` |
-
-这一阶段证明：模型不是完全没有记忆能力；随着窗口数增加，要同时压低所有位置的误差会明显变难。
-
-### 3.2 25.45M 单 global latent：扩大数据后的瓶颈
-
-| ID | 数据/训练 | 关键结果 | 状态与意义 | 正式 run |
-|---|---|---|---|---|
-| L128 | 1 motion、T128、24窗口、240 fixtures、93.5k | State/Action `0.002302/0.001533`，max `0.009942`，zero `469.56` | `PASS progression`：较大模型能记住一个motion的长窗口 | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m1_t128_25m_s100000_gprogression_20260901_173153` |
-| F128 | 32 motion、T128、816窗口、200k | State/Action `0.261443/0.273665`，max `9.644091`，contact `99.9958%`，zero/swapped `12.06/7.91` | `FAIL`：从1个motion直接扩到32个后明显失效；不能归因于训练步数太少 | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m32_t128_25m_s200000_gprogression_20260902_235140` |
-| F4D | 4 motion、T128、80窗口、100k | worst State/Action `0.023021/0.015263`，max `0.215620`，global约`0.009149/0.008118` | `FAIL`：平均误差已过`1e-2`，但大量局部位置仍不够准 | `/home/helloworld/bly/runs/cvae_posterior_capacity_fixed_m4_t128_25m_s100000_gprogression_20260904_190425` |
-| F4A | 只读重评 F4D 的80窗口×10 Mask | `21.077%`连续目标超过`1e-2`；全部fixtures都含超阈值元素 | `PASS execution`：支持“广泛的时序细节误差”，不是少数离群点造成 | `/home/helloworld/bly/runs/cvae_posterior_capacity_tail_diagnostic_f4a_20260905_200807` |
-
-这一阶段支持：25M参数本身不足以保证长序列、多motion的均匀精确重建；主要问题出现在大量时序细节，而不是contact分类。
-
-### 3.3 损失和注入方式对照：没有找到简单修补方案
-
-所有F4B/F4C实验固定使用4 motion、T128、80窗口、800 fixtures，从同一个F4D checkpoint开始。
-
-| 实验 | 改动 | worst/global State | worst/global Action | max / 超`1e-2`比例 | 结论 |
-|---|---|---:|---:|---:|---|
-| A | 继续普通MSE | `0.015999/0.008425` | `0.014238/0.007545` | `0.137220 / 18.456%` | 10k后仍FAIL |
-| B | 每个域混合普通MSE与最差20%误差 | `0.016398/0.008444` | `0.014550/0.007629` | `0.130564 / 20.718%` | max略降，但整体没有受保护的显著改善 |
-| C | decoder 8层逐层加入global latent gate | `0.019039/0.008196` | `0.013908/0.007330` | `0.171898 / 17.379%` | 部分平均项改善，最差误差恶化，仍FAIL |
-
-正式run：
-
-```text
-A: /home/helloworld/bly/runs/cvae_posterior_capacity_ab_a_seed20260830_20260906_114634
-B: /home/helloworld/bly/runs/cvae_posterior_capacity_ab_b_seed20260830_20260906_203844
-C: /home/helloworld/bly/runs/cvae_posterior_capacity_ab_c_seed20260830_20260907_004301
-A/B compare: /home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260906_235429
-A/B/C compare: /home/helloworld/bly/runs/cvae_posterior_capacity_ab_comparison_20260907_102553
-```
-
-最终比较的13项配对身份检查通过；B/C均未达到受保护的20%改善条件，正式决定为 `STOP_LOSS_LATENT_SEED_SEARCH`。这说明当前证据不支持继续搜索相似loss、gate或随机seed。
-
-### 3.4 绕过 encoder 的容量诊断
-
-#### F4E：每窗口一个256维code
-
-F4E允许按window identity查表，但同一window的10种Mask必须共享一个code；这只是诊断，不是可部署模型。
-
-| 阶段 | 训练参数 | 结果 |
-|---|---|---|
-| E1 | 只训练80个window code，5k | 未通过 |
-| E2 | code与decoder联合适配，再15k | worst/global State `0.029776/0.008951`；Action `0.020474/0.007856`；max `0.209413`；`19.679%`元素超阈值 |
-
-zero/cross-window/cross-motion code依赖为`95.65/94.85/119.93`，证明decoder确实在使用code；但E1/E2均未通过，所以尚无证据表明“单个256维共享code + 当前decoder”足以精确记住80个T128窗口。
-
-正式run：`/home/helloworld/bly/runs/cvae_posterior_capacity_autodecoder_f4e_20260907_120414`
-
-#### F4F：等code预算的全局与逐时间拓扑
-
-| Arm | code布局 | worst/global State | worst/global Action | max / 超阈值比例 | code依赖 | 状态 |
-|---|---|---:|---:|---:|---:|---|
-| G8 | 8个全局memory token | `0.071671/0.018158` | `0.043046/0.013475` | `0.710758 / 39.456%` | `42.80/43.25/54.69` | FAIL |
-| T129 | 129个逐时间16维code | `0.117395/0.040533` | `0.065137/0.025330` | `2.909683 / 53.122%` | `18.94/16.58/20.97` | FAIL |
-
-两臂每window code预算只差0.775%，训练身份和18项比较合同全部一致。G8明显好于T129，但两者最后三个评测点都没有通过，因此不能选择G8继续推进，也不能声称“逐时间latent一定更好”。
-
-正式run：
-
-```text
-G8: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_g8_20260907_184707
-T129: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_t129_20260907_213123
-compare: /home/helloworld/bly/runs/cvae_posterior_capacity_latent_topology_f4f_comparison_20260908_000708
-```
-
-正式结论为 `BOTH_FAIL_LATENT_TOPOLOGY_INSUFFICIENT`，因此停止继续延长F4F训练，转向F4G直接输出上限和新的T64层级模型。
-
-### 3.5 当前 T64 路线
-
-| ID | 数据与结构 | 预算/门禁 | 当前状态 | 通过后的唯一动作 |
-|---|---|---|---|---|
-| F4G | 32 motion、T64；1,504张独立答案表从零优化 | 5k，每250评测 | `FAIL quality`；best score `110.4097` | 不续训；执行F4G-O |
-| F4G-O | 将1,504个window真值直接复制到共享答案表 | 0 optimizer step；完整bank重复评测3次 | `PASS fit`；best score `1.0` | H38 smoke |
-| H38 smoke | 前2个window、层级37.57M模型 | 2 step，仅工程合同 | `PASS engineering` | H38-A |
-| H38-A | 32 motion、T64、full-both posterior autoencoding | 30k，每1k评测 | `FAIL quality`；best global S/A `0.02495/0.01784`，worst S/A `0.04176/0.02536`，p99 `0.07524` | 无论质量结果均进入H38-B |
-| H38-B | 从A的best checkpoint model-only初始化，8类固定物理Mask | 60k，每2k评测 | `FAIL quality`；best global S/A `0.02499/0.01641`，worst S/A `0.04708/0.02507`，p99 `0.08157` | 一次H50-A规模复核 |
-| H38-R | 从同profile的B初始化，动态物理Mask训练，固定held-out Mask评测 | 30k，每2k评测 | BLOCKED；H38-B无fit marker | 仅B质量PASS后冻结KL=0基线 |
-| H50-A复核 | H38同结构扩至51.01M；full-both、随机初始化 | 30k，每1k评测 | `FAIL quality`；score `1.03707`，仅global/worst State略超 | 受控续训15k |
-| H50-A续训 | 恢复H50-A `last.pt`的模型和AdamW；低LR尾段重启 | 最多15k，每1k；三连PASS提前停 | `PASS fit`；best checkpoint step32000，step34000三连PASS后提前结束；strict/exact FAIL | H50-B |
-| H50-A Action重放 | step34000 posterior、已见variant0/start0/T64、full-both；原/预测Action分别重放 | 不训练；离线误差、两次受控Isaac重放及三栏MP4 | `PASS execution`；物理Action RMSE `0.005441 rad`，原/预测重放关节RMSE `0.008448 rad`；训练记录/原重放基线FAIL | 只作记忆可视化；回到M-F2设计 |
-| H50-A exact-init重放 | 历史run为同一已见T64窗口；现已扩展为完整episode，H50-A只替换其中64步 | 不训练；三份独立MP4、首帧/context readback、窗口外Action恒等与分区误差 | 历史65帧run已`PASS`；完整episode三motion待Ubuntu执行 | 完成定性视频后回到M-F2 |
-| H50-B | 从续训`best_fit.pt` model-only初始化；8类固定物理Mask | 60k，每2k；三连PASS提前停 | `FAIL quality`；仅global State `0.020384`超1.92%，但full-both State退化到`0.060442` | 设计保留A能力的B修复，不进入R |
-| H50-R | 从H50-B继续旧condition融合 | 原计划最多30k | `CANCELLED`；B会遗忘A且无fit marker | 不再执行 |
-| H50-CRA | 冻结H50-A、decoder侧差分condition adapter | 未正式训练 | `CANCELLED/SUPERSEDED`；不能检验Mask条件能否预测latent | 删除训练入口，不形成结果 |
-| H50-CPD | Mask序列→新conditional prior→global+16 local→冻结canonical decoder | P0/P1/P2正式50k | latent PASS但重建FAIL；best joint score 16.8382 | `SUPERSEDED`；D1也已拒绝，不再续训 |
-| H50-SCVAE smoke | 标准q/p；真实masked condition；共享decoder分开解码 | 2-step工程自检 | `PASS engineering`；run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_smoke_20260912_015255`；质量未评定 | 从H50-A重新启动正式M-F |
-| H50-SCVAE M-F | 同一标准q/p和共享decoder；原8类固定物理Mask | 60k，每2k完整评测 | `FAIL quality`；step60k prior/posterior score `2.19188/1.92432`，alignment PASS、latent未忽略；run `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_20260912_015547` | 设计M-F2分阶段课程；M-R/KL保持阻断 |
-
-### 3.6 正式结果源码审计
-
-source commit只用于复现实验，不用于替代run内的dataset、fixture和checkpoint hash。未回传项保持未知：
-
-| 实验 | source commit |
+| 检查 | 规模推进参考标准 |
 |---|---|
-| F1 | `fcdb4f8861e539e3ea364e578d6bc96ce7ebd9b0` |
-| D1 | 未回传 |
-| F1R / W4 | `b3aa63d9514cd8dd284e7f6091fc26877f57f021` |
-| P1 / L128 | 未回传 |
-| F128 / F4D | `6463b2ec960cda22c7ed70814a46a44e6804d4c0` |
-| F4A | `2ff1ec95db72fed9db80d3b040cccc32b3f9703f` |
-| F4B A/B及首次比较 | `c1ae5f79111bf61ddace32073df8122dbbefec95` |
-| F4C正式 | `163be1f4c40c46bbd5c680b7ac1711e87f382e97` |
-| A/B/C最终比较 | `8fbe327c487c66482ba4ece6912c8f76bab3720b` |
-| F4E正式 | `cfb6735b54f56e49977665948397f80855987d74` |
-| F4F G8正式 | `8012b972b5d842f3196586eb995c963fb6dda06d` |
-| F4F T129及最终比较 | `6e7caed535721a5ee575b80eba138cb6e392152e` |
-| F4G正式 | `2feab9687ee8f91d48cb9425fb4c28ed697f8bde` |
-| F4G-O | 未回传 |
-| H38 smoke | 未回传 |
-| H38-A正式 | `a0a7f7e0efce25f1184fc522536c15eabe6e3b5b` |
-| H38-B正式 | `c5932690f43b478fb05687ccf58e6834b0243a32` |
-| H50-A正式 | `fd7928f26b1a12dfa6e01218c7defd9d5ffe2166` |
-| H50-A续训 | `bf6d14c3848ffc1c544a56195cf07d3a2188c863` |
-| H50-B | `bf6d14c3848ffc1c544a56195cf07d3a2188c863` |
-| H50-CPD正式 | `e7522c9f6262d02cc9fbaa7eee89e0104530377f` |
-| H50-CPD D1 | `0315b7d13780eeacb5937cc2bad78be2df964708` |
-| H50-SCVAE smoke | 未回传；待读取run内`source_commit.txt` |
-| H50-SCVAE M-F | `0029f8c637d041dbf9613db0c8b3188e32c09359` |
-| H50-A Action重放 | `0f39e35424b3d616e52418c20ae8b13e324f81d8` |
+| pooled masked连续误差 | State RMSE≤0.01，Action RMSE≤0.01 |
+| 各Mask家族 | 每个有目标的State/Action域micro RMSE≤0.02；零目标不作零误差 |
+| 窗口分布 | 各家族有目标window的masked RMSE p95≤0.03 |
+| 元素尾部 | pooled masked State/Action p99≤0.05；max、超0.1比例、最差坐标与物理误差单独审核，不设max硬门禁 |
+| contact | masked contact accuracy≥99.9%；保存计数，零目标家族排除 |
+| 稳定性 | 最后连续3次完整fixed评测达到上述数值条件；另审核末段趋势与最差样本 |
 
-## 4. 工程验收摘要
+这些是拟采用的研究推进阈值，不是已有生物力学/物理安全标准，也不是代码内自动门禁。
+当前quality_pass仍会为null，best.pt仍按原family等权masked MSE选择；不能修改marker来伪装已通过。
+另一bank只作Mask迁移诊断，不作为本轮fixed记忆失败的单独否决项；
+动态训练阶段另作对比，不能把训练内固定能力与新Mask能力混为一谈。
 
-S0、S25、F4B A/B/C、F4E、F4F G8/T129、F4G、H38及H50-SCVAE均执行过对应smoke。SCVAE smoke run为`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_h50_fixed_smoke_20260912_015255`，完成2 step并由Shell验证smoke marker；`quality_pass=false`和score `111.3966`没有质量含义。有效smoke只证明相关数据读取、真实CUDA前向/反向、短训练、完整评测、checkpoint读回和marker链路能够运行，不提供模型容量结论。
+若最后约20k主指标仍改善至少10%、尾部没有恶化且接近参考标准，可人工审核同协议保留AdamW的
+30k～60k延长；否则先诊断family/window覆盖与可见／隐藏误差，不默认追加步数或扩大网络。
+这个10%是预算决策参考，不替代质量阈值；边界情况与非单调波动必须看完整曲线。
+工程错误停止，质量告警不自动停止或改LR。
+B-fixed通过后再启动同32-motion的B-dynamic；回放继续独立待执行。
 
-历史上发现并修复了三类协议/报告问题：F1的fixed训练与评测Mask seed不一致；F4E smoke误把“质量门禁不适用”报告成根因失败；F4F G8 smoke最初使用了错误的学习率配置键。它们均已修复或隔离，不得作为模型优劣证据。
+## 7. 记录与精简回传
 
-H50续训首次启动在训练前被准入检查拦截：旧summary的末三点评测对象没有稳定携带step字段，step实际位于`metrics.jsonl`外层。现改为从源JSONL核对`28000/29000/30000`并校验其score与summary一致；该次没有执行optimizer step，不形成模型结论。
+本轮B-dynamic回传解压472,447,630字节，evaluations占444,017,344字节（约94%）；
+主要是每次重复保存完整曲线和诊断，不能用删除源训练日志解决。
+32-motion降低完整评测频率至5000步，共25次含step0；仍完整评测全部fixture，两bank不抽样。
 
-Windows代码READY或测试PASS只表示接口和静态合同通过，不写入正式实验结果表。旧 H50/SCVAE 测试只作为历史记录；当前目标测试覆盖 65-token shape、terminal Action、Mask 隔离、hard chunk、阶段冻结、标准正态推理和新 checkpoint 签名。真实质量仍必须由后续独立实验决定。
+本地保留全部日志、评测、checkpoint不变；精简回传包保留所有manifests、最新plots、
+完整metrics/evaluations JSONL、normalization和两bank、每次summary。
+详细diagnostics/曲线只回传step0、best_step、末3次评测（去重最多5次），
+及最近一次消融；不打包其他中间诊断、console大日志、HDF5、checkpoint或all_predictions。
+用zip压缩并输出所选文件hash索引；压缩体积以实际打印为准，不保证固定MB上限。
+发现特定中间异常时再补传对应step文件，不删本地证据。
 
-## 5. 当前执行与结果回填
-
-### 5.0 65-token 标准 CVAE 当前入口
-
-当前正式路线为 65-token 层级标准 CVAE；根本工程验收对象是完整 State/Action 序列的输入布局、条件隔离和层级 latent 路由。
-
-模型、Mask、marker和命令的历史活动合同已结束；当前 65-token 合同见[model.md](model.md)。下文旧 H50-B、CPD、D1 和 SCVAE 训练结果只保留为历史记录，不再执行。
-
-### 5.0A 65-token Stage A posterior reconstruction（2026-09-22，已完成）
-
-- **Run/合同**：`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260922_014417`；Stage A；随机初始化；完整序列只进入 Posterior Encoder，Condition Encoder 不参与；`X=[B,65,99]`；32-motion selected-window 记忆集，评测覆盖 1,504 个窗口（每窗 65 个 State、64 个有效 Action）。训练使用 posterior mean、`KL beta=0`（不采样，不能解释为最终随机 CVAE），`micro_batch=32`、`90,000` optimizer steps、峰值 LR `1e-4`、2,000-step warm-up、cosine、`min_lr_ratio=0.01`（末端约 `1e-6`）。`parameter_count=64,377,959`，`execution_pass=true`，`status=completed`，最佳点为 step 90,000。
-- **最佳/最终完整评测**：`total_loss=1.777659e-05`，State RMSE `0.00588709`，Action RMSE `0.00431750`，contact BCE `3.11693e-08`；连续目标绝对误差 `p95=0.0111622`、`p99=0.0169832`、`max_abs=0.2195571`。分域为 State `p95/p99=0.0118590/0.0180091`，Action `0.0091100/0.0138084`。这些误差均在归一化空间，不能直接当作 rad、rad/s 或物理接触误差。
-- **最差窗口**：按 combined RMSE 的窗口为 `neutral_looking_around_R_001__A542 / variant 6 / start 388`，State/Action/combined RMSE=`0.0154216/0.0084170/0.0124232`，窗口内 max=`0.157517`；按单元素 max 的窗口为 `confusion_103__A045 / variant 7 / start 384`，State/Action/combined RMSE=`0.0138226/0.0089936/0.0116608`，max=`0.219557`。
-- **尾部定位（2026-09-23纠正推断边界）**：回传的最差 State 特征按 feature RMSE 排序，为 `joint_vel_28`（RMSE `0.0080518`、max `0.157517`）、`joint_vel_27`（`0.0071002`、max `0.169897`）、`joint_pos_23`（`0.0067546`、max `0.061453`）、`joint_pos_24`（`0.0067451`、max `0.033567`）和 `joint_vel_10`（`0.0064736`、max `0.112600`）。Action 展示项最大约 `0.064263`，但表是RMSE前十而非全部feature；因此不能确认联合最大值的域或特征，撤回此前“已确定来自State”的表述。
-- **事实结论**：整体 RMSE、p95/p99 和 contact 均已明显下降，说明完整序列 posterior→decoder 重建链路能够工作。`max_abs/p99≈12.93`，最大值窗口 combined RMSE仅 `0.0116608`，支持误差尾部稀疏，不是全窗口重建崩溃；具体域、帧仍未知。本次只验证已见窗口Stage-A重建，不能证明条件补全、KL随机生成或未见motion泛化。
-- **候选原因与缺失证据**：速度峰值、时间偏移、平均MSE下尾部优化不足、窗口上下文差异均待验证。NPZ中速度std约 `0.3170..1.9636`，不支持近零std放大解释；窗口起点 `384/388` 本身也不能证明最大值位于边界或local_15。80k→90k max仍下降约9.15%，不能写成已证明平台。Stage A不读取Mask，不能归因于Condition Mask采样。需要实际argmax与曲线才能区分这些候选因素。
-- **唯一后续诊断**：从同一 run 对最大绝对误差元素输出排序明细：`window_index、motion/variant/start、t、domain、feature_index/name、target_norm、prediction_norm、abs_error_norm` 以及反归一化后的 `target/prediction/error`；同时标记是否为 `t=64`、`local_15` 或窗口边界。拿到该明细后再判断是速度尖峰、归一化统计、时间/特征索引错位还是 chunk 边界问题，不在当前证据下直接修改模型或 Mask 协议。
-
-### 5.1 H50-A续训结果与H50-B历史入口（已执行，不再使用）
-
-H50-A尾段续训已经完成。run为：
-
-```text
-/home/helloworld/bly/runs/cvae_posterior_hierarchical_t64_h50_autoencode_continue15k_20260909_230256
-```
-
-它在绝对step34000因连续三次fit PASS提前结束，summary报告`quality_pass=true`；strict-memory和legacy-exact仍FAIL。历史H50-B从首次PASS的step32000 `best_fit.pt`初始化，没有修改A源run，并重置了优化器、调度器与训练随机序列。B没有产生`fixed_fit.ok`；旧H50-R从未启动，现已被CPD路线取代。CPD使用误差更低的step34000 `last.pt`，不再使用step32000 checkpoint。
-
-历史H38/F4G正式结果已集中保留在第3节，不再重复执行命令或长日志。
-
-### 5.2 历史 H50-SCVAE KL 三路径边界（已失效，不适用于v2）
-
-只有H50-SCVAE的M-R让prior mean、posterior mean、q-p对齐、固定Mask和held-out物理随机Mask连续三次同时通过，且高遮挡条件下latent未被完全忽略，才进入已经实现但受marker阻断的K1：
-
-| 路径 | latent来源 | 是否读取被遮挡真值 | 作用 |
-|---|---|---|---|
-| Posterior mean | 完整序列encoder的均值 | 是 | 确定性最佳重建基线 |
-| Posterior sample | posterior均值和方差重参数采样 | 是 | 检查采样噪声代价 |
-| Conditional prior sample | Mask后序列产生均值/方差再采样 | 否 | 检查部署时真实条件生成能力 |
-
-三条路径必须使用同一窗口、同一Mask和配对随机噪声。KL是否合适要同时看posterior mean是否保持、posterior sample退化和prior sample差距，不能只看KL数值。
-
-### 5.3 每个正式run的精简回填模板
-
-```markdown
-### <日期> — <实验ID> <PASS|FAIL|INVALID|BLOCKED>
-
-- Run/source：`<absolute run>`；`<source commit或未回传>`
-- 合同：`<motion/window/Mask/model/初始化>`
-- 执行：`<steps、是否提前停止、execution与quality marker>`
-- 指标：`<global/worst State与Action、p99/max、contact、latent依赖>`
-- 事实结论：`<证明、支持、尚无证据或不能证明的内容>`
-- 唯一下一步：`<一个实验或一个工程修复>`
-```
-
-更新规则：
-
-- smoke只更新第4节的一句话，不新增正式结果行。
-- 正式训练、只读诊断和正式比较只在第3节对应表中更新一次，不再追加重复长日志。
-- `RUNNING`只记录路径和最后step，不提前写质量结论。
-- source commit或指标未回传时明确写“未回传”，不得推测。
-- completed/execution marker和quality marker必须分开解释。
-- 任何新结果都必须同时写清“能证明什么”和“不能证明什么”。
+当前只给出新训练与精简打包命令，没有在Ubuntu启动训练；不修改训练/采样/evaluator代码。
+真实Isaac/MuJoCo回放仍未收到结果。Windows文档与CLI静态检查不替代新32-motion工程/质量验收。

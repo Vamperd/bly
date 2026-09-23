@@ -557,6 +557,11 @@ def apply_exact_replay_initialization(
     }
     _atomic_json(Path(report_path).expanduser().resolve(), report)
 
+    if "replay65_contract" in values:
+        from replay65_runtime import audit_and_freeze
+
+        audit_and_freeze(raw, values)
+
     raw.observation_manager.reset(env_ids_device)
     raw.obs_buf = raw.observation_manager.compute(update_history=True)
     observations = wrapped_env.process_raw_obs(raw.obs_buf, flatten_dict_obs=True)

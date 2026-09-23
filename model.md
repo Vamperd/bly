@@ -177,7 +177,10 @@ EVAL_RUN="/home/helloworld/bly/runs/cvae_v2_A_tail_$(date +%Y%m%d_%H%M%S)"
 "$PYTHON" -m cvae_sa.cvae_tools export-report --run "$EVAL_RUN"
 ```
 
-B旧checkpoint重评用同一入口 `--route B` 和独立新目录；它不是旧Mask精确重放。
+B旧checkpoint已确认训练使用完整posterior+condition。重评分别使用 `--route posterior_mean`
+（原信息路径）、`--route zero`（移除posterior信息的消融）和 `--route A`（复核旧错误评测路径）；
+不要把新 `--route B` 解释为旧训练路径复现。使用独立新目录和同一固定bank，不是旧Mask精确重放。
+旧权重的zero消融不能作为从头condition-only训练的容量结论，实测概要见plan.md、异常证据见process.md。
 后续正式B-fixed需审核后手动运行：
 
 ```bash
@@ -222,9 +225,120 @@ Python CLI 不受遗留Shell环境变量影响，优先用于可复现命令。
 
 ## 6. 结论边界与维护
 
-A90k的联合max_abs=0.219557不能确定域、feature或帧；不能从RMSE前十表推断精确argmax。
-normalization未见近零速度std；80k到90k max仍下降约9.15%，不称为已证明平台。
-先回传只读诊断，再决定数据核查、受控续训、时间对齐或chunk消融，不同时改多个变量。
+A90k的max=0.219557已由只读重评定位为State joint_vel_14、window277、t46；
+model-only再训练60k后max=0.131111，转为joint_vel_28、window242、t64。
+normalization未见近零速度std；尾部仍有局部速度变化拟合不足，但不称为已证明不可下降。
+具体异常、物理误差、同坐标缺失证据及单变量验证边界见process.md，不同时改多个变量。
 
-当前维护仅 AGENTS.md、model.md、plan.md；历史run和结果保留。
+当前维护AGENTS.md（入口）、model.md（合同）、plan.md（整体计划与概要）、process.md（必要异常诊断）；历史run和结果保留。
 Windows测试不能替代Ubuntu HDF5/CUDA smoke，亦不能证明训练质量或物理可行性。
+
+## 7. 65-token State／Action回放合同（2026-09-23）
+
+独立入口 `python -m cvae_sa.replay65 {prepare,simulate,render,report}`，协议 `65-token-replay-v1`。
+不更改训练模型或loss，不复用旧H50模型入口，不迁移H50权重。A接受历史65-token Stage-A checkpoint，
+缺失历史身份明确unknown；B/C只接受对应阶段的v2 checkpoint，拒绝旧posterior参与的B。
+A完整输入posterior mean；B condition-only；C固定epsilon标准正态部署。同一个C样本的S/A成对导出。
+所有Mask均True=隐藏，B/C在调用模型前再次置零隐藏真值。固定Mask seed默认从checkpoint训练合同读取，
+覆盖seed时不声称exact训练fixture。输出State65帧、Action64步，终点没有Action。
+
+### 7.1 准备、选择和原始基线
+
+prepare必须显式checkpoint/dataset/output和 `--window-index` 或 `--selection first-suite`。
+first-suite仅在checkpoint选中窗口中选episode起点、首个非零起点、八家族等权masked continuous MSE最差窗口，
+去重最多三个；选择得分也保存。每窗口离线报告八Mask，默认视频/物理代表为state_gap_16、action_gap_16、
+full_action、joint_gap_8。A按full prediction重放，八Mask统计只是同一完整重建的分区域诊断。
+各窗口独立子目录 `windows/wNNNNNN/`，checkpoint/data/normalization/source/hash与全部准备产物封存；
+再次执行prepare拒绝非空目录，simulate/render/report重验准备哈希。历史源目录、checkpoint和HDF只读。
+
+每窗口原始Action在两个独立num_envs=1进程执行；后续Mask共享该组基线，不重复启动。
+B/C只替换隐藏Action，非Mask raw逐位保留；`--action-mode full-prediction`是显式另一个实验。
+State-only Mask不执行额外模型Action回放。反归一化后用记录nominal/scale/offset/clip转回raw，
+保留未裁剪预测、实际可实现目标、饱和计数及计划/实际raw和processed目标核对。
+
+exact-init使用既有外层patch0009钩子，新payload opt-in开启runtime审计：恢复采集后的物理参数，
+不重新抽取随机化；新interval事件通过公共事件配置API替换为空操作，并保存前后事件列表。
+若源采集本身有未记录日程的interval事件，工程拒绝，不能随意移除真实源扰动。
+检查sim/control dt、decimation、gravity、solver配置、执行器类型/关节/延迟范围、可用asset hash；
+未知字段留痕。非零延迟的历史实际draw和队列未存储时不伪造恢复，runtime contract不标已验证。
+已记录的前一Action不能冒充整个历史队列。求解器接触缓存未恢复，不承诺位级仿真等价。
+回放中出现自动reset时在reset之前停止，保留部分轨迹、termination原因，不拼接成完整回放。
+
+初始化姿态/速度/参数身份、原始重复性、记录轨迹复现分别判断。接触传感器冷启动差异独立记录，
+不能人工写contact标签来假装恢复。原始源复现与重复性规则沿用：joint RMSE≤0.02rad、root RMSE≤0.05m、
+orientation max≤5°、body MPJPE≤0.05m、contact accuracy≥95%。不是位级确定性阈值，也不是C多解生成质量门禁。
+基线失败仍继续模型对照，但报告/Action视频标 `BASELINE_INVALID / MODEL_QUALITY_UNDETERMINED`。
+模型初态核验失败也单独标记，不能因原始基线通过而忽略。缺失字段、映射错误、NaN/Inf属于工程失败。
+
+### 7.2 State视频、报告与结论
+
+State三栏为HDF姿态、真实State积分重建、模型补全State积分重建。共享第0帧root锚点与同一积分规则；
+不逐帧校正到真值root。报告真实State积分误差、重力归一化、起始height锚定偏移，原预测不覆盖。
+State视频标KINEMATIC ONLY；不以其判断物理可执行。Action视频为HDF、原Action、模型Action三栏；
+另有HDF/原Action1/原Action2基线三栏。按固定HDF相机轨迹渲染、65帧50Hz，不渲染后挑选最佳采样。
+仿真使用真实初态，即使fixture隐藏了S0；初态仅进入仿真，报告注明，不用于模型输入。
+
+报告包含full/masked/visible分域误差、contact混淆/BCE、State/Action各top100坐标及物理单位、
+完整预测/真值/Mask NPZ、逐帧误差及首次越界帧、初始化读回、runtime配置和采样seed。
+另比较模型原始/补全State与配对Action实现State，物理误差按单位组统计，不混合rad、rad/s、m。
+`quality_pass=null`；`replay65_execution.ok`仅在预期仿真和视频完整后写入，不代表模型通过。
+未完成或异常run可回传已有材料，但不得充当完整验收。确认过哈希的原始基线和视频可复用，不覆盖未验证残留。
+
+### 7.3 Ubuntu命令（代码安全同步后；不与当前训练抢GPU）
+
+以下不会修改Ubuntu源码或安装依赖。先完成安全同步，确认SONIC已应用patch0009；历史exact-init成功的环境通常已有，
+不要重复应用。若下列只读hook检查失败，停止并回传，不直接启动仿真。
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUNBUFFERED=1
+python3 -m cvae_sa.replay65 --help
+rg -n 'apply_exact_replay_initialization' ../sonic-repro/GR00T-WholeBodyControl/gear_sonic/eval_agent_trl.py
+```
+
+首轮仅当前B的窗口0原始双基线（输入已经完成、固定checkpoint的准确run，不猜最新目录）：
+
+```bash
+read -r -p '请输入已完成的v2 B训练run绝对路径: ' B_RUN
+test -s "$B_RUN/checkpoints/best.pt" || { echo 'checkpoint不存在'; exit 1; }
+RUN_DIR=$(mktemp -d /home/helloworld/bly/runs/cvae_replay65_B_w0_XXXXXXXX)
+printf 'RUN_DIR=%s\n' "$RUN_DIR"
+python3 -m cvae_sa.replay65 prepare \
+  --checkpoint "$B_RUN/checkpoints/best.pt" \
+  --dataset-run /home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506 \
+  --route B --window-index 0 --output-run "$RUN_DIR" && \
+python3 -m cvae_sa.replay65 simulate --run "$RUN_DIR" --baseline-only && \
+python3 -m cvae_sa.replay65 report --run "$RUN_DIR"
+```
+
+基线报告检查后，仍在同一终端对同窗口补充模型回放和三栏视频；若基线质量失败，按用户要求继续生成警告视频。
+若是工程失败，不强行继续。脚本复用已校验双基线，不重复运行。
+
+```bash
+python3 -m cvae_sa.replay65 simulate --run "$RUN_DIR" && \
+python3 -m cvae_sa.replay65 render --run "$RUN_DIR" \
+  --model /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/decoupled_wbc/control/robot_model/model_data/g1/g1_29dof_old.xml && \
+python3 -m cvae_sa.replay65 report --run "$RUN_DIR" --export
+```
+
+另一终端监控；输入上面打印的准确回放目录，Ctrl-C只停止监控：
+
+```bash
+cd /home/helloworld/bly/state-action-cvae
+source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+read -r -p '请输入RUN_DIR: ' RUN_DIR
+python3 -m cvae_sa.cvae_tools monitor --run "$RUN_DIR" --interval 10
+```
+
+回传 `$RUN_DIR/replay65_report.zip` 和需要人工查看的 `$RUN_DIR/windows/w000000/videos/*.mp4`。
+ZIP含小型预测/恢复/误差NPZ、配置、哈希、日志、曲线和报告，不含HDF/checkpoint/MP4/pickle；已存在ZIP不覆盖。
+只需回传中途诊断时可直接 `python3 -m cvae_sa.replay65 report --run "$RUN_DIR" --export`，报告明确缺失场景。
+最终回传需新文件名时用 `report --run "$RUN_DIR" --export --output "$RUN_DIR/replay65_report_final.zip"`，不删除旧包。
+
+首轮审核后，再在新run把 `--window-index 0` 换成 `--selection first-suite`；不要提前自动扩展。
+A参考另建run使用 `--route A --window-index 0` 和
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260923_012104/checkpoints/best.pt`，
+其余dataset、simulate/render/report不变。C只预留 `--route C --sample-seed ... --sample-index ...`，本轮不启动。

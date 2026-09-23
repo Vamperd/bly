@@ -1,7 +1,8 @@
 # SONIC Physics State–Action 研究：当前代理交接说明
 
-当前活动模型合同维护在 [model.md](model.md)，实验状态与工程验收台账维护在
-[plan.md](plan.md)。`Next.md` 和 `explain.md` 已停止维护，不得恢复或作为当前入口引用。
+当前活动模型合同维护在 [model.md](model.md)，整体实验路线与概要结果维护在
+[plan.md](plan.md)，必要反常结果、根因证据与诊断局限维护在 [process.md](process.md)。
+按用户2026-09-23要求维护这四份根文档；`Next.md` 和 `explain.md` 已停止维护，不得恢复。
 
 2026-09-21 起，标准层级 CVAE 已切换为 `65-token-hierarchical-standard-cvae-v1`：Posterior
 输入 `[B,65,99]`、Condition 输入 `[B,65,198]`、hard chunk `60..64` 属于
@@ -11,9 +12,24 @@
 A为posterior-only mean；B为condition-only（完全不执行posterior）；C独立随机初始化，
 从第一步posterior sample训练、标准正态部署，不合并A/B权重。
 固定B为每窗口八fixture，动态B从修正版fixed权重初始化。旧B标记
-`legacy_batch_position_dependent_mask`，让现有进程完成，不声称其为exact fixture。
-先Windows工程核验，再Ubuntu真实smoke和旧A/B只读诊断；A额外60k尚未启动。
+`legacy_batch_position_dependent_mask`，实际还使用完整posterior并错误地按A路径评测；不声称其为condition-only或exact fixture。
+A的model-only初始化60k已完成，max从0.219557降至0.131111；不是保留AdamW的续训。
+旧B实际134776/150000中断，best/last三路只读重评完成；v2 B真实HDF5/CUDA两步smoke通过。
+小规模随机初始化condition-only B-fixed已完成：run `cvae_v2_B_fixed_w16_s20000_0XqzpnZ5`，
+1 motion、4 variants、16窗口×8fixture、20k步；fixed masked State/Action RMSE为0.000983/0.000706。
+另一Mask bank含19个重合fixture；109个新坐标masked RMSE为0.014522/0.013578，
+主要异常集中在联合缺口，不能称为新motion泛化。工程通过，quality_pass仍为null。
+同16窗口B-dynamic已完成：`cvae_v2_B_dynamic_w16_s20000_HlVrXXXJ`，20k；配置batch32但实际batch16，暴露320000。
+另一bank masked State/Action RMSE为0.000585/0.000391，max为0.006655/0.003503，原最差joint gap显著改善。
+下一步建议32-motion全1504窗口、12032固定fixture，随机初始化B-fixed，上限120k，每5k全评测；细则见plan.md。
+回放暂缓，不作为此次训练前置门禁，不自动扩模型。
 恢复/延长/初始化、mask身份、分域尾部与C部署评测以 `model.md` 的v2合同为唯一活动定义。
+
+2026-09-23 小规模B已完成并审核；新增独立 `python -m cvae_sa.replay65`
+prepare/simulate/render/report 回放入口（合同见model.md第7节）。当前仅Windows工程核验，
+不代表Ubuntu Isaac/MuJoCo已通过。先T64原始Action双重基线，再模型补全；基线失败仍出对照视频，
+但物理质量为不可判定。不得用旧H50/physics_transformer入口加载65-token权重。
+新回放不修改当前训练，待安全同步；旧回放入口和嵌套仓库保持不变。
 
 本文档是 `bly` 工作区的首要交接入口。后续会话开始任何工作前必须完整阅读；其中“已验证事实”“代码已实现但待执行”“历史兼容路径”不可混为一谈。若实际 Git、文件或 Ubuntu 日志与本文冲突，以只读检查得到的当前事实为准，并更新本文。
 
@@ -1005,14 +1021,20 @@ v2 execution marker只表示工程完整，quality_pass未设阈值为null。
    motion ID、package/outcome、未来真实 State、真实随机 delay draw 和 oracle dynamics context
    不得进入部署模型；oracle 结果只能明确标注为上限实验。
 
-### 10.1 活动唯一下一步：v2工程同步、smoke与只读诊断
+### 10.1 活动唯一下一步：32-motion B-fixed训练
 
-先完成Windows工程核验，再由Ubuntu固定环境运行真实HDF5/CUDA smoke，使用独立新run
-重评A90k和已完成的旧B；回传 `cvae_tools export-report` 生成的诊断包后审核。
-不自动启动B-fixed/B-dynamic/C，不打断现有B，不追加A60k或改变loss/结构。
-A的联合max_abs=0.219557仍未知域/特征/帧；normalization无近零速度std，末段max仍下降。
+Ubuntu v2 B smoke `cvae_v2_B_smoke_582je9XO` 和 `cvae_v2_reassessment_gweSqTsw` 下九项只读重评均已回传。
+A60k best/last均为60000且重评一致；旧B去掉posterior显著退化，不能据此推断从头condition-only的容量上限。
+原A最大点已定位为joint_vel_14/t46，续训后为另一窗口joint_vel_28/t64；精确坐标和证据见process.md。
+小规模B-fixed已完成20k，全部更新记录posterior零调用；最终fixed表现良好，新Mask联合缺口仍有尾部。
+详细概要与新路线见plan.md；该文件按用户要求仅保留当前A/B，不再承担历史6.x实验台账。
+16窗口B-dynamic已完成并审核，两bank均改善，工程通过但quality_pass未设自动门禁仍为null。
+建议直接扩32-motion全部1504个T64窗口，随机初始化B-fixed 120k，batch32，每5k完整评测，分段人工审核。
+不要加载小数据checkpoint绕过窗口身份校验，不改loss或扩大模型；预算与B32人工推进阈值见plan.md。
+现有v2训练代码已支持，回放仍暂缓；无需为训练同步回放源码。尚未收到32-motion启动日志。
+不自动启动训练，不继续旧B或追加A，不扩大模型或改loss。A尾部补诊不设为B推进的任意max硬门禁。
 v2源码入口为 `cvae_protocol.py`、`cvae_diagnostics.py`、`cvae_training.py`、`cvae_tools.py`；
-旧训练模块的公开入口路由到v2，不再保留旧训练循环。仅维护三份根文档，不恢复Next.md。
+旧训练模块的公开入口路由到v2，不再保留旧训练循环。维护AGENTS/model/plan/process四份根文档，不恢复Next.md。
 
 ## 11. 后续代理启动检查
 
