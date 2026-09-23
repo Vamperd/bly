@@ -7,6 +7,14 @@
 输入 `[B,65,99]`、Condition 输入 `[B,65,198]`、hard chunk `60..64` 属于
 `local_15`，decoder memory 为有条件时 82 token。旧 H50 checkpoint 不迁移，首次训练随机初始化。
 
+2026-09-23 活动实验协议切换为 `65-token-experiment-v2`，模型架构签名和64,377,959参数不变。
+A为posterior-only mean；B为condition-only（完全不执行posterior）；C独立随机初始化，
+从第一步posterior sample训练、标准正态部署，不合并A/B权重。
+固定B为每窗口八fixture，动态B从修正版fixed权重初始化。旧B标记
+`legacy_batch_position_dependent_mask`，让现有进程完成，不声称其为exact fixture。
+先Windows工程核验，再Ubuntu真实smoke和旧A/B只读诊断；A额外60k尚未启动。
+恢复/延长/初始化、mask身份、分域尾部与C部署评测以 `model.md` 的v2合同为唯一活动定义。
+
 本文档是 `bly` 工作区的首要交接入口。后续会话开始任何工作前必须完整阅读；其中“已验证事实”“代码已实现但待执行”“历史兼容路径”不可混为一谈。若实际 Git、文件或 Ubuntu 日志与本文冲突，以只读检查得到的当前事实为准，并更新本文。
 
 ## 1. 当前研究目标与边界
@@ -101,7 +109,8 @@ A_t=q^{target}_t-q_{nominal}
 
 ### 4.3 RobotInfo 与 context
 
-模型显式接收：
+以下为历史 physics_transformer 的显式输入；当前65-token CVAE不接收这些RobotInfo/context，
+这里只保留数据资产合同：
 
 | 输入 | Shape | 内容 |
 |---|---:|---|
@@ -145,7 +154,10 @@ Physics v4 index:
 
 旧 `sonic_minimal_sa_v2`、旧 768-motion v1 索引、Transformer/TCN checkpoint 仍作为历史兼容基线保留，但不得与 Physics v3/v4 数据混训。任何删除历史 run 的动作仍需用户授权。
 
-## 6. 当前模型与训练实现
+## 6. 历史模型与训练实现（以下6.x的“当前/下一步”均为当时记录）
+
+本节历史门禁、阶段命名、conditional-prior和初始化限制不得覆盖2026-09-23的v2活动合同。
+活动65-token结构与训练协议只以 `model.md` 为准；保留下文用于追溯，不能据此启动旧路线。
 
 `state-action-cvae` 的主模型种类是 `physics_transformer`：
 
@@ -974,9 +986,12 @@ bash ./cvae_repro.sh validate-state-mask-video
 | H50-A单窗口Action重放 | `cvae_posterior_h50_action_replay.ok`（仅表示已见窗口posterior推理、两次Isaac重放、指标和MP4完整） |
 | H50-A exact-init重放 | `cvae_posterior_h50_action_replay_exact_execution.ok`；初始化身份和原Action基线另用两个独立marker |
 
-`latest_*_run_dir.txt` 只在成功后更新，运行中的新目录不能依赖 latest 查找，应使用 `ls -dt ~/bly/runs/<prefix>_* | head -n1` 并核对创建时间。大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
+`latest_*_run_dir.txt` 只在成功后更新。v2运行开始即打印RUN_DIR/PID，应使用明确目录和
+`python -m cvae_sa.cvae_tools monitor --run RUN`，不要用最新目录猜测正在监控的实验。
+v2 execution marker只表示工程完整，quality_pass未设阈值为null。
+大 HDF5、checkpoint、MP4 和 BONES-SEED 归档不得未经体积检查提交 Git。
 
-## 10. 下一步优先级
+## 10. 历史下一步优先级（已失效，保留追溯）
 
 1. H50-A续训已经PASS；H50-B、CPD和D1均形成历史结果并被H50-SCVAE取代；SCVAE M-F已完成。
 2. `posterior-h50-action-replay`已完成；它支持H50-A已见窗口Action记忆和中/右受控重放接近，但训练记录/原Action重放基线FAIL，不得据此声称物理轨迹被复现。
@@ -989,6 +1004,15 @@ bash ./cvae_repro.sh validate-state-mask-video
 6. Action-focused fine-tune 保留为独立历史分支；若后续恢复，仍必须满足 parent State guard。
    motion ID、package/outcome、未来真实 State、真实随机 delay draw 和 oracle dynamics context
    不得进入部署模型；oracle 结果只能明确标注为上限实验。
+
+### 10.1 活动唯一下一步：v2工程同步、smoke与只读诊断
+
+先完成Windows工程核验，再由Ubuntu固定环境运行真实HDF5/CUDA smoke，使用独立新run
+重评A90k和已完成的旧B；回传 `cvae_tools export-report` 生成的诊断包后审核。
+不自动启动B-fixed/B-dynamic/C，不打断现有B，不追加A60k或改变loss/结构。
+A的联合max_abs=0.219557仍未知域/特征/帧；normalization无近零速度std，末段max仍下降。
+v2源码入口为 `cvae_protocol.py`、`cvae_diagnostics.py`、`cvae_training.py`、`cvae_tools.py`；
+旧训练模块的公开入口路由到v2，不再保留旧训练循环。仅维护三份根文档，不恢复Next.md。
 
 ## 11. 后续代理启动检查
 

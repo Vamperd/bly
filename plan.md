@@ -1,26 +1,60 @@
 # State–Action Posterior 容量实验：精简计划与结果台账
 
-最后更新：2026-09-21
+最后更新：2026-09-23
 
-本文只记录工程实现、编译、单测、checkpoint readback 和当前唯一下一步。模型合同见
+本文记录工程实现、编译、单测、checkpoint readback、已执行实验结果和当前唯一下一步。模型合同见
 [model.md](model.md)；`Next.md`/`explain.md` 已停止维护，本台账不再依赖它们。
 
 ## 1. 当前状态与唯一下一步
 
+### 2026-09-23 实验协议v2修正：Windows实现，Ubuntu待核验
+
+本节为活动状态；下方2026-09-21/22与H50各节保留当时事实，不再作为活动协议。
+模型架构仍为 `65-token-hierarchical-standard-cvae-v1`，协议为 `65-token-experiment-v2`。
+旧A保留；正在运行的旧B让其完成并标记 `legacy_batch_position_dependent_mask`；A额外60k未启动。
+
+| 项目 | 当前状态与边界 |
+|---|---|
+| 窗口/Mask | 稳定source/episode/motion/variant/start/长度哈希；B-fixed每窗口八fixture；B-dynamic使用step和sample ordinal；保存双bank坐标/hash |
+| 评测 | full/masked/visible、全部feature、分域top100和原始元素去重、物理值/逐t/chunk/重叠帧、固定及最差曲线与速度lag诊断 |
+| C | 四路独立评测、默认8样本、独立epsilon/RNG；全样本期望误差/方差/energy；draw0另报完整尾部；best按部署energy |
+| 训练/恢复 | 不改架构/loss；采样排列/游标与全部RNG入v2 checkpoint；resume/continue/model-only严格区分；保留AdamW续训接口 |
+| 工程安全 | SIGINT/SIGTERM安全边界；梯度非有限阻止更新；更新中异常不覆盖last；fsync+原子replace；last先于best；OS锁防双写 |
+| 审核/产物 | 实际LR、nextLR、分项loss/KL/梯度/样本摘要；quality仅告警；分阶段best、best_reconstruction、last；严格前向readback；流式日志和图 |
+| 交付 | 新增cvae_tools evaluate/monitor/export-report；只读评测不修改源run；同步三份文档；无Ubuntu正式训练/重评结果 |
+
+Windows已执行小模型A/B/C短程前反向、B/C中断恢复与连续训练参数一致性、AdamW续训step延续、
+B-dynamic独立初始化、只读评测与ZIP回传测试；模拟optimizer半更新异常时last保持前一安全边界。
+最终目标测试17/17 PASS（v2协议8项+既有65-token模型9项）；全量发现177项，174 PASS，
+其余3项仅因既有Windows环境缺 `h5py` 无法导入。Python compileall、CLI help、
+配置加载、64,377,959参数meta构建和git diff --check通过。
+本机bash指向未配置Linux发行版的WSL，Shell语法核验未执行；需Ubuntu运行bash -n。
+不将Windows合成数据测试写成真实HDF5/CUDA通过，不安装依赖绕过既有环境边界。
+一轮测试曾遇Windows索引器短暂锁文件，已加入有界原子替换重试并把测试产物放入忽略的runs目录；
+失败残留保留在 `runs/protocol_v2_failed_windows_test`，未删除用户数据或工作区外文件。
+
+已验证事实：A90k的联合max_abs=0.2195571065，p99=0.0169831514，80k→90k最大值仍下降约9.15%；
+normalization速度std约0.3170..1.9636，不存在近零std证据。
+候选原因仍包括局部峰值、时间偏移、尾部优化不足或窗口上下文差异；不能从RMSE前十表确认最大值域/feature。
+缺失证据是准确argmax及原始曲线，必须以只读重评补齐。历史B原日志不能宣称exact固定Mask。
+
+**唯一下一步：同步Windows代码，在Ubuntu固定环境完成工程smoke，再只读重评旧A/B并回传diagnostic_report.zip。**
+命令统一见 `model.md` 第5节。之后分别审核B-fixed随机初始化、B-dynamic及独立C；阶段间不自动运行。
+
 当前活动路线为 **65-token 层级标准 CVAE**（`65-token-hierarchical-standard-cvae-v1`）。它直接替换历史 H50-SCVAE 语义，首次训练随机初始化；历史 H50 结果只读保留，不能作为新模型的 source、初始化或质量结论。
 
-本轮验收只覆盖输入布局、terminal Action、mask 隔离、hard chunk、阶段路由、有限前向/反向和 checkpoint 签名；不启动 Ubuntu 正式质量训练、扩大 motion 数量、Mask 研究或物理重放。
+初始工程验收覆盖输入布局、terminal Action、mask 隔离、hard chunk、阶段路由、有限前向/反向和 checkpoint 签名；其后已单独完成 65-token Stage A 的 Ubuntu 质量训练。B/C、扩大 motion 数量、Mask 研究和物理重放仍不因本次 A 结果自动启动。
 
 ### 2026-09-21 65-token 实现状态
 
 - 模型核心、三阶段路由、随机初始化 checkpoint 签名和 Shell 入口已实现。
 - Windows 工程核验 PASS：`py_compile`、模块 `--help`、目标模块 6 项 unittest；覆盖 shape、terminal Action、Mask 隔离、hard chunk、阶段冻结/反向、推理不调用 Posterior、checkpoint readback 与旧格式拒绝。Windows 当前没有可用 WSL/Git Bash，`bash -n` 无法执行（系统仅返回 WSL 安装提示），因此 Shell 语法需在 Ubuntu 同步后复核。全量 `unittest discover` 的其余 3 个失败仍是既有 Windows 环境缺少 `h5py` 的导入错误，与本模型无关。
-- 未执行 Ubuntu 正式训练或质量评测；唯一下一步是由用户决定是否启动独立质量实验，不能把本轮工程 PASS 解读为模型质量结论。
+- Stage A 正式质量训练已完成并在下方回填；Stage B condition-only 训练尚未形成结果。A 的结果只证明完整序列 posterior reconstruction，不证明 Condition Encoder、随机 latent 或未见 motion 泛化。
 - 2026-09-21 用户在 Ubuntu 执行了 Stage A 非 smoke 入口，run 为 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260921_162141`，只完成默认 2 step；它仅是工程执行，不是重建能力结果。随后已将正式默认配置改为全部窗口、40k step，并新增命令行运行时覆盖步数/LR/scheduler/warm-up/min-LR-ratio；Windows `py_compile`、CLI help 与 6 项目标测试通过。该覆盖接口需在 Ubuntu 同步后运行验证。
 - 2026-09-21 训练记录改造：Stage A 现按旧 posterior capacity 方式逐步 flush `logs/metrics.jsonl`，每 1000 step 对全部 selected windows 做完整评测并以 `total_loss` 更新 `best.pt`，每 250 step 原子保存可恢复的 `last.pt`，同时刷新 `training_curves.svg` 与 `progress.json`。checkpoint 包含 optimizer/scheduler/RNG、训练合同和数据身份；`CVAE_POSTERIOR_RESUME_RUN` 严格恢复同一 run。Ctrl-C/异常路径保存 `last.pt` 并写 `cvae.interrupted`。Windows 目标 unittest、compile、CLI help 已通过；Ubuntu shell/真实 CUDA smoke 待同步验证。
 - 2026-09-22 已补充 Stage A 全量评测尾部诊断：连续误差 `p95/p99`、分域 p95/p99、最差窗口（按 combined RMSE 与 max abs）和最差 State/Action 特征写入每条 evaluation JSONL。Windows 7 项目标测试、compile 和 diff check 通过。现有 200K metrics 只有全局均值与 max_abs，无法回溯这些新诊断；需同步新代码后重新评测/训练。
 - 对已回传的 200K Stage-A `metrics.jsonl`，step 0→200000 的 State/Action RMSE 为 `0.081387/0.044812`→`0.039531/0.024431`，contact BCE 为 `5.25e-5`→`2.28e-6`，`max_abs` 为 `18.536`→`12.227`；训练无 NaN/Inf 且均值持续下降，但实际日志显示学习率约 `5e-6`→`2.5e-7`、`kl_beta=0`，不能把该 run 解释为配置中声明的 `1e-4` warm-up 从头对照实验。该旧日志不含 p95/p99、最差窗口或最差特征，后续分析不得补造这些数值。
-- 2026-09-22 新增 `CVAE_POSTERIOR_MICRO_BATCH/--micro-batch` 覆盖并纳入 checkpoint training contract；目标对照训练采用 batch 32、60k optimizer steps、`1e-4` 峰值、2k warm-up、cosine 到 `1e-6`，对应旧 H50-A 的约 1.92M 窗口样本暴露量。Ubuntu smoke/正式训练待执行。
+- 2026-09-22 新增 `CVAE_POSTERIOR_MICRO_BATCH/--micro-batch` 覆盖并纳入 checkpoint training contract；Stage A 正式训练实际采用 batch 32、90k optimizer steps、`1e-4` 峰值、2k warm-up、cosine 到 `1e-6`（`min_lr_ratio=0.01`）。
 - 2026-09-22 修正标准 CVAE 评测路由：此前完整评测函数固定调用 Stage A，可能使 B 阶段的 masked-condition 训练仍被记录为 posterior 指标；现按 Stage A/B/C 路由，B/C 使用 `training_mask_seed` 的条件 Mask，evaluation 记录 `evaluation_stage` 和 masked-condition scope。Windows compile、diff check 与 8 项目标测试通过；需同步后再启动 B。
 - 2026-09-22 按用户要求将 Stage B 改为 condition-only：B forward 完全不执行 Posterior Encoder，不使用 posterior latent，不计算 KL；随机初始化 B 是推荐的独立链路检验，A-init 只作为后续“共享 Decoder 初始化影响”的对照。summary 新增 `stage_route`，显式记录 posterior/condition/memory/FiLM/KL 是否执行。
 - B evaluation 现额外写入条件 Mask seed、窗口 `mask_name` 和 `mask_breakdown`，用于区分 Condition Encoder 总体失败与单个物理 Mask 家族失败。
@@ -347,6 +381,16 @@ Windows代码READY或测试PASS只表示接口和静态合同通过，不写入�
 
 模型、Mask、marker和命令的历史活动合同已结束；当前 65-token 合同见[model.md](model.md)。下文旧 H50-B、CPD、D1 和 SCVAE 训练结果只保留为历史记录，不再执行。
 
+### 5.0A 65-token Stage A posterior reconstruction（2026-09-22，已完成）
+
+- **Run/合同**：`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260922_014417`；Stage A；随机初始化；完整序列只进入 Posterior Encoder，Condition Encoder 不参与；`X=[B,65,99]`；32-motion selected-window 记忆集，评测覆盖 1,504 个窗口（每窗 65 个 State、64 个有效 Action）。训练使用 posterior mean、`KL beta=0`（不采样，不能解释为最终随机 CVAE），`micro_batch=32`、`90,000` optimizer steps、峰值 LR `1e-4`、2,000-step warm-up、cosine、`min_lr_ratio=0.01`（末端约 `1e-6`）。`parameter_count=64,377,959`，`execution_pass=true`，`status=completed`，最佳点为 step 90,000。
+- **最佳/最终完整评测**：`total_loss=1.777659e-05`，State RMSE `0.00588709`，Action RMSE `0.00431750`，contact BCE `3.11693e-08`；连续目标绝对误差 `p95=0.0111622`、`p99=0.0169832`、`max_abs=0.2195571`。分域为 State `p95/p99=0.0118590/0.0180091`，Action `0.0091100/0.0138084`。这些误差均在归一化空间，不能直接当作 rad、rad/s 或物理接触误差。
+- **最差窗口**：按 combined RMSE 的窗口为 `neutral_looking_around_R_001__A542 / variant 6 / start 388`，State/Action/combined RMSE=`0.0154216/0.0084170/0.0124232`，窗口内 max=`0.157517`；按单元素 max 的窗口为 `confusion_103__A045 / variant 7 / start 384`，State/Action/combined RMSE=`0.0138226/0.0089936/0.0116608`，max=`0.219557`。
+- **尾部定位（2026-09-23纠正推断边界）**：回传的最差 State 特征按 feature RMSE 排序，为 `joint_vel_28`（RMSE `0.0080518`、max `0.157517`）、`joint_vel_27`（`0.0071002`、max `0.169897`）、`joint_pos_23`（`0.0067546`、max `0.061453`）、`joint_pos_24`（`0.0067451`、max `0.033567`）和 `joint_vel_10`（`0.0064736`、max `0.112600`）。Action 展示项最大约 `0.064263`，但表是RMSE前十而非全部feature；因此不能确认联合最大值的域或特征，撤回此前“已确定来自State”的表述。
+- **事实结论**：整体 RMSE、p95/p99 和 contact 均已明显下降，说明完整序列 posterior→decoder 重建链路能够工作。`max_abs/p99≈12.93`，最大值窗口 combined RMSE仅 `0.0116608`，支持误差尾部稀疏，不是全窗口重建崩溃；具体域、帧仍未知。本次只验证已见窗口Stage-A重建，不能证明条件补全、KL随机生成或未见motion泛化。
+- **候选原因与缺失证据**：速度峰值、时间偏移、平均MSE下尾部优化不足、窗口上下文差异均待验证。NPZ中速度std约 `0.3170..1.9636`，不支持近零std放大解释；窗口起点 `384/388` 本身也不能证明最大值位于边界或local_15。80k→90k max仍下降约9.15%，不能写成已证明平台。Stage A不读取Mask，不能归因于Condition Mask采样。需要实际argmax与曲线才能区分这些候选因素。
+- **唯一后续诊断**：从同一 run 对最大绝对误差元素输出排序明细：`window_index、motion/variant/start、t、domain、feature_index/name、target_norm、prediction_norm、abs_error_norm` 以及反归一化后的 `target/prediction/error`；同时标记是否为 `t=64`、`local_15` 或窗口边界。拿到该明细后再判断是速度尖峰、归一化统计、时间/特征索引错位还是 chunk 边界问题，不在当前证据下直接修改模型或 Mask 协议。
+
 ### 5.1 H50-A续训结果与H50-B历史入口（已执行，不再使用）
 
 H50-A尾段续训已经完成。run为：
@@ -359,7 +403,7 @@ H50-A尾段续训已经完成。run为：
 
 历史H38/F4G正式结果已集中保留在第3节，不再重复执行命令或长日志。
 
-### 5.2 后续 KL 三路径边界
+### 5.2 历史 H50-SCVAE KL 三路径边界（已失效，不适用于v2）
 
 只有H50-SCVAE的M-R让prior mean、posterior mean、q-p对齐、固定Mask和held-out物理随机Mask连续三次同时通过，且高遮挡条件下latent未被完全忽略，才进入已经实现但受marker阻断的K1：
 

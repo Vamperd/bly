@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,11 +33,24 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def atomic_replace(source: Path, target: Path) -> None:
+    # Windows readers/indexers can briefly deny replacement. Never unlink the
+    # destination: retry the same atomic operation, then propagate real failure.
+    for attempt in range(20):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == 19:
+                raise
+            time.sleep(.05)
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     temporary.write_text(text, encoding="utf-8")
-    os.replace(temporary, path)
+    atomic_replace(temporary, path)
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -49,7 +63,7 @@ def atomic_torch_save(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     torch.save(value, temporary)
-    os.replace(temporary, path)
+    atomic_replace(temporary, path)
 
 
 def seed_everything(seed: int) -> None:

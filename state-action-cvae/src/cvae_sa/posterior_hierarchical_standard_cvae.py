@@ -28,6 +28,7 @@ from .util import (
     load_config,
     seed_everything,
 )
+from .cvae_protocol import CHECKPOINT as V2_CHECKPOINT
 
 
 CHECKPOINT_FORMAT = "sonic_65_token_hierarchical_standard_cvae_checkpoint_v1"
@@ -153,7 +154,7 @@ def _new_checkpoint(
 
 def validate_checkpoint(path: Path, expected: dict[str, Any] | None = None) -> dict[str, Any]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if checkpoint.get("format_version") != CHECKPOINT_FORMAT:
+    if checkpoint.get("format_version") not in {CHECKPOINT_FORMAT, V2_CHECKPOINT}:
         raise ValueError("architecture signature mismatch: checkpoint is not the 65-token CVAE format")
     signature = checkpoint.get("model_signature", {})
     if signature.get("architecture_version") != HierarchicalStandardCVAETransformer.ARCHITECTURE_VERSION:
@@ -176,7 +177,7 @@ def load_checkpoint(model: HierarchicalStandardCVAETransformer, path: Path, *, s
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     signature = checkpoint.get("model_signature", {})
     expected = model.architecture_signature(model.config, sum(parameter.numel() for parameter in model.parameters()))
-    if checkpoint.get("format_version") != CHECKPOINT_FORMAT or signature.get("architecture_version") != model.ARCHITECTURE_VERSION:
+    if checkpoint.get("format_version") not in {CHECKPOINT_FORMAT, V2_CHECKPOINT} or signature.get("architecture_version") != model.ARCHITECTURE_VERSION:
         raise ValueError("architecture signature mismatch: legacy H50 checkpoint cannot be loaded")
     if signature != expected:
         raise ValueError("architecture signature mismatch: checkpoint structure differs from current model")
@@ -501,513 +502,10 @@ def _render_training_plot(output_run: Path, records: list[dict[str, Any]]) -> st
     return str(path)
 
 
-def run_experiment(
-    dataset_run: Path,
-    output_run: Path,
-    source_run: Path | None,
-    config: dict[str, Any],
-    *,
-    stage: str,
-    init_run: Path | None = None,
-    smoke: bool = False,
-    kl_beta_override: float | None = None,
-    max_steps_override: int | None = None,
-    micro_batch_override: int | None = None,
-    learning_rate_override: float | None = None,
-    lr_schedule: str | None = None,
-    warmup_steps_override: int | None = None,
-    min_lr_ratio_override: float | None = None,
-    validation_interval_override: int | None = None,
-    checkpoint_interval_override: int | None = None,
-    log_interval_override: int | None = None,
-    resume_run: Path | None = None,
-) -> dict[str, Any]:
-    """Run only the engineering-safe 65-token training path."""
-    del source_run
-    stage_code, stage_name = _stage_key(stage)
-    if kl_beta_override is not None and stage_code != "C":
-        raise ValueError("KL beta override is only valid for Stage C")
-    dataset_run = Path(dataset_run).expanduser().resolve()
-    output_run = Path(output_run).expanduser().resolve()
-    assert_output_isolated(output_run, [dataset_run])
-    for child in ("data", "manifests", "markers", "logs", "checkpoints", "plots"):
-        (output_run / child).mkdir(parents=True, exist_ok=True)
-
-    from .dataset import StateActionWindowDataset
-
-    data_cfg = config.get("data", {})
-    window = int(data_cfg.get("window_transitions", 64))
-    stride = int(data_cfg.get("stride", 64))
-    if window != 64:
-        raise ValueError("65-token CVAE requires 64 transitions per window")
-    dataset = StateActionWindowDataset(
-        dataset_run,
-        "train",
-        window,
-        stride,
-        max_episodes=data_cfg.get("max_episodes", 256),
-        random_crop=False,
-    )
-    limit = 2 if smoke else data_cfg.get("max_windows")
-    indices = list(range(len(dataset) if limit is None else min(int(limit), len(dataset))))
-    if not indices:
-        raise ValueError("dataset contains no training windows")
-
-    model_cfg = dict(config["model"])
-    model_cfg.setdefault("state_dim", 70)
-    model_cfg.setdefault("state_input_dim", 99)
-    model_cfg.setdefault("condition_input_dim", 198)
-    model_cfg.setdefault("architecture_version", HierarchicalStandardCVAETransformer.ARCHITECTURE_VERSION)
-    with torch.device("meta"):
-        meta_model = build_model(model_cfg)
-    if not isinstance(meta_model, HierarchicalStandardCVAETransformer):
-        raise TypeError("65-token config built the wrong model")
-    parameter_total = sum(parameter.numel() for parameter in meta_model.parameters())
-    del meta_model
-
-    seed_everything(int(config.get("initialization_seed", 20260921)))
-    model = build_model(model_cfg)
-    if not isinstance(model, HierarchicalStandardCVAETransformer):
-        raise TypeError("65-token config built the wrong model")
-    if init_run is not None:
-        init_run = Path(init_run).expanduser().resolve()
-        candidate = init_run / "checkpoints/best.pt"
-        if not candidate.is_file():
-            candidate = init_run / "checkpoints/last.pt"
-        if not candidate.is_file():
-            raise FileNotFoundError("new CVAE stage initialization checkpoint is missing")
-        load_checkpoint(model, candidate)
-    stage_counts = model.set_training_stage(stage_code)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    training_cfg = config.get("training", {})
-    loader_generator = torch.Generator().manual_seed(int(config.get("initialization_seed", 20260921)))
-    micro_batch = int(
-        micro_batch_override
-        if micro_batch_override is not None
-        else training_cfg.get("micro_batch", 2)
-    )
-    if micro_batch <= 0:
-        raise ValueError("micro batch must be positive")
-    loader = DataLoader(
-        Subset(dataset, indices),
-        batch_size=micro_batch,
-        shuffle=True,
-        num_workers=0,
-        drop_last=False,
-        generator=loader_generator,
-    )
-    eval_loader = DataLoader(
-        Subset(dataset, indices),
-        batch_size=micro_batch,
-        shuffle=False,
-        num_workers=0,
-        drop_last=False,
-    )
-    learning_rate = float(
-        learning_rate_override
-        if learning_rate_override is not None
-        else training_cfg.get("learning_rate", 1e-4)
-    )
-    if learning_rate <= 0.0:
-        raise ValueError("learning rate must be positive")
-    schedule_name = str(lr_schedule or training_cfg.get("lr_schedule", "constant")).lower()
-    if schedule_name not in {"constant", "cosine", "linear"}:
-        raise ValueError("lr schedule must be constant, cosine, or linear")
-    maximum = int(
-        max_steps_override
-        if max_steps_override is not None
-        else training_cfg.get(stage_name, {}).get("max_optimizer_steps", 1)
-    )
-    if maximum <= 0:
-        raise ValueError("max optimizer steps must be positive")
-    warmup_steps = int(
-        warmup_steps_override
-        if warmup_steps_override is not None
-        else training_cfg.get("warmup_steps", 0)
-    )
-    if warmup_steps < 0:
-        raise ValueError("warmup steps cannot be negative")
-    min_lr_ratio = float(
-        min_lr_ratio_override
-        if min_lr_ratio_override is not None
-        else training_cfg.get("min_lr_ratio", 0.01)
-    )
-    if not 0.0 < min_lr_ratio <= 1.0:
-        raise ValueError("minimum LR ratio must be in (0, 1]")
-    validation_interval = int(
-        validation_interval_override
-        if validation_interval_override is not None
-        else training_cfg.get("validation_interval", 1000)
-    )
-    checkpoint_interval = int(
-        checkpoint_interval_override
-        if checkpoint_interval_override is not None
-        else training_cfg.get("checkpoint_interval", 250)
-    )
-    log_interval = int(
-        log_interval_override
-        if log_interval_override is not None
-        else training_cfg.get("log_interval", 20)
-    )
-    if validation_interval <= 0 or checkpoint_interval <= 0 or log_interval <= 0:
-        raise ValueError("validation, checkpoint, and log intervals must be positive")
-    optimizer = torch.optim.AdamW(
-        [parameter for parameter in model.parameters() if parameter.requires_grad],
-        lr=learning_rate,
-        weight_decay=0.0,
-    )
-    def lr_multiplier(step: int) -> float:
-        if warmup_steps and step < warmup_steps:
-            return max((step + 1) / warmup_steps, 1e-8)
-        if schedule_name == "constant":
-            return 1.0
-        progress = min(
-            max((step - warmup_steps) / max(maximum - warmup_steps, 1), 0.0),
-            1.0,
-        )
-        if schedule_name == "linear":
-            return 1.0 - progress * (1.0 - min_lr_ratio)
-        return min_lr_ratio + 0.5 * (1.0 - min_lr_ratio) * (1.0 + math.cos(progress * math.pi))
-    if smoke:
-        maximum = min(maximum, 2)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_multiplier)
-    contract = _checkpoint_contract(
-        stage=stage_code, maximum=maximum, micro_batch=micro_batch,
-        learning_rate=learning_rate,
-        schedule_name=schedule_name, warmup_steps=warmup_steps,
-        min_lr_ratio=min_lr_ratio, validation_interval=validation_interval,
-        checkpoint_interval=checkpoint_interval, log_interval=log_interval,
-    )
-    dataset_identity = {
-        "dataset_run": str(dataset_run),
-        "dataset_manifest_sha256": file_sha256(dataset_run / "manifests/dataset_manifest.json")
-        if (dataset_run / "manifests/dataset_manifest.json").is_file() else None,
-        "selected_window_count": len(indices),
-        "window": window,
-        "stride": stride,
-    }
-    metrics_path = output_run / "logs/metrics.jsonl"
-    records = _read_jsonl(metrics_path)
-    start_step = 0
-    best_step: int | None = None
-    best_metrics: dict[str, Any] | None = None
-    best_score = math.inf
-    resume_source = None
-    if resume_run is not None:
-        resume_source = Path(resume_run).expanduser().resolve()
-        if resume_source != output_run:
-            raise ValueError("resume-run must be the output run itself; refusing split-brain resume")
-        resume_checkpoint = output_run / "checkpoints/last.pt"
-        if not resume_checkpoint.is_file():
-            raise FileNotFoundError(f"resume checkpoint is missing: {resume_checkpoint}")
-        checkpoint = load_checkpoint(model, resume_checkpoint)
-        if checkpoint.get("stage") != stage_code:
-            raise ValueError("resume checkpoint stage does not match requested stage")
-        if checkpoint.get("training_contract") != contract:
-            raise ValueError("resume checkpoint training contract differs; keep CLI overrides unchanged")
-        if checkpoint.get("dataset_identity") != dataset_identity:
-            raise ValueError("resume checkpoint dataset identity differs")
-        model.load_state_dict(checkpoint["model"], strict=True)
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        if checkpoint.get("scheduler") is not None:
-            scheduler.load_state_dict(checkpoint["scheduler"])
-        start_step = int(checkpoint.get("optimizer_step", 0))
-        if start_step >= maximum:
-            raise ValueError(f"resume checkpoint is already at step {start_step}, maximum is {maximum}")
-        best_step = checkpoint.get("best_optimizer_step")
-        best_metrics = checkpoint.get("best_metrics")
-        if best_metrics:
-            best_score = float(best_metrics["total_loss"])
-        rng_state = checkpoint.get("rng_state") or {}
-        if rng_state.get("torch") is not None:
-            torch.set_rng_state(rng_state["torch"])
-        if torch.cuda.is_available() and rng_state.get("cuda") is not None:
-            torch.cuda.set_rng_state_all(rng_state["cuda"])
-        if rng_state.get("data_loader_generator") is not None:
-            loader_generator.set_state(rng_state["data_loader_generator"])
-        records = [
-            row for row in records
-            if int(row.get("optimizer_step", 0)) <= start_step
-        ]
-        atomic_write_text(
-            metrics_path,
-            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records),
-        )
-    elif records:
-        raise ValueError("metrics.jsonl exists without --resume-run; refusing to overwrite a partial run")
-
-    def save_last(step: int) -> None:
-        checkpoint = _new_checkpoint(
-            model, optimizer, scheduler, {"model": model_cfg}, stage=stage_code,
-            step=step, training_contract=contract, best_step=best_step,
-            best_metrics=best_metrics, dataset_identity=dataset_identity,
-            data_loader_generator=loader_generator,
-        )
-        atomic_torch_save(output_run / "checkpoints/last.pt", checkpoint)
-
-    def save_best(step: int, metrics: dict[str, Any]) -> None:
-        checkpoint = _new_checkpoint(
-            model, optimizer, scheduler, {"model": model_cfg}, stage=stage_code,
-            step=step, training_contract=contract, best_step=step,
-            best_metrics=metrics, dataset_identity=dataset_identity,
-            data_loader_generator=loader_generator,
-        )
-        atomic_torch_save(output_run / "checkpoints/best.pt", checkpoint)
-
-    iterator = _infinite(loader)
-    if start_step == 0:
-        model.eval()
-        initial_metrics = _evaluate_full_sequence(
-            model,
-            eval_loader,
-            device,
-            stage=stage_code,
-            mask_seed=int(config.get("training_mask_seed", 20260920)),
-        )
-        initial_metrics["optimizer_step"] = 0
-        initial_metrics["evaluation_scope"] = (
-            "complete selected-window Stage-A posterior sequence"
-            if stage_code == "A"
-            else f"complete selected-window Stage-{stage_code} masked-condition sequence"
-        )
-        initial_row = {"phase": "evaluation", **initial_metrics}
-        _append_jsonl(metrics_path, initial_row)
-        records.append(initial_row)
-        best_score = float(initial_metrics["total_loss"])
-        best_step = 0
-        best_metrics = initial_metrics
-        save_best(0, initial_metrics)
-        save_last(0)
-        start_row = {
-            "phase": "lifecycle", "event": "training_started",
-            "optimizer_step": 0, "max_steps": maximum,
-            "validation_interval": validation_interval,
-            "checkpoint_interval": checkpoint_interval,
-            "log_interval": log_interval,
-        }
-        _append_jsonl(metrics_path, start_row)
-        records.append(start_row)
-        _render_training_plot(output_run, records)
-        atomic_write_json(output_run / "manifests/progress.json", {
-            "status": "running", "optimizer_step": 0, "max_steps": maximum,
-            "best_step": best_step, "best_metrics": best_metrics,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
-        print(
-            f"[stage={stage_code}] training started: steps={maximum} "
-            f"validation_interval={validation_interval} checkpoint_interval={checkpoint_interval} "
-            f"log_interval={log_interval}", flush=True,
-        )
-    else:
-        resume_row = {
-            "phase": "lifecycle", "event": "training_resumed",
-            "optimizer_step": start_step, "max_steps": maximum,
-        }
-        _append_jsonl(metrics_path, resume_row)
-        records.append(resume_row)
-        print(f"[stage={stage_code}] resumed from step={start_step}/{maximum}", flush=True)
-    model.train()
-    last_step = start_step
-    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
-    signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
-    try:
-        for step in range(start_step + 1, maximum + 1):
-            started = time.perf_counter()
-            cpu_batch = next(iterator)
-            batch = _device_batch(cpu_batch, device)
-            if stage_code == "A":
-                output = model(batch, stage="A")
-            else:
-                state_mask, action_mask, _ = make_physical_masks(
-                    cpu_batch, int(config.get("training_mask_seed", 20260920))
-                )
-                output = model(batch, state_mask.to(device), action_mask.to(device), stage=stage_code)
-            reconstruction = _standard_reconstruction_loss(output, batch)
-            if output.posterior is not None:
-                kl = hierarchical_kl(output.posterior)
-            else:
-                zero = reconstruction * 0.0
-                kl = {"total": zero, "global": zero, "local": zero}
-            target_beta = float(kl_beta_override if kl_beta_override is not None else training_cfg.get("kl", {}).get("beta", 1e-3))
-            beta_warmup = max(1, int(training_cfg.get("kl", {}).get("beta_warmup_steps", 1)))
-            beta = 0.0 if stage_code != "C" else target_beta * min(step / beta_warmup, 1.0)
-            loss = reconstruction + beta * kl["total"]
-            if not bool(torch.isfinite(loss)):
-                raise FloatingPointError(f"non-finite loss at optimizer step {step}")
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            gradient_norm = torch.nn.utils.clip_grad_norm_([parameter for parameter in model.parameters() if parameter.requires_grad], 1.0)
-            optimizer.step()
-            scheduler.step()
-            last_step = step
-            row = {
-                "phase": "train", "optimizer_step": step,
-                "loss": float(loss.detach().cpu()),
-                "reconstruction": float(reconstruction.detach().cpu()),
-                "kl": float(kl["total"].detach().cpu()),
-                "kl_beta": beta, "learning_rate": optimizer.param_groups[0]["lr"],
-                "gradient_norm_before_clip": float(gradient_norm),
-                "step_seconds": time.perf_counter() - started,
-                "cuda_max_memory_bytes": torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0,
-            }
-            _append_jsonl(metrics_path, row)
-            records.append(row)
-            if step % log_interval == 0 or step == 1:
-                print(
-                    f"[stage={stage_code}] step={step}/{maximum} loss={row['loss']:.6g} "
-                    f"reconstruction={row['reconstruction']:.6g} lr={row['learning_rate']:.3g} "
-                    f"grad={row['gradient_norm_before_clip']:.3g} step_s={row['step_seconds']:.2f}",
-                    flush=True,
-                )
-            if step % validation_interval == 0 or step == maximum:
-                model.eval()
-                eval_metrics = _evaluate_full_sequence(
-                    model,
-                    eval_loader,
-                    device,
-                    stage=stage_code,
-                    mask_seed=int(config.get("training_mask_seed", 20260920)),
-                )
-                eval_metrics["optimizer_step"] = step
-                eval_metrics["evaluation_scope"] = (
-                    "complete selected-window Stage-A posterior sequence"
-                    if stage_code == "A"
-                    else f"complete selected-window Stage-{stage_code} masked-condition sequence"
-                )
-                _append_jsonl(metrics_path, {"phase": "evaluation", **eval_metrics})
-                records.append({"phase": "evaluation", **eval_metrics})
-                if float(eval_metrics["total_loss"]) < best_score:
-                    best_score = float(eval_metrics["total_loss"])
-                    best_step = step
-                    best_metrics = eval_metrics
-                    save_best(step, eval_metrics)
-                save_last(step)
-                _render_training_plot(output_run, records)
-                atomic_write_json(output_run / "manifests/progress.json", {
-                    "status": "running", "optimizer_step": step, "max_steps": maximum,
-                    "best_step": best_step, "best_metrics": best_metrics,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                })
-                print(
-                    f"[stage={stage_code}] eval step={step} total={eval_metrics['total_loss']:.6g} "
-                    f"state_rmse={eval_metrics['state_rmse']:.6g} action_rmse={eval_metrics['action_rmse']:.6g} "
-                    f"p99={eval_metrics['continuous_abs_p99']:.6g} "
-                    f"max_abs={eval_metrics['max_abs']:.6g} best_step={best_step}", flush=True,
-                )
-                model.train()
-            elif step % checkpoint_interval == 0:
-                save_last(step)
-                _render_training_plot(output_run, records)
-                atomic_write_json(output_run / "manifests/progress.json", {
-                    "status": "running", "optimizer_step": step, "max_steps": maximum,
-                    "best_step": best_step, "best_metrics": best_metrics,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                })
-    except KeyboardInterrupt:
-        save_last(last_step)
-        _render_training_plot(output_run, records)
-        atomic_write_json(output_run / "manifests/progress.json", {
-            "status": "interrupted", "optimizer_step": last_step, "max_steps": maximum,
-            "best_step": best_step, "best_metrics": best_metrics,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
-        atomic_write_text(output_run / "markers/cvae.interrupted", "INTERRUPTED\n")
-        raise
-    except Exception:
-        save_last(last_step)
-        _render_training_plot(output_run, records)
-        atomic_write_json(output_run / "manifests/progress.json", {
-            "status": "failed", "optimizer_step": last_step, "max_steps": maximum,
-            "best_step": best_step, "best_metrics": best_metrics,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
-        raise
-    finally:
-        signal.signal(signal.SIGTERM, previous_sigterm_handler)
-
-    save_last(last_step)
-    _render_training_plot(output_run, records)
-    atomic_write_json(output_run / "manifests/progress.json", {
-        "status": "completed", "optimizer_step": last_step, "max_steps": maximum,
-        "best_step": best_step, "best_metrics": best_metrics,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    })
-    readback = validate_checkpoint(
-        output_run / "checkpoints/last.pt",
-        {"stage": stage_code, "parameters": parameter_total},
-    )
-    if not readback["passed"]:
-        raise RuntimeError("65-token CVAE checkpoint readback failed")
-    best_readback = validate_checkpoint(
-        output_run / "checkpoints/best.pt",
-        {"stage": stage_code, "parameters": parameter_total},
-    )
-    if not best_readback["passed"]:
-        raise RuntimeError("65-token CVAE best checkpoint readback failed")
-    summary = {
-        "format_version": SUMMARY_FORMAT,
-        "architecture_version": model.ARCHITECTURE_VERSION,
-        "stage": stage_code,
-        "stage_name": stage_name,
-        "execution_pass": True,
-        "quality_pass": None,
-        "smoke": smoke,
-        "completed_optimizer_steps": last_step,
-        "model_contract": {
-            **model_cfg,
-            "actual_parameter_count": parameter_total,
-            "decoder_memory_length": 82,
-            "posterior_memory_length": 17,
-            "posterior_input_shape": ["B", 65, 99],
-            "condition_input_shape": ["B", 65, 198],
-            "output_state_shape": ["B", 65, 70],
-            "output_action_shape": ["B", 64, 29],
-            "terminal_action_policy": "zero_not_predicted",
-            "hard_chunk_ranges": [[4 * i, 4 * i + 3] for i in range(15)] + [[60, 64]],
-        },
-        "stage_parameter_counts": stage_counts,
-        "stage_route": {
-            "posterior_encoder_executed": stage_code in {"A", "C"},
-            "posterior_latent_used": stage_code in {"A", "C"},
-            "condition_encoder_executed": stage_code in {"B", "C"},
-            "condition_latent_used": stage_code in {"B", "C"},
-            "condition_memory_used": stage_code in {"B", "C"},
-            "film_used": True,
-            "kl_enabled": stage_code == "C",
-        },
-        "training_overrides": {
-            "max_steps": max_steps_override,
-            "micro_batch": micro_batch,
-            "learning_rate": learning_rate,
-            "lr_schedule": schedule_name,
-            "warmup_steps": warmup_steps,
-            "min_lr_ratio": min_lr_ratio,
-        },
-        "records": records,
-        "best_step": best_step,
-        "best_metrics": best_metrics,
-        "validation_interval": validation_interval,
-        "checkpoint_interval": checkpoint_interval,
-        "log_interval": log_interval,
-        "resume_run": str(resume_source) if resume_source is not None else None,
-        "training_plot": str(output_run / "plots/training_curves.svg"),
-        "checkpoint_readback": readback,
-        "best_checkpoint_readback": best_readback,
-        "source_checkpoint": (
-            str(resume_source / "checkpoints/last.pt") if resume_source is not None
-            else (str(init_run) if init_run is not None else "none; random initialization")
-        ),
-        "unique_next_step": "ENGINEERING_REVIEW_ONLY",
-    }
-    atomic_write_json(output_run / "manifests/standard_cvae_summary.json", summary)
-    atomic_write_json(output_run / "manifests/model_signature.json", _model_signature(model_cfg, parameter_total))
-    for stale_marker in ("cvae.interrupted", "cvae.failed"):
-        (output_run / "markers" / stale_marker).unlink(missing_ok=True)
-    marker = "cvae_posterior_standard_cvae_smoke.ok" if smoke else "cvae_posterior_standard_cvae_execution.ok"
-    atomic_write_text(output_run / "markers" / marker, "PASS\n")
-    dataset.close()
-    return summary
+def run_experiment(*args, **kwargs):
+    """Public entry now exclusively uses the versioned, recoverable v2 trainer."""
+    from .cvae_training import run_experiment as run_v2
+    return run_v2(*args, **kwargs)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1030,6 +528,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint-interval", type=int)
     parser.add_argument("--log-interval", type=int)
     parser.add_argument("--resume-run", type=Path)
+    parser.add_argument("--init-checkpoint", type=Path)
+    parser.add_argument("--continue-checkpoint", type=Path)
+    parser.add_argument("--additional-steps", type=int)
+    parser.add_argument("--allow-legacy-identity", action="store_true")
+    parser.add_argument("--mask-mode", choices=("fixed", "dynamic"), default="fixed")
+    parser.add_argument("--eval-samples", type=int, default=8)
+    parser.add_argument("--beta-warmup-steps", type=int)
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args(argv)
 
@@ -1055,7 +560,17 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_interval_override=args.checkpoint_interval,
         log_interval_override=args.log_interval,
         resume_run=args.resume_run,
+        init_checkpoint=args.init_checkpoint,
+        continue_checkpoint=args.continue_checkpoint,
+        additional_steps=args.additional_steps,
+        allow_legacy_identity=args.allow_legacy_identity,
+        mask_mode=args.mask_mode,
+        eval_samples=args.eval_samples,
+        beta_warmup_steps=args.beta_warmup_steps,
     )
+    if summary.get("interrupted"):
+        print("Training interrupted at a safe boundary; last.pt saved", flush=True)
+        return 130
     print("65-token hierarchical standard CVAE: PASS (engineering execution complete)")
     print(json.dumps({
         "output_run": str(args.output_run.expanduser().resolve()),

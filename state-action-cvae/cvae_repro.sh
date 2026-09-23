@@ -73,7 +73,11 @@ run_logged() {
   set -e
   printf '%s\n' "$code" > "$run_dir/manifests/exit_code.txt"
   if (( code != 0 )); then
-    printf 'FAIL exit_code=%s\n' "$code" > "$run_dir/markers/cvae.failed"
+    if [[ "$code" == "130" && -f "$run_dir/markers/cvae.interrupted" ]]; then
+      printf 'Interrupted safely; recovery checkpoint retained\n'
+    else
+      printf 'FAIL exit_code=%s\n' "$code" > "$run_dir/markers/cvae.failed"
+    fi
     return "$code"
   fi
 }
@@ -855,6 +859,13 @@ posterior_hierarchical_standard_cvae() {
   [[ -z "$checkpoint_interval" ]] || extra_args+=(--checkpoint-interval "$checkpoint_interval")
   [[ -z "$log_interval" ]] || extra_args+=(--log-interval "$log_interval")
   [[ -z "$resume_run" ]] || extra_args+=(--resume-run "$resume_run")
+  [[ -z "${CVAE_POSTERIOR_INIT_CHECKPOINT:-}" ]] || extra_args+=(--init-checkpoint "$CVAE_POSTERIOR_INIT_CHECKPOINT")
+  [[ -z "${CVAE_POSTERIOR_CONTINUE_CHECKPOINT:-}" ]] || extra_args+=(--continue-checkpoint "$CVAE_POSTERIOR_CONTINUE_CHECKPOINT")
+  [[ -z "${CVAE_POSTERIOR_ADDITIONAL_STEPS:-}" ]] || extra_args+=(--additional-steps "$CVAE_POSTERIOR_ADDITIONAL_STEPS")
+  [[ -z "${CVAE_POSTERIOR_MASK_MODE:-}" ]] || extra_args+=(--mask-mode "$CVAE_POSTERIOR_MASK_MODE")
+  [[ -z "${CVAE_POSTERIOR_EVAL_SAMPLES:-}" ]] || extra_args+=(--eval-samples "$CVAE_POSTERIOR_EVAL_SAMPLES")
+  [[ -z "${CVAE_POSTERIOR_BETA_WARMUP_STEPS:-}" ]] || extra_args+=(--beta-warmup-steps "$CVAE_POSTERIOR_BETA_WARMUP_STEPS")
+  [[ "${CVAE_POSTERIOR_ALLOW_LEGACY_IDENTITY:-false}" != "true" ]] || extra_args+=(--allow-legacy-identity)
   prefix="cvae_posterior_hierarchical_standard_cvae_65_${stage}"
   [[ "$smoke" == "true" ]] && prefix="${prefix}_smoke"
   if [[ -n "$resume_run" ]]; then
@@ -1430,6 +1441,9 @@ case "${1:-}" in
   posterior-hierarchical-standard-cvae-smoke) posterior_hierarchical_standard_cvae fixed true ;;
   posterior-hierarchical-standard-cvae-fixed) posterior_hierarchical_standard_cvae fixed false ;;
   posterior-hierarchical-standard-cvae-condition) posterior_hierarchical_standard_cvae random false ;;
+  posterior-hierarchical-standard-cvae-condition-fixed) CVAE_POSTERIOR_MASK_MODE=fixed posterior_hierarchical_standard_cvae random false ;;
+  posterior-hierarchical-standard-cvae-condition-dynamic) CVAE_POSTERIOR_MASK_MODE=dynamic posterior_hierarchical_standard_cvae random false ;;
+  posterior-hierarchical-standard-cvae-condition-smoke) CVAE_POSTERIOR_MASK_MODE=fixed posterior_hierarchical_standard_cvae random true ;;
   posterior-hierarchical-standard-cvae-random-physical) posterior_hierarchical_standard_cvae random false ;;
   posterior-hierarchical-standard-cvae-kl) posterior_hierarchical_standard_cvae kl false ;;
   posterior-h50-action-replay) posterior_h50_action_replay ;;

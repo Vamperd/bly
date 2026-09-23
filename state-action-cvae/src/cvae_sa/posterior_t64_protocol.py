@@ -39,9 +39,18 @@ def deterministic_quantile(values: torch.Tensor, quantile: float) -> float:
 
 
 def identity(batch: dict[str, Any], index: int) -> tuple[Any, ...]:
+    if "stable_window_id" in batch:
+        # v2 identity is content-derived, never a mini-batch ordinal.
+        return (str(batch["stable_window_id"][index]),)
     window_index = batch.get("window_index")
     if window_index is None:
-        window_index = torch.arange(len(batch["motion_key"]))
+        return (
+            str(batch.get("episode_ref", batch["motion_key"])[index]),
+            str(batch["motion_key"][index]), int(batch["variant_id"][index]),
+            int(batch["window_start"][index]),
+            int(batch["valid_state"][index].sum()),
+            int(batch["valid_action"][index].sum()),
+        )
     return (
         str(batch["motion_key"][index]),
         int(batch["variant_id"][index]),
@@ -81,10 +90,12 @@ def make_physical_masks(
     state_mask = torch.zeros_like(batch["physical_state"], dtype=torch.bool)
     action_mask = torch.zeros_like(batch["action"], dtype=torch.bool)
     slots = batch.get("mask_slot")
+    ordinals = batch.get("sample_ordinal", [0] * len(batch["motion_key"]))
     if slots is None:
         slots = torch.tensor(
             [
-                _stable_seed(seed, "dynamic-slot", dynamic_step, *identity(batch, index))
+                _stable_seed(seed, "dynamic-slot", dynamic_step, *identity(batch, index),
+                             *([int(ordinals[index])] if dynamic_step is not None and "sample_ordinal" in batch else []))
                 % len(PHYSICAL_MASK_NAMES)
                 for index in range(len(batch["motion_key"]))
             ],
@@ -100,7 +111,8 @@ def make_physical_masks(
             raise ValueError("T64 physical Mask window has no valid transitions")
         namespace = "dynamic" if dynamic_step is not None else ("heldout" if held_out else "fixed")
         generator = torch.Generator().manual_seed(
-            _stable_seed(seed, namespace, dynamic_step, *identity(batch, index), int(raw_slot))
+            _stable_seed(seed, namespace, dynamic_step, *identity(batch, index), int(raw_slot),
+                         *([int(ordinals[index])] if dynamic_step is not None and "sample_ordinal" in batch else []))
         )
         if slot in {0, 1}:
             length = (4, 16)[slot]
