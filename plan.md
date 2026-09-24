@@ -303,3 +303,15 @@ B-fixed通过后再启动同32-motion的B-dynamic；回放继续独立待执行�
 
 当前只给出新训练与精简打包命令，没有在Ubuntu启动训练；不修改训练/采样/evaluator代码。
 真实Isaac/MuJoCo回放仍未收到结果。Windows文档与CLI静态检查不替代新32-motion工程/质量验收。
+
+## 8. 本轮协议落地状态（Windows，2026-09-24）
+
+已完成最小工程补强，未启动或中断任何 Ubuntu 训练：
+
+- B 训练保留 `best.pt`，新增 `best_fixed.pt` 与 `best_heldout.pt`，并将两者的 step、指标、progress、summary 和严格 readback 写入记录。
+- 每五次评测的消融优先按 motion 选择窗口，再用均匀间隔补足；结果记录窗口身份和真正跨 motion donor 数量。单 motion smoke 会保留 same-motion 限制。
+- C checkpoint 新增固定 epsilon 的 standard-normal readback probe，严格读回同时验证 posterior-mean 与部署标准正态路径。
+- replay65 报告新增相对原始 Action baseline 的模型质量判定：joint position、root position、body MPJPE 比值阈值为 1.2；baseline 无效时仍可生成视频，但模型质量保持 `MODEL_QUALITY_UNDETERMINED`。
+- Windows 验证已通过：`test_cvae_protocol_v2` 8项、`test_replay65` 12项、`test_replay65_runtime` 6项、Python compile、CLI/协议读回及 `git diff --check`；另修正了 `best_heldout_step` 在 summary/checkpoint 中漏写的问题。全量 discovery 的唯一已知失败仍是 Windows 环境缺少 `h5py` 导致的3个既有模块导入错误，未涉及本轮代码。
+
+仍待 Ubuntu 验证：32-motion B-fixed 的最终 summary、双 bank 曲线和实际 batch；32-motion B-dynamic；C 独立随机初始化；真实 Isaac/MuJoCo 的原始 Action 双基线和模型回放。当前训练可继续使用旧源码完成；新阶段必须在 Windows 静态核验通过后同步同一份源码。

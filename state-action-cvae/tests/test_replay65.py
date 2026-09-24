@@ -128,6 +128,15 @@ class Replay65Test(unittest.TestCase):
         metrics["root_orientation_max_deg"]=6
         self.assertFalse(replay.passes(metrics))
 
+    def test_model_quality_is_relative_to_valid_baseline(self):
+        baseline={key:1e-2 for key in replay.MODEL_QUALITY_METRICS}
+        model={key:1.1e-2 for key in replay.MODEL_QUALITY_METRICS}
+        result=replay.model_quality_against_baseline(baseline,model)
+        self.assertTrue(result["pass"])
+        model["body_mpjpe_m"]=1.3e-2
+        result=replay.model_quality_against_baseline(baseline,model)
+        self.assertFalse(result["pass"])
+
     def test_prepared_hash_changes_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); (root/"manifests").mkdir()

@@ -31,6 +31,10 @@ prepare/simulate/render/report 回放入口（合同见model.md第7节）。当�
 但物理质量为不可判定。不得用旧H50/physics_transformer入口加载65-token权重。
 新回放不修改当前训练，待安全同步；旧回放入口和嵌套仓库保持不变。
 
+2026-09-24 已在Windows落地v2训练/回放工程补强：B新增`best_fixed.pt`与`best_heldout.pt`选择记录，
+跨motion消融选择和C标准正态readback验证，replay65增加相对原始Action baseline的模型质量字段。
+32-motion B-fixed结果、B-dynamic、C及真实Isaac/MuJoCo回放仍待Ubuntu执行；新阶段同步前必须完成静态核验。
+
 本文档是 `bly` 工作区的首要交接入口。后续会话开始任何工作前必须完整阅读；其中“已验证事实”“代码已实现但待执行”“历史兼容路径”不可混为一谈。若实际 Git、文件或 Ubuntu 日志与本文冲突，以只读检查得到的当前事实为准，并更新本文。
 
 ## 1. 当前研究目标与边界

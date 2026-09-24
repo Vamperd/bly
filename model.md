@@ -4,7 +4,12 @@
 `65-token-experiment-v2`，checkpoint 格式为
 `sonic_65_token_hierarchical_standard_cvae_checkpoint_v2`。
 本轮不改模型参数、融合、FiLM、数据或重建目标。历史 H50 checkpoint 不迁移。
-工程 PASS 与质量判断严格分开；无预注册质量阈值时 `quality_pass=null`。
+工程 PASS 与质量判断严格分开。B 训练同时保存 `best_fixed.pt` 与 `best_heldout.pt`；
+C checkpoint 额外保存固定 epsilon 的 standard-normal readback probe，严格读回同时验证
+posterior-mean 与部署路径。回放报告区分 `engineering_complete`、`baseline_valid`、
+`model_physical_quality` 和 `quality_pass`；baseline 有效后，模型 Action 的 joint position、
+root position、body MPJPE 相对同窗口原始回放不得超过 1.2 倍，否则标记
+`FAIL_RELATIVE_TO_BASELINE`。
 
 ## 1. 数据、编码与解码
 
@@ -124,6 +129,11 @@ step0、首次完整评测、每5次评测及结束生成审核，分已验证�
 A best 按 full reconstruction；B best 按八family等权、family内有效域均值 masked MSE；
 C best 按实际 standard_normal masked energy；另存 best_reconstruction
 （C 为 posterior_mean full 重建参考）。每次完整评测才更新 best。
+B 同时写出 `best_fixed.pt`（与 `best.pt` 同一固定bank选择）和
+`best_heldout.pt`（held-out mask 选择），并在 summary/progress/checkpoint 中记录两者的
+step、指标和严格读回结果；旧 run 缺少该别名时不得宣称已补齐历史选择。
+新 C checkpoint 额外保存固定 epsilon 的 standard-normal readback probe，严格读回同时验证
+posterior-mean 与部署路径，避免只验证训练时的 posterior 路径。
 
 | 模式 | 接口与语义 |
 |---|---|
@@ -212,7 +222,8 @@ RUN_DIR=/home/helloworld/bly/runs/替换为准确的run目录
 只读诊断可加 `--export-all` 保存全量预测，常规训练不保存全量。
 
 B-dynamic 在正式B-fixed结果审核后用 `--stage B --mask-mode dynamic --init-checkpoint .../best.pt`
-并创建新run；C独立用 `--stage C --kl-beta 1e-3 --beta-warmup-steps 10000 --eval-samples 8`。
+并创建新run；C独立随机初始化，建议用 `--stage C --mask-mode dynamic --kl-beta 1e-3
+--beta-warmup-steps 10000 --eval-samples 8`，不加载A/B权重。
 A追加60k的接口是 `--stage A --continue-checkpoint .../last.pt --additional-steps 60000`，
 学习率段仍用已有CLI设置；历史A需显式确认未知身份。当前不自动授权启动该续训。
 
@@ -281,7 +292,8 @@ State视频标KINEMATIC ONLY；不以其判断物理可执行。Action视频为H
 报告包含full/masked/visible分域误差、contact混淆/BCE、State/Action各top100坐标及物理单位、
 完整预测/真值/Mask NPZ、逐帧误差及首次越界帧、初始化读回、runtime配置和采样seed。
 另比较模型原始/补全State与配对Action实现State，物理误差按单位组统计，不混合rad、rad/s、m。
-`quality_pass=null`；`replay65_execution.ok`仅在预期仿真和视频完整后写入，不代表模型通过。
+`replay65_execution.ok`仅在预期仿真和视频完整后写入，不代表模型通过；baseline 无效时模型质量始终为
+`MODEL_QUALITY_UNDETERMINED`，仍可生成对照视频。
 未完成或异常run可回传已有材料，但不得充当完整验收。确认过哈希的原始基线和视频可复用，不覆盖未验证残留。
 
 ### 7.3 Ubuntu命令（代码安全同步后；不与当前训练抢GPU）

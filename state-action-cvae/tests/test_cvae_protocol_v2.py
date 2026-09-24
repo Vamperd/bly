@@ -196,6 +196,9 @@ class ProtocolTests(unittest.TestCase):
                 init_checkpoint=root / "B/run/checkpoints/best.pt")
             self.assertEqual(dynamic["training_contract"]["mask_mode"], "dynamic")
             self.assertEqual(dynamic["cumulative_step"], 2)
+            self.assertTrue((root / "dynamic/checkpoints/best_fixed.pt").is_file())
+            self.assertTrue((root / "dynamic/checkpoints/best_heldout.pt").is_file())
+            self.assertIsNotNone(dynamic["best_heldout_step"])
             from cvae_sa.cvae_tools import evaluate_checkpoint, export_report, monitor
             with patch("cvae_sa.cvae_tools.make_dataset", return_value=(FakeDataset(), [0, 1, 2])):
                 diagnostic = evaluate_checkpoint(SimpleNamespace(checkpoint=root / "A/run/checkpoints/best.pt",

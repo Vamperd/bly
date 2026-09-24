@@ -40,6 +40,12 @@ from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
 VERSION = "65-token-replay-v1"
 THRESHOLDS = {"joint_position_rmse_rad": .02, "root_position_rmse_m": .05,
               "root_orientation_max_deg": 5., "body_mpjpe_m": .05, "foot_contact_accuracy": .95}
+# These are deliberately relative to the same-window original Action baseline;
+# they are not a substitute for the baseline validity gate.  A replay can be
+# numerically complete while remaining physically unassessable when the source
+# environment itself cannot be reproduced.
+MODEL_QUALITY_RATIO = 1.2
+MODEL_QUALITY_METRICS = ("joint_position_rmse_rad", "root_position_rmse_m", "body_mpjpe_m")
 REPRESENTATIVES = ("state_gap_16", "action_gap_16", "full_action", "joint_gap_8")
 CONTEXT_FIELDS = ("runtime_default_joint_pos", "action_offset", "joint_position_limits",
     "joint_velocity_limits", "joint_effort_limits", "joint_stiffness", "joint_damping",
@@ -294,7 +300,9 @@ def prepare_window(args, dataset, fixtures, model, index, run, norm):
     manifest = {"version": VERSION, "window": row, "route": args.route, "action_mode": args.action_mode,
         "mask_seed": args.mask_seed, "sample_seed": args.sample_seed, "sample_index": args.sample_index,
         "simulation_seed": args.simulation_seed, "source": source_meta, "entries": entries,
-        "initialization": init_manifest, "baseline_thresholds": THRESHOLDS, "quality_pass": None,
+        "initialization": init_manifest, "baseline_thresholds": THRESHOLDS,
+        "model_quality": {"ratio_threshold": MODEL_QUALITY_RATIO, "metrics": MODEL_QUALITY_METRICS},
+        "quality_pass": None,
         "limitations": ["solver/contact warm-start state not recorded", "actual historical delay/queues may be unknown",
                          "kinematic State rendering is not a dynamics validation"]}
     atomic_write_json(run / "manifests/replay65.json", manifest)
@@ -514,6 +522,24 @@ def passes(metrics):
     return all(metrics[k]>=v if k=="foot_contact_accuracy" else metrics[k]<=v for k,v in THRESHOLDS.items())
 
 
+def model_quality_against_baseline(baseline, model):
+    """Compare a model Action replay to the same-window original replay.
+
+    The source comparison is used for both trajectories so common simulator
+    drift is not mistaken for a model regression.  The small denominator floor
+    makes a near-perfect source replay a stricter, but finite, reference.
+    """
+    ratios = {}
+    for key in MODEL_QUALITY_METRICS:
+        reference = float(baseline[key])
+        value = float(model[key])
+        ratios[key] = value / max(abs(reference), 1.0e-6)
+    return {"pass": all(value <= MODEL_QUALITY_RATIO for value in ratios.values()),
+            "ratio_threshold": MODEL_QUALITY_RATIO, "ratios": ratios,
+            "baseline_metrics": {key: float(baseline[key]) for key in MODEL_QUALITY_METRICS},
+            "model_metrics": {key: float(model[key]) for key in MODEL_QUALITY_METRICS}}
+
+
 def initialization_checks(readback, expected, runtime):
     errors = readback.get("errors",{})
     limits = {"joint_pos_max_abs_rad":1e-5,"joint_vel_max_abs_rad_s":1e-5,
@@ -588,11 +614,43 @@ def report_window(window):
         if not all(init_ok[name].values()):
             execution[name]["model_physical_quality"] = "UNDETERMINED_INITIALIZATION_INVALID"
     expected_names = {"original_1","original_2"}|{e["mask"] for e in meta["entries"] if e["action_model_replay"]}
-    report = {"version":VERSION,"window":meta["window"],"execution_complete":expected_names <= set(trajectories),
-        "baseline_valid":baseline_valid,"quality_pass":None,
-        "model_physical_quality":"UNASSESSED_NO_PREREGISTERED_THRESHOLD" if baseline_valid else "MODEL_QUALITY_UNDETERMINED",
-        "banner":"BASELINE_VALID / QUALITY_UNASSESSED" if baseline_valid else "BASELINE_INVALID / MODEL_QUALITY_UNDETERMINED" if baseline_valid is False else "BASELINE_NOT_RUN / MODEL_QUALITY_UNDETERMINED",
-        "threshold_version":"legacy-window-baseline-v1","thresholds":THRESHOLDS,
+    execution_complete = expected_names <= set(trajectories)
+    model_names = [name for name in trajectories if not name.startswith("original_")]
+    model_quality_results = {}
+    if baseline_valid and model_names:
+        baseline_metrics = comparisons["recorded_to_original_1"]
+        for name in model_names:
+            result = model_quality_against_baseline(
+                baseline_metrics, comparisons[f"recorded_to_{name}"]
+            ) if init_ok.get(name) and all(init_ok[name].values()) else None
+            model_quality_results[name] = result
+            execution[name]["model_quality"] = result or {
+                "pass": None, "reason": "initialization_or_runtime_contract_invalid"
+            }
+    model_quality_pass = (
+        all(result is not None and result["pass"] for result in model_quality_results.values())
+        if execution_complete and baseline_valid and model_names and len(model_quality_results) == len(model_names)
+        else None
+    )
+    banner = (
+        "BASELINE_INVALID / MODEL_QUALITY_UNDETERMINED" if baseline_valid is False else
+        "BASELINE_NOT_RUN / MODEL_QUALITY_UNDETERMINED" if baseline_valid is None else
+        "BASELINE_VALID / MODEL_QUALITY_PASS" if model_quality_pass is True else
+        "BASELINE_VALID / MODEL_QUALITY_FAIL" if model_quality_pass is False else
+        "BASELINE_VALID / QUALITY_UNASSESSED"
+    )
+    report = {"version":VERSION,"window":meta["window"],"execution_complete":execution_complete,
+        "baseline_valid":baseline_valid,"quality_pass":model_quality_pass,
+        "model_quality": model_quality_results,
+        "model_physical_quality": (
+            "PASS" if model_quality_pass is True else
+            "FAIL_RELATIVE_TO_BASELINE" if model_quality_pass is False else
+            "UNASSESSED_NO_MODEL_ACTION_REPLAY" if baseline_valid else
+            "MODEL_QUALITY_UNDETERMINED"
+        ),
+        "banner":banner,
+        "threshold_version":"legacy-window-baseline-v1+model-relative-v1","thresholds":THRESHOLDS,
+        "model_quality_thresholds":{"ratio_threshold":MODEL_QUALITY_RATIO,"metrics":MODEL_QUALITY_METRICS},
         "checks":execution,"comparisons":comparisons,"missing_scenarios":sorted(expected_names-set(trajectories))}
     atomic_write_json(window / "manifests/replay65_report.json",report)
     return report
@@ -611,12 +669,25 @@ def report(args):
             entries=load_json(run/relative/"manifests/replay65.json")["entries"]
             expected += 1+sum(e["representative"] for e in entries)+sum(e["action_model_replay"] for e in entries)
         render_complete=len(videos)==expected and all((run/v["path"]).is_file() and file_sha256(run/v["path"])==v["sha256"] for v in videos)
+    quality_values = [report["quality_pass"] for report in reports.values()]
+    baseline_values = [report["baseline_valid"] for report in reports.values()]
+    quality_pass = True if quality_values and all(value is True for value in quality_values) else (
+        False if any(value is False for value in quality_values) else None
+    )
+    baseline_valid = True if baseline_values and all(value is True for value in baseline_values) else (
+        False if any(value is False for value in baseline_values) else None
+    )
     summary={"version":VERSION,"execution_complete":simulation_complete and render_complete,
              "simulation_complete":simulation_complete,"render_complete":render_complete,
-             "quality_pass":None,"windows":reports}
+             "baseline_valid":baseline_valid,"quality_pass":quality_pass,"windows":reports}
     atomic_write_json(run/"manifests/replay65_report.json",summary)
     if summary["execution_complete"]:
-        atomic_write_text(run/"markers/replay65_execution.ok","EXECUTION ONLY; MODEL QUALITY NOT ASSESSED\n")
+        atomic_write_text(
+            run / "markers/replay65_execution.ok",
+            f"EXECUTION COMPLETE; baseline_valid={summary['baseline_valid']} quality_pass={summary['quality_pass']}\n",
+        )
+        quality_text = {True: "MODEL QUALITY PASS", False: "MODEL QUALITY FAIL", None: "MODEL QUALITY UNASSESSED"}[summary["quality_pass"]]
+        atomic_write_text(run / "markers/replay65_model_quality.status", quality_text + "\n")
     if getattr(args,"export",False):
         output=getattr(args,"output",None) or run/"replay65_report.zip"
         output=output.resolve()

@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, default_collate
 
 from .cvae_protocol import (CHECKPOINT, LEGACY_CHECKPOINT, PROTOCOL, Fixtures, RecoverableSampler,
     capture_rng, digest, durable_save, isolated_rng, lr_factor, quality_warnings, restore_rng, run_lock)
-from .cvae_diagnostics import ablations, batch_ids, evaluate, read_normalization, route_output
+from .cvae_diagnostics import ablations, batch_ids, epsilon_for, evaluate, read_normalization, route_output
 from .models import build_model
 from .posterior_direct_output import assert_output_isolated
 from .posterior_t64_protocol import make_physical_masks, _svg
@@ -145,6 +145,12 @@ def plots(run, rows):
     _svg(run / "plots/mask_families.svg", "Mask family masked RMSE", "macro across nonempty domains",
         [(family, [(r["optimizer_step"], float(np.mean([v["micro_rmse"] for v in r["mask_families"][family]["masked"].values() if v["count"]])))
                     for r in rows if family in r["mask_families"] and any(v["count"] for v in r["mask_families"][family]["masked"].values())], palette[i % 4]) for i, family in enumerate(families)])
+    heldout_rows = [(r["optimizer_step"], r["heldout_mask"]) for r in rows if r.get("heldout_mask")]
+    if heldout_rows:
+        _svg(run / "plots/heldout_curves.svg", "Held-out mask diagnostics", "held-out full reconstruction and selection metrics",
+             [("heldout_selection", [(step, report["selection_score"]) for step, report in heldout_rows], palette[0]),
+              ("heldout_state_rmse", [(step, report["state_rmse"]) for step, report in heldout_rows], palette[1]),
+              ("heldout_action_rmse", [(step, report["action_rmse"]) for step, report in heldout_rows], palette[2])])
     if rows and "standard_normal" in rows[-1].get("routes", {}):
         _svg(run / "plots/c_routes.svg", "C routes", "Deployment energy and posterior reconstruction are different scores",
             [(route, [(r["optimizer_step"], r["routes"][route]["selection_score"]) for r in rows if route in r.get("routes", {})], palette[i])
@@ -181,6 +187,17 @@ def strict_readback(path, model, optimizer, scheduler, probe, stage, seed):
         expected = saved["readback_probe"]
         for key in ("physical_state", "action"):
             torch.testing.assert_close(getattr(actual, key).cpu(), expected[key], rtol=1e-5, atol=1e-6)
+        if stage == "C" and saved.get("readback_deployment_probe") is not None:
+            deployment_epsilon = epsilon_for(other, probe, 0, seed, device)
+            with torch.no_grad():
+                deployment = route_output(other, b, sm, am, "standard_normal", deployment_epsilon)
+            for key in ("physical_state", "action"):
+                torch.testing.assert_close(
+                    getattr(deployment, key).cpu(),
+                    saved["readback_deployment_probe"][key],
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
         for state in check_optimizer.state.values():
             if "step" in state and int(state["step"]) > saved["cumulative_step"]:
                 raise ValueError("optimizer state step exceeds completed cumulative step")
@@ -390,6 +407,11 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     eval_rows = load_rows(run / "logs/evaluations.jsonl")
     best = resumed.get("best_metrics") if resumed else None
     best_step = resumed.get("best_optimizer_step") if resumed else None
+    # B has two selection domains. ``best.pt`` remains the fixed-bank winner
+    # for compatibility; dynamic-mask runs additionally persist the best
+    # held-out checkpoint and its metrics.
+    best_heldout = resumed.get("best_heldout_metrics") if resumed else None
+    best_heldout_step = resumed.get("best_heldout_step") if resumed else None
     best_reconstruction = resumed.get("best_reconstruction_loss", float("inf")) if resumed else float("inf")
     best_reconstruction_step = resumed.get("best_reconstruction_step") if resumed else None
     last_step, committed, evaluation_count = start, True, sum(row["optimizer_step"] <= start for row in eval_rows)
@@ -404,7 +426,9 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "optimizer_step": last_step, "source_step": source_step, "cumulative_step": source_step + last_step,
             "durable_checkpoint_step": durable_step,
             "max_steps": maximum, "sample_exposures": sampler.exposures, "best_step": best_step,
-            "best_metrics": best, "quality_pass": None, "updated_at": datetime.now(timezone.utc).isoformat(), **extra})
+            "best_metrics": best, "best_heldout_step": best_heldout_step,
+            "best_heldout_metrics": best_heldout, "quality_pass": None,
+            "updated_at": datetime.now(timezone.utc).isoformat(), **extra})
     def checkpoint_payload(step):
         with isolated_rng():
             was_training = model.training
@@ -412,6 +436,13 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             sm, am, _ = make_physical_masks(probe, mask_seed)
             with torch.no_grad():
                 output = route_output(model, to_device(probe, device), sm.to(device), am.to(device), code if code != "C" else "posterior_mean")
+                deployment_output = None
+                if code == "C":
+                    deployment_epsilon = epsilon_for(model, probe, 0, mask_seed, device)
+                    deployment_output = route_output(
+                        model, to_device(probe, device), sm.to(device), am.to(device),
+                        "standard_normal", deployment_epsilon
+                    )
             model.train(was_training)
         return {"format_version": CHECKPOINT, "protocol_version": PROTOCOL, "architecture_version": model.ARCHITECTURE_VERSION,
             "model_signature": model.architecture_signature(model.config, sum(p.numel() for p in model.parameters())),
@@ -421,9 +452,14 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "optimizer_step": step, "source_step": source_step, "cumulative_step": source_step + step, "stage": code,
             "training_contract": contract, "dataset_identity": identity, "sampler": sampler.state_dict(), "rng_state": capture_rng(),
             "source_checkpoint": source, "best_metrics": best, "best_optimizer_step": best_step,
+            "best_heldout_metrics": best_heldout, "best_heldout_step": best_heldout_step,
             "best_reconstruction_loss": best_reconstruction, "best_reconstruction_step": best_reconstruction_step,
             "gradient_seen": sorted(grad_seen),
-            "readback_probe": {key: getattr(output, key).cpu() for key in ("physical_state", "action")}}
+            "readback_probe": {key: getattr(output, key).cpu() for key in ("physical_state", "action")},
+            "readback_deployment_probe": (
+                {key: getattr(deployment_output, key).cpu() for key in ("physical_state", "action")}
+                if deployment_output is not None else None
+            )}
     def save(name="last.pt"):
         nonlocal durable_step
         if not committed:
@@ -449,7 +485,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         atomic_write_json(run / f"manifests/audit_{step:09d}.json", report)
         return report
     def full_eval():
-        nonlocal best, best_step, best_reconstruction, best_reconstruction_step, evaluation_count
+        nonlocal best, best_step, best_heldout, best_heldout_step
+        nonlocal best_reconstruction, best_reconstruction_step, evaluation_count
         routes = [code] if code != "C" else ["posterior_mean", "posterior_sample", "standard_normal", "zero"]
         reports = {}
         for route in routes:
@@ -477,6 +514,19 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         improved = best is None or row["selection_score"] < best["selection_score"]
         if improved:
             best, best_step = {k: row[k] for k in ("selection_score", "total_loss", "state_rmse", "action_rmse", "max_abs", "optimizer_step")}, last_step
+        heldout_improved = False
+        if code == "B" and row.get("heldout_mask") is not None:
+            heldout = row["heldout_mask"]
+            heldout_score = heldout.get("selection_score")
+            heldout_improved = heldout_score is not None and (
+                best_heldout is None or heldout_score < best_heldout["selection_score"]
+            )
+            if heldout_improved:
+                best_heldout = {k: heldout[k] for k in (
+                    "selection_score", "total_loss", "state_rmse", "action_rmse", "max_abs"
+                )}
+                best_heldout["optimizer_step"] = last_step
+                best_heldout_step = last_step
         reconstruction_score = reports.get("posterior_mean", primary)["total_loss"]
         reconstruction_improved = reconstruction_score < best_reconstruction
         if reconstruction_improved:
@@ -487,6 +537,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         save()
         if improved:
             save("best.pt")
+            if code == "B":
+                # Explicitly name the fixed-bank selection policy while
+                # preserving the historical best.pt alias.
+                save("best_fixed.pt")
+        if heldout_improved:
+            save("best_heldout.pt")
         if reconstruction_improved:
             save("best_reconstruction.pt")
         evaluation_count += 1
@@ -495,7 +551,30 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             audit(last_step, warnings)
         if evaluation_count % 5 == 0 and len(indices) > 1:
             with isolated_rng():
-                selected = [eval_fixtures[i * (8 if code != "A" else 1)] for i in range(min(4, len(indices)))]
+                manifest = eval_fixtures.manifest()
+                selected_indices = []
+                seen_motions = set()
+                fixture_width = 8 if code != "A" else 1
+                # Prefer one window per motion so the donor swap is genuinely
+                # cross-motion on multi-motion runs.
+                for window_position, row_manifest in enumerate(manifest):
+                    if row_manifest["motion_key"] in seen_motions:
+                        continue
+                    seen_motions.add(row_manifest["motion_key"])
+                    selected_indices.append(window_position * fixture_width)
+                    if len(selected_indices) >= 4:
+                        break
+                # Tiny smoke/single-motion runs still get four deterministic
+                # windows where available, but are recorded as same-motion.
+                if len(selected_indices) < min(4, len(manifest)):
+                    for window_position in np.linspace(0, len(manifest) - 1,
+                                                        num=min(4, len(manifest)), dtype=int).tolist():
+                        fixture_index = window_position * fixture_width
+                        if fixture_index not in selected_indices:
+                            selected_indices.append(fixture_index)
+                        if len(selected_indices) >= 4:
+                            break
+                selected = [eval_fixtures[i] for i in selected_indices]
                 cpu = default_collate(selected)
                 sm, am, _ = make_physical_masks(cpu, mask_seed)
                 donors = torch.roll(torch.arange(len(selected), device=device), 1)
@@ -503,6 +582,16 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 model.eval()
                 result = ablations(model, to_device(cpu, device), sm.to(device), am.to(device), code, donors)
                 model.train(was_training)
+                identities = batch_ids(cpu)
+                result["selection"] = {
+                    "strategy": "one_window_per_motion_then_evenly_spaced",
+                    "selected_fixture_indices": selected_indices,
+                    "selected_identities": identities,
+                    "cross_motion_donor_count": sum(
+                        identities[i]["motion_key"] != identities[int(donors[i])]["motion_key"]
+                        for i in range(len(selected))
+                    ),
+                }
                 atomic_write_json(run / f"evaluations/step_{last_step:09d}/ablations.json", result)
         plots(run, eval_rows)
         progress(quality_warnings=warnings)
@@ -534,8 +623,15 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             eval_rows[:] = [r for r in eval_rows if r["optimizer_step"] <= start]
             if best is None:
                 eval_rows.clear()  # step-0 evaluation may have logged before its checkpoint commit
-            for filename, expected_step in (("best.pt", best_step), ("best_reconstruction.pt", best_reconstruction_step)):
+            for filename, expected_step in (
+                ("best.pt", best_step),
+                ("best_fixed.pt", best_step if code == "B" else None),
+                ("best_heldout.pt", best_heldout_step if code == "B" else None),
+                ("best_reconstruction.pt", best_reconstruction_step),
+            ):
                 target = run / "checkpoints" / filename
+                if expected_step is None and not target.exists():
+                    continue
                 actual_step = torch.load(target, map_location="cpu", weights_only=False).get("optimizer_step") if target.exists() else None
                 if actual_step != expected_step:
                     if expected_step == start:
@@ -630,13 +726,24 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         save()
         readback = strict_readback(run / "checkpoints/last.pt", model, optimizer, scheduler, probe, code, mask_seed)
         best_readback = strict_readback(run / "checkpoints/best.pt", model, optimizer, scheduler, probe, code, mask_seed)
+        best_fixed_readback = (
+            strict_readback(run / "checkpoints/best_fixed.pt", model, optimizer, scheduler, probe, code, mask_seed)
+            if code == "B" else None
+        )
+        best_heldout_readback = (
+            strict_readback(run / "checkpoints/best_heldout.pt", model, optimizer, scheduler, probe, code, mask_seed)
+            if code == "B" and best_heldout_step is not None else None
+        )
         summary = {"format_version": "sonic_65_token_hierarchical_standard_cvae_summary_v2", "protocol_version": PROTOCOL,
             "architecture_version": model.ARCHITECTURE_VERSION, "stage": code, "execution_pass": True, "quality_pass": None,
             "smoke": options["smoke"], "completed_optimizer_steps": last_step, "cumulative_step": source_step + last_step,
             "source_checkpoint": source, "training_contract": contract, "dataset_identity": identity,
             "model_contract": {**model.config, "actual_parameter_count": sum(p.numel() for p in model.parameters())},
             "stage_parameter_counts": counts, "best_step": best_step, "best_metrics": best,
+            "best_heldout_step": best_heldout_step, "best_heldout_metrics": best_heldout,
             "checkpoint_readback": readback, "best_checkpoint_readback": best_readback,
+            "best_fixed_checkpoint_readback": best_fixed_readback,
+            "best_heldout_checkpoint_readback": best_heldout_readback,
             "evaluation_count": evaluation_count, "quality_warnings": quality_warnings(eval_rows),
             "artifacts": {"metrics": "logs/metrics.jsonl", "evaluations": "logs/evaluations.jsonl", "diagnostics": "evaluations/", "audits": "manifests/audit_*.json"},
             "unique_next_step": "REVIEW_REPORT_BEFORE_ANY_NEXT_STAGE"}
