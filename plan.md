@@ -473,7 +473,7 @@ manifest、episodes、normalization 和 markers。
 ## 13. C latent 敏感性与五 seed full-action 回放（代码已实现，待 Ubuntu 执行）
 
 新增独立入口 `state-action-cvae/src/cvae_sa/latent_sweep65.py`，协议版本基础为
-`65-token-latent-sweep-v1`，当前视频延长实现升为 `65-token-latent-sweep-v2-post64`。
+`65-token-latent-sweep-v1`，当前固定窗口实现为 `65-token-latent-sweep-v4-t64-original`。
 它不改变训练、loss、checkpoint 或 C 的部署合同：标准正态
 sample 仍只调用 `encode_condition` 和 `infer_from_condition`，posterior encoder 只在
 完整真实 State--Action 输入上生成名为 `full_truth_posterior_mean` 的诊断参考。
@@ -510,23 +510,18 @@ Windows 已通过：`python -m compileall -q state-action-cvae/src/cvae_sa`、�
 `samples/seed_<seed>/simulations/full_action`。磁盘空间和 inode 必须先恢复正常，再用
 新 run 重跑；包含旧命名的 run 不得继续复用。
 
-## 14. C latent sweep 的 64+64 帧物理延长（Windows 已实现，待 Ubuntu 同步）
+## 14. C latent sweep 的固定 64 帧回放（Windows 已实现，待 Ubuntu 同步）
 
-为避免 64-step replay 的 MP4 过短，协议版本已升为
-`65-token-latent-sweep-v3-strict-original`；`latent_sweep65.py` 的 Isaac 请求现在包含
-`REPLAY_ACTION_STEPS=64` 加 `POST_ACTION_STEPS=64`，因此每个物理 trajectory 必须有
-128 个 Action 和 129 个 State frame。原始 Action baseline 现在强制使用 source HDF5 中
-窗口起点开始的连续 128 个 `raw_policy_action`；`post_action_mode=direct_original_action`。
-如果 HDF5 不存在、长度不足、含非有限值，地形 schema 缺少两种 combine mode，或前 64 步与 prepared source 不逐元素相同，
-`simulate` 直接失败，不再用 hold-final 伪装成原始回放，也不允许 SONIC 重新生成 Action。
+由于 64 帧之后的延长段会引入额外的跨进程误差，本轮恢复为严格的 T64 回放。
+协议版本为 `65-token-latent-sweep-v4-t64-original`；每个物理 trajectory 必须包含
+64 个 Action 和 65 个 State frame。original baseline、posterior reference 和每个 C sample
+都只执行自己的 T64 raw Action，不调用 SONIC 生成后续 Action，也不重复最后一个 Action。
 
-如果调用方已经拥有完整的 128-step 原始 Action 序列，延长辅助函数会保持其第 65--128
-个原始 Action，并在该 simulation request 中写入 `post_action_mode=direct_original_action`；
-`simulate` 会从 source record 的 HDF5 读取窗口之后的 64 个原始 raw Action，并先校验
-前 64 步与准备阶段完全一致。该完整 source 序列同时用于 original baseline、posterior
-reference 和每个 C sample，因此 65--128 控制周期不会引入 policy continuation。若 source
-序列不可读，整个物理 sweep 停止；不能生成会误导判断的 baseline 视频。真正的
-model-autoregressive desired-State 外推仍是独立后续实验，不与本回放混合。
+如果 source HDF5 或后续 64 步不可读取，不影响本轮，因为 replay 窗口本身已保存完整的
+64 步 raw Action。地形 schema 仍必须包含 `friction_combine_mode` 与
+`restitution_combine_mode`；这些模式以及静/动摩擦、恢复系数、关节/刚体参数、sim_dt、
+control_dt、decimation、gravity 和 solver iteration 仍由 exact initialization contract
+读回检查。任何可见参数不一致或无法恢复的 actuator delay 都直接失败。
 
 为排查“参数相同但原始回放仍倒地”，exact initialization contract 现在还携带 terrain 的
 `friction_combine_mode` 与 `restitution_combine_mode`，并在 Isaac reset 后检查静/动摩擦、
@@ -536,11 +531,5 @@ solver iteration。`runtime_context_max_abs > 1e-5`、combine mode 不一致或�
 不是继续录制。通过这些可见参数后仍可能存在未记录的 PhysX contact warm-start/cache；报告
 必须把这种情况标为隐藏状态未确定，不能把“参数读回相同”夸大成跨进程 bitwise determinism。
 
-每个 MP4 现在必须为 129 帧、50 Hz，叠加层标出 `REPLAY 0-64` 与
-`POST-DIRECT-ORIGINAL 65-128`。`POST-HOLD-FINAL` 只保留为离线辅助函数的
-显式单元测试路径，不属于本原始 Action baseline。
-Recorded HDF 只有原始 65 帧，视频左侧在后 64 帧重复最后记录姿态并标注
-`Recorded HDF pose (held after 64)`；Isaac baseline、posterior reference 和五个 sample
-均为真实 129-frame 物理录制。report 保留原始 0--64 窗口指标，并额外写入
-`post_hold_frames_64_128` 和 post-hold seed spread；旧 65-frame run 不得补 marker 冒充新协议，
-必须建立新的 latent sweep run。
+每个 MP4 为 65 帧、50 Hz，叠加层标出 `REPLAY 0-64`。Recorded HDF 和 Isaac replay
+都保持同样的 65 帧；旧的 129-frame run 不得补 marker 冒充本协议，必须建立新的 run。

@@ -1,7 +1,5 @@
 import unittest
 from types import SimpleNamespace
-from pathlib import Path
-import tempfile
 
 import numpy as np
 import torch
@@ -14,11 +12,9 @@ from cvae_sa.latent_sweep65 import (
     TOTAL_STATE_FRAMES,
     _continuation_mode,
     _extend_action_sequence,
-    _append_original_continuation,
     _latent_metrics,
     _output_metrics,
     _pad_recorded_trajectory,
-    _require_original_extended_actions,
     _selection,
 )
 
@@ -87,24 +83,15 @@ class LatentSweep65Tests(unittest.TestCase):
         self.assertTrue(np.isfinite(latent["global"]["rmse"]))
         self.assertTrue(np.isfinite(output["action"]["full_rmse"]))
 
-    def test_physical_continuation_holds_final_action_or_accepts_direct_t128(self):
+    def test_t64_replay_preserves_the_source_action_window(self):
         actions = np.arange(REPLAY_ACTION_STEPS * 29, dtype=np.float32).reshape(REPLAY_ACTION_STEPS, 29)
-        extended = _extend_action_sequence(actions)
-        self.assertEqual(extended.shape, (TOTAL_ACTION_STEPS, 29))
-        np.testing.assert_array_equal(extended[:REPLAY_ACTION_STEPS], actions)
-        np.testing.assert_array_equal(
-            extended[REPLAY_ACTION_STEPS:],
-            np.repeat(actions[-1:], POST_ACTION_STEPS, axis=0),
-        )
-        self.assertEqual(_continuation_mode([actions, actions.copy()]), "hold_final_action")
-        direct = np.concatenate((actions, actions + 1000), axis=0)
-        np.testing.assert_array_equal(_extend_action_sequence(direct), direct)
-        self.assertEqual(_continuation_mode([direct]), "direct_original_action")
-        np.testing.assert_array_equal(_append_original_continuation(actions, direct), direct)
-        np.testing.assert_array_equal(_append_original_continuation(actions, None), actions)
-        self.assertEqual(POST_ACTION_STEPS, 64)
+        replay = _extend_action_sequence(actions)
+        self.assertEqual(replay.shape, (TOTAL_ACTION_STEPS, 29))
+        np.testing.assert_array_equal(replay, actions)
+        self.assertEqual(_continuation_mode([actions, actions.copy()]), "none")
+        self.assertEqual(POST_ACTION_STEPS, 0)
 
-    def test_recorded_reference_is_padded_only_for_video(self):
+    def test_recorded_reference_is_already_the_65_frame_video(self):
         trajectory = {
             "dof_pos": np.zeros((REPLAY_ACTION_STEPS + 1, 29), dtype=np.float32),
             "root_pos_w": np.zeros((REPLAY_ACTION_STEPS + 1, 3), dtype=np.float32),
@@ -115,20 +102,6 @@ class LatentSweep65Tests(unittest.TestCase):
         self.assertEqual(padded["dof_pos"].shape, (TOTAL_STATE_FRAMES, 29))
         self.assertEqual(padded["root_pos_w"].shape, (TOTAL_STATE_FRAMES, 3))
         self.assertEqual(padded["total_frames"], TOTAL_STATE_FRAMES)
-        self.assertEqual(padded["post_replay_reference"], "held_last_recorded_pose")
-
-    def test_original_baseline_fails_closed_without_source_t128_actions(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            motion_dir = Path(temporary)
-            (motion_dir / "manifests").mkdir()
-            (motion_dir / "manifests/replay65.json").write_text(
-                '{"source":{"record":{"hdf5_path":"/missing/source.h5",'
-                '"episode":"demo_0"}},"window":{"window_start":0}}',
-                encoding="utf-8",
-            )
-            source = {"raw_action": np.zeros((REPLAY_ACTION_STEPS, 29), dtype=np.float32)}
-            with self.assertRaisesRegex(RuntimeError, "strict original 128-step replay"):
-                _require_original_extended_actions(motion_dir, source)
 
 
 if __name__ == "__main__":

@@ -396,14 +396,13 @@ shell的`mark_stage`和Action-mask阶段也有防御性目录创建。`test_repl
 随后将三条路线改为共享同一个最难motion/window；A生成四个代表性State视频并只执行一次等价的
 Action物理回放，B/C生成四个代表性State视频及各自的四个Action物理回放视频。
 
-## 12. 64+64 延长回放的严格原始 Action 合同（2026-09-28）
+## 12. 固定 64 帧原始 Action 回放合同（2026-09-28）
 
-用户已回退把后 64 步交给 SONIC policy 或用模型 desired-State 外推的改动。这一实验的
-物理问题定义是 open-loop：同一 motion、同一初始化、同一仿真参数下，原始 source
-`raw_policy_action[window_start:window_start+128]` 必须逐步送入 Isaac。`latent_sweep65.py`
-此前在 source HDF5 不可读时会把 original baseline 降级为 T64 加 hold-final；这会让一个
-“原始回放”其实执行了不同的 Action 序列，现已改为 fail-closed。缺少连续 T128 source
-Action、前 64 步 hash/逐元素校验失败或 HDF5 不可读时，simulation 不生成 baseline。
+用户已回退把后 64 步交给 SONIC policy 或用模型 desired-State 外推的改动。由于延长段
+仍然出现跨进程物理差异，本轮不再延长视频。物理问题定义是 open-loop：同一 motion、同一
+初始化、同一仿真参数下，source 窗口内的 64 个 raw Action 必须逐步送入 Isaac。
+`latent_sweep65.py` 现在只写入和验证 T64 Action、65 帧 State，不补 hold-final，也不读取
+窗口后的 HDF5 Action。这样可以把问题限定在窗口内；source HDF5 只需要提供同一窗口。
 
 当前代码把 `terrain.friction_combine_mode` 和 `terrain.restitution_combine_mode` 写入
 `replay65_contract`。`exact_replay_initializer.py` 在绑定专用 ground material 后记录期望值、
@@ -419,8 +418,8 @@ initialization 失败。
 会停止而不是继续输出视频。若第一处 divergence 出现在可见参数全部通过之后，应将物理结论写成“隐藏模拟器状态未确定”，
 而不是继续猜测地面摩擦或启动训练修改。
 
-Windows 静态测试新增了严格 baseline 缺源失败和 combine-mode/读回合同检查。Ubuntu 下一次
-必须建立全新 run，先确认每个 child 的 `action_replay_request.json` 为
-`post_action_mode=direct_original_action`，再检查 `exact_initialization_readback_*.json`、
-`*.runtime.json` 和 `recorded_to_original_1_errors.npz` 的首个阈值帧。旧的 hold-final 或
-policy-continuation run 不得作为原始 Action 一致性证据。
+Windows 静态测试覆盖了 T64 source-window 回放和 combine-mode/读回合同检查。Ubuntu 下一次
+必须建立全新 run，确认每个 child 的 `action_replay_request.json` 为
+`post_action_mode=none`，再检查 `exact_initialization_readback_*.json`、`*.runtime.json`
+和 `recorded_to_original_1_errors.npz` 的首个阈值帧。旧的 129-frame、hold-final 或
+policy-continuation run 不得作为本轮原始 Action 一致性证据。
