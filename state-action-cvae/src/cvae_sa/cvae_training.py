@@ -72,18 +72,37 @@ def data_identity(dataset_run, windows):
         "selected_windows_sha256": digest(windows), "selected_window_count": len(windows), "window": 64}
 
 
-def check_source_identity(checkpoint, identity, *, exact=False, allow_unknown=False):
+def check_source_identity(
+    checkpoint,
+    identity,
+    *,
+    exact=False,
+    allow_unknown=False,
+    allow_manifest_mismatch=False,
+):
     old = checkpoint.get("dataset_identity") or {}
     missing = []
+    recovered_manifest_mismatch = False
     for key in ("dataset_manifest_sha256", "episodes_index_sha256", "normalization_sha256", "selected_windows_sha256", "selected_window_count"):
         if old.get(key) is None:
             missing.append(key)
         elif old[key] != identity[key]:
+            if key == "dataset_manifest_sha256" and allow_manifest_mismatch:
+                recovered_manifest_mismatch = True
+                continue
             raise ValueError(f"source dataset identity mismatch: {key}")
     if missing and (exact or not allow_unknown):
         raise ValueError("legacy source identity unknown: " + ", ".join(missing) + "; read-only evaluation is allowed, training needs --allow-legacy-identity")
-    return {"verified_fields": sorted(set(identity) & set(old)), "unknown_fields": missing,
-            "exact_identity_verified": not missing}
+    return {
+        "verified_fields": sorted(set(identity) & set(old)),
+        "unknown_fields": missing,
+        "exact_identity_verified": not missing and not recovered_manifest_mismatch,
+        "recovered_manifest_mismatch": recovered_manifest_mismatch,
+        "identity_warning": (
+            "dataset_manifest_sha256 differs; allowed only by explicit recovered-dataset replay"
+            if recovered_manifest_mismatch else None
+        ),
+    }
 
 
 def source_info(checkpoint_path, checkpoint):

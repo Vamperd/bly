@@ -10,6 +10,12 @@ Ubuntu 重评根目录：`/home/helloworld/bly/runs/cvae_v2_reassessment_gweSqTs
 评测源码 commit：`b64df6499fab832246117521427548069dbba501`，协议 `65-token-experiment-v2`。
 11 个回传包的 report_index 共342项文件哈希全部核对一致；这验证回传完整性，不等于独立验证数据真值。
 
+当前 C 源 run 为
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113`，
+采用 `stage=C`、dynamic Mask、32 motion、1504 T64 windows、360000 steps。C 的最终 summary 已回传，
+但 step360000 尚缺逐元素 diagnostics；因此末步最差坐标和逐窗口 trace 仍属于待补证据，不能从 summary
+中的 max 值反推出具体根因。
+
 关键证据索引（以下相对路径相对于本地回传根目录）：
 
 | 证据 | 用途 |

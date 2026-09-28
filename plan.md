@@ -25,6 +25,8 @@ C：32-motion全部T64窗口 / 1504窗口 / 动态Mask / 随机初始化 / 360k�
 此前B两轮summary的quality_pass仍为null，工程PASS不等于预注册质量PASS；C的quality_pass也保持null。
 32-motion B是独立condition-only容量实验；C则是同规模独立随机初始化的联合CVAE部署实验，
 二者都不加载A或16窗口B权重，也不绕过数据身份校验。
+当前尚未形成有效的 Isaac/MuJoCo 回放结论：曾有一个 C 窗口0 run 在 worker 完成后因缺少
+`markers/` 子目录而封存失败，该目录和其导出报告均不作为证据；修复后的源码必须建立新 run。
 以下第2～4节为A及B-fixed已完成记录；B-dynamic见第10节，C及下一步见第11节。
 
 ## 2. A：完整序列 Posterior 重建基线
@@ -431,3 +433,33 @@ C模型回放。回放是物理诊断，不把视频结果倒写成训练质量�
 但`evaluations_detail/`没有step360000的逐元素diagnostics，只有step0完整diagnostics和
 step20000至345000的消融文件。因此当前报告不能从该回传包给出末步最差坐标、最差window或
 末步逐坐标trace；这些只能通过Ubuntu源run对step360000做一次只读精简导出获得。
+
+## 12. Overfit subset recovery 与 window 844 回放（2026-09-28）
+
+原始 `/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506` 已被误删，
+且当前检查未发现其压缩备份；正式父数据集
+`/home/helloworld/bly/runs/cvae_physics_dataset_20260825_235244` 仍完整并保留
+`cvae_dataset.ok` 与 `cvae_physics_dataset.ok`。因此按原 `motions_per_package=4`、
+`seed=20260828` 从父数据集重新生成了新的派生数据集：
+
+```text
+/home/helloworld/bly/runs/cvae_overfit_subset_rebuilt_20260928_193357
+```
+
+新数据集为 Physics v4，32 motion、256 episode、1504 个 T64 window；window 844
+仍对应 `jump_right_004__A029`、variant 4、`demo_12025`。它是后续训练的正式新基准，
+但不能自动宣称与被删除的旧 dataset manifest 完全同一：重新生成的 manifest 含新的
+`generated_at`，因此其 `dataset_manifest_sha256` 可能与旧 A/B/C checkpoint 不同。
+
+为允许在证据充分时对旧 checkpoint 做诊断性回放，`replay65 prepare` 新增显式参数
+`--allow-recovered-dataset`。该参数只放宽 `dataset_manifest_sha256`，仍严格要求
+`episodes_index_sha256`、`normalization_sha256`、`selected_windows_sha256`、窗口数量
+和窗口长度全部与 checkpoint 一致；回放 manifest 会记录
+`recovered_dataset=true`、`exact_identity_verified=false` 和对应警告。默认不放宽，
+新训练仍必须使用新数据集和新 run，不能把恢复回放写成原始数据集的精确复现。
+
+当前 window 844 的 A/B/C 回放下一步是：同步新增的 `replay65.py` 与
+`cvae_training.py`，为每个 route 创建全新的输出目录，并在 `prepare` 中显式加入
+`--allow-recovered-dataset`；原始 Action 双基线仍先于模型物理回放执行，基线失败时
+模型物理质量保持不可判定。新数据集元数据应单独压缩备份，不能再次只保留 HDF5 而丢失
+manifest、episodes、normalization 和 markers。

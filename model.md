@@ -1,5 +1,7 @@
 # 65-token 层级 CVAE：活动模型与实验合同
 
+最后更新：2026-09-28。当前 C 已完成训练但标准正态部署质量未通过；真实 Isaac/MuJoCo 回放仍待执行。
+
 模型架构版本保持 `65-token-hierarchical-standard-cvae-v1`；实验协议为
 `65-token-experiment-v2`，checkpoint 格式为
 `sonic_65_token_hierarchical_standard_cvae_checkpoint_v2`。
@@ -244,6 +246,37 @@ normalization未见近零速度std；尾部仍有局部速度变化拟合不足�
 当前维护AGENTS.md（入口）、model.md（合同）、plan.md（整体计划与概要）、process.md（必要异常诊断）；历史run和结果保留。
 Windows测试不能替代Ubuntu HDF5/CUDA smoke，亦不能证明训练质量或物理可行性。
 
+## 6.5 当前 C 阶段封存状态（2026-09-28）
+
+C 已在 Ubuntu 完成独立随机初始化训练，run 为
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113`。
+合同为 `stage=C`、`mask_mode=dynamic`、32 motion、1504 个 T64 窗口、batch32、360000 optimizer
+step、11520000 exposure，参数量 64,377,959；`source_checkpoint=null`，不继承 A/B 权重。
+有效 initialization/mask seed 为 20260921/20260920；启动命令中记录的 shell seed 20260824 只属于元数据，
+不能覆盖 effective config 身份。
+
+工程执行已通过：360000 条连续 train 记录、73 次完整评测、每步 batch32、Posterior/Condition 各调用一次、
+有限值、checkpoint/optimizer/scheduler 严格读回和 forward comparison 均通过。末步为 step360000，
+loss=4.14769e-5，learning rate=1e-6，grad=1.102e-3；summary 的 `execution_pass=true`、
+`quality_pass=null`，不能把工程 PASS 写成质量 PASS。
+
+末步 fixed bank 的归一化结果如下：
+
+| 路径 | energy | masked State / Action RMSE | full State / Action RMSE | State / Action max |
+|---|---:|---:|---:|---:|
+| posterior mean | 0.013585 | 0.016604 / 0.007912 | 0.008654 / 0.006309 | 0.7277 / 0.2511 |
+| posterior sample | 0.012063 | 0.017468 / 0.008526 | 0.009039 / 0.006644 | 0.9293 / 0.2525 |
+| standard normal（部署路径） | 0.027423 | 0.081051 / 0.040847 | 0.036627 / 0.026234 | 14.3284 / 2.4324 |
+| zero latent | 0.032803 | 0.070393 / 0.033941 | 0.031667 / 0.021927 | 14.7097 / 2.6927 |
+
+这证明 posterior 路径仍能重建已见窗口，但标准正态部署路径误差明显升高；不能宣称 C 已具备可靠的
+随机生成能力。held-out standard-normal 的 energy/full/masked 结果与坐标分组见 plan.md 第11节和
+process.md 第10节；数据仍是同一32-motion已见序列，不能解释为新motion泛化。
+
+当前下一步只允许：从 step360000 做只读末步尾部坐标/latent 统计，然后按本节回放合同执行原始 Action
+双基线和 C 回放。不得对同一 C run 普通续训，也不得同时修改 loss、latent 维度、pooling 或网络宽度。
+回放不改变训练结论；原始基线无效时，模型物理质量保持 `MODEL_QUALITY_UNDETERMINED`。
+
 ## 7. 65-token State／Action回放合同（2026-09-23）
 
 独立入口 `python -m cvae_sa.replay65 {prepare,simulate,render,report}`，协议 `65-token-replay-v1`。
@@ -310,7 +343,8 @@ python3 -m cvae_sa.replay65 --help
 rg -n 'apply_exact_replay_initialization' ../sonic-repro/GR00T-WholeBodyControl/gear_sonic/eval_agent_trl.py
 ```
 
-首轮仅当前B的窗口0原始双基线（输入已经完成、固定checkpoint的准确run，不猜最新目录）：
+首轮应先对准确 checkpoint 的窗口0执行原始双基线；C 已训练完成，但回放仍未形成有效结果。
+不要猜最新目录，也不要复用曾因 `markers/` 子目录缺失而封存失败的旧 C 回放目录。
 
 ```bash
 read -r -p '请输入已完成的v2 B训练run绝对路径: ' B_RUN
@@ -324,6 +358,24 @@ python3 -m cvae_sa.replay65 prepare \
 python3 -m cvae_sa.replay65 simulate --run "$RUN_DIR" --baseline-only && \
 python3 -m cvae_sa.replay65 report --run "$RUN_DIR"
 ```
+
+C 当前准确 checkpoint 的窗口0准备命令如下；它只创建新的回放 run，不修改训练目录：
+
+```bash
+C_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113
+RUN_DIR=$(mktemp -d /home/helloworld/bly/runs/cvae_replay65_C_w0_XXXXXXXX)
+python3 -m cvae_sa.replay65 prepare \
+  --checkpoint "$C_RUN/checkpoints/best.pt" \
+  --dataset-run /home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506 \
+  --route C --window-index 0 --output-run "$RUN_DIR" \
+  --sample-seed 20260923 --sample-index 0 --simulation-seed 20260923
+python3 -m cvae_sa.replay65 simulate --run "$RUN_DIR" --baseline-only
+python3 -m cvae_sa.replay65 report --run "$RUN_DIR"
+```
+
+先检查该 baseline 报告；baseline 无效仍可继续生成模型对照视频，但报告必须保留
+`BASELINE_INVALID` 和 `MODEL_QUALITY_UNDETERMINED`。若是工程错误，停止并建立新 run，
+不要手工补 marker 或复用失败目录。
 
 基线报告检查后，仍在同一终端对同窗口补充模型回放和三栏视频；若基线质量失败，按用户要求继续生成警告视频。
 若是工程失败，不强行继续。脚本复用已校验双基线，不重复运行。
@@ -353,4 +405,7 @@ ZIP含小型预测/恢复/误差NPZ、配置、哈希、日志、曲线和报告
 首轮审核后，再在新run把 `--window-index 0` 换成 `--selection first-suite`；不要提前自动扩展。
 A参考另建run使用 `--route A --window-index 0` 和
 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260923_012104/checkpoints/best.pt`，
-其余dataset、simulate/render/report不变。C只预留 `--route C --sample-seed ... --sample-index ...`，本轮不启动。
+其余dataset、simulate/render/report不变。B-fixed必须优先使用其 `best_fixed.pt`，B-dynamic必须使用
+`best_heldout.pt`（不能使用 dynamic 的 `best.pt`，它对应 step0 源权重）。C 使用
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113/checkpoints/best.pt`
+和 `--route C --sample-seed ... --sample-index ...`，走标准正态部署路径。

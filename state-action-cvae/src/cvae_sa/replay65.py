@@ -344,7 +344,12 @@ def prepare(args):
         fixtures = Fixtures(dataset, indices, expand=True)
         rows = fixtures.manifest()
         identity = data_identity(dataset_run, rows)
-        identity_check = check_source_identity(checkpoint, identity, allow_unknown=args.route == "A")
+        identity_check = check_source_identity(
+            checkpoint,
+            identity,
+            allow_unknown=args.route == "A",
+            allow_manifest_mismatch=getattr(args, "allow_recovered_dataset", False),
+        )
         norm = read_normalization(dataset_run / "data/normalization.npz")
         run.mkdir(parents=True, exist_ok=True)
         progress(run, "preparing")
@@ -396,7 +401,9 @@ def prepare(args):
         atomic_write_json(run / "manifests/replay65.json",{"version":VERSION,"windows":paths,
             "selection":selection,"identity_check":identity_check,"source_checkpoint":source_info(checkpoint_path,checkpoint),
             "training_mask_seed":training_mask_seed,"replay_mask_seed":args.mask_seed,
-            "exact_training_fixture": args.route == "B" and args.mask_seed == training_mask_seed and checkpoint.get("training_contract",{}).get("mask_mode")=="fixed"})
+            "exact_training_fixture": args.route == "B" and args.mask_seed == training_mask_seed and checkpoint.get("training_contract",{}).get("mask_mode")=="fixed",
+            "recovered_dataset": bool(getattr(args, "allow_recovered_dataset", False)),
+        })
         # Seal all prepared input files. Reports and simulation outputs are intentionally not sealed here.
         hashes = {str(p.relative_to(run)):file_sha256(p) for p in run.rglob("*") if p.is_file() and p.name != "progress.json"}
         atomic_write_json(run / "manifests/prepared_hashes.json",hashes)
@@ -735,6 +742,14 @@ def main(argv=None):
     p.add_argument("--sample-index",type=int,default=0)
     p.add_argument("--simulation-seed",type=int,default=20260923)
     p.add_argument("--action-mode",choices=("masked-completion","full-prediction"),default="masked-completion")
+    p.add_argument(
+        "--allow-recovered-dataset",
+        action="store_true",
+        help=(
+            "allow only a dataset_manifest hash mismatch for a deliberately rebuilt "
+            "dataset; episodes, normalization, selected windows and count must still match"
+        ),
+    )
     p.add_argument("--device")
     s=sub.add_parser("simulate"); s.add_argument("--run",type=Path,required=True); s.add_argument("--baseline-only",action="store_true")
     r=sub.add_parser("render"); r.add_argument("--run",type=Path,required=True); r.add_argument("--model",type=Path,required=True); r.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
