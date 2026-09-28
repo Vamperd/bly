@@ -33,7 +33,8 @@ prepare/simulate/render/report 回放入口（合同见model.md第7节）。当�
 
 2026-09-24 已在Windows落地v2训练/回放工程补强：B新增`best_fixed.pt`与`best_heldout.pt`选择记录，
 跨motion消融选择和C标准正态readback验证，replay65增加相对原始Action baseline的模型质量字段。
-32-motion B-fixed结果、B-dynamic、C及真实Isaac/MuJoCo回放仍待Ubuntu执行；新阶段同步前必须完成静态核验。
+32-motion B-fixed已在Ubuntu完成并判定为工程通过、fixed/held-out质量未通过；32-motion B-dynamic已完成，
+held-out显著改善但fixed bank回退并触发质量告警；C及真实Isaac/MuJoCo回放仍待Ubuntu执行；新阶段同步前必须完成静态核验。
 
 本文档是 `bly` 工作区的首要交接入口。后续会话开始任何工作前必须完整阅读；其中“已验证事实”“代码已实现但待执行”“历史兼容路径”不可混为一谈。若实际 Git、文件或 Ubuntu 日志与本文冲突，以只读检查得到的当前事实为准，并更新本文。
 
@@ -1025,7 +1026,7 @@ v2 execution marker只表示工程完整，quality_pass未设阈值为null。
    motion ID、package/outcome、未来真实 State、真实随机 delay draw 和 oracle dynamics context
    不得进入部署模型；oracle 结果只能明确标注为上限实验。
 
-### 10.1 活动唯一下一步：32-motion B-fixed训练
+### 10.1 活动唯一下一步：C独立随机初始化训练
 
 Ubuntu v2 B smoke `cvae_v2_B_smoke_582je9XO` 和 `cvae_v2_reassessment_gweSqTsw` 下九项只读重评均已回传。
 A60k best/last均为60000且重评一致；旧B去掉posterior显著退化，不能据此推断从头condition-only的容量上限。
@@ -1033,9 +1034,10 @@ A60k best/last均为60000且重评一致；旧B去掉posterior显著退化，不
 小规模B-fixed已完成20k，全部更新记录posterior零调用；最终fixed表现良好，新Mask联合缺口仍有尾部。
 详细概要与新路线见plan.md；该文件按用户要求仅保留当前A/B，不再承担历史6.x实验台账。
 16窗口B-dynamic已完成并审核，两bank均改善，工程通过但quality_pass未设自动门禁仍为null。
-建议直接扩32-motion全部1504个T64窗口，随机初始化B-fixed 120k，batch32，每5k完整评测，分段人工审核。
-不要加载小数据checkpoint绕过窗口身份校验，不改loss或扩大模型；预算与B32人工推进阈值见plan.md。
-现有v2训练代码已支持，回放仍暂缓；无需为训练同步回放源码。尚未收到32-motion启动日志。
+32-motion B-fixed已完成120k：工程通过，fixed与held-out质量均未通过。随后B-dynamic完成120k，
+held-out masked State/Action显著改善至0.022965/0.013237，但fixed primary回退并触发告警；严格质量门禁仍未通过。
+下一步进入C独立随机初始化训练，使用dynamic Mask、posterior sample和KL，不加载A/B checkpoint；C预算与审核标准见plan.md。
+现有v2训练代码已支持，回放仍暂缓；C启动前同步Windows静态核验通过的代码。尚未收到C启动日志。
 不自动启动训练，不继续旧B或追加A，不扩大模型或改loss。A尾部补诊不设为B推进的任意max硬门禁。
 v2源码入口为 `cvae_protocol.py`、`cvae_diagnostics.py`、`cvae_training.py`、`cvae_tools.py`；
 旧训练模块的公开入口路由到v2，不再保留旧训练循环。维护AGENTS/model/plan/process四份根文档，不恢复Next.md。

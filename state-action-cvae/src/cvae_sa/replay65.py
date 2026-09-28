@@ -285,12 +285,18 @@ def prepare_window(args, dataset, fixtures, model, index, run, norm):
         pred_pos, pred_quat = reconstruct_root_trajectory(completed_s, source["root_pos"], source["root_quat"], 0, .02)
         for tag, st, pos, quat in (("truth_integrated",truth_s,truth_pos,truth_quat), ("predicted_integrated",completed_s,pred_pos,pred_quat)):
             _write_trajectory(directory / f"{tag}.trajectory.pkl", joint_pos=st[:,:29]+init["nominal_default_joint_pos"], root_pos=pos, root_quat=quat, fps=50.)
-        representative = name in args.masks and (args.route != "A" or name == args.masks[0])
+        # Render every requested representative State view for every route.
+        # A is full prediction, so its Action trajectory is identical for all
+        # Mask labels; keep one physical Action replay there and avoid four
+        # duplicate Isaac jobs while retaining all four State MP4s.
+        representative = name in args.masks
+        action_model_replay = representative and mapping["replaced_elements"] > 0 \
+            and (args.route != "A" or name == args.masks[0])
         entries.append({"mask": name, "fixture_id": digest([row["stable_window_id"], slot, args.mask_seed]),
             "offline": metrics, "physical_groups": physical_groups(truth_s,state), "mapping": mapping,
             "state_top100":tail_coordinates(truth_s,state,*norm["state"],row["window_start"],state=True),
             "action_top100":tail_coordinates(truth_a,action,*norm["action"],row["window_start"]),
-            "representative": representative, "action_model_replay": representative and mapping["replaced_elements"] > 0,
+            "representative": representative, "action_model_replay": action_model_replay,
             "hidden_initial_state": bool(sm[0].any()), "simulation_initial_state": "recorded_truth_not_model_input",
             "visualization": {"gravity_normalized": True, "contact_not_used_as_pose_constraint": True,
                 "truth_integration_root_rmse_m": float(np.sqrt(np.mean((truth_pos-source["root_pos"])**2))),
@@ -471,7 +477,11 @@ def simulate_group(parent, window, tag, names, raws):
             return
         raise FileExistsError(f"incomplete/changed simulation is not overwritten: {child}; prepare a new run")
     manifest = load_json(window / "manifests/replay65.json")
-    (child / "data").mkdir(parents=True)
+    # The shell worker writes exit codes and completion markers after Isaac
+    # exits. Create the complete child layout before launching it; creating
+    # only data leaves mark_stage unable to write action_mask_replay.ok.
+    for folder in ("data", "manifests", "logs", "markers"):
+        (child / folder).mkdir(parents=True, exist_ok=True)
     shutil.copy2(window / "data/exact_initialization.npz", child / "data/exact_initialization.npz")
     init = manifest["initialization"]
     actions = child / "data/raw_actions.npz"

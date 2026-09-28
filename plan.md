@@ -1,8 +1,8 @@
-# 65-token CVAE：当前 A／B 实验计划与结果
+# 65-token CVAE：当前 A／B／C 实验计划与结果
 
-最后更新：2026-09-23
+最后更新：2026-09-28
 
-只保留当前65-token A/B的实验路径、概要结果及下一步；历史条目仅从本文移除，
+只保留当前65-token A/B/C的实验路径、概要结果及下一步；历史条目仅从本文移除，
 任何历史run、checkpoint、数据和源码均未删除。结构合同见[model.md](model.md)，
 必要反常证据见[process.md](process.md)，交接入口为[AGENTS.md](AGENTS.md)。
 
@@ -15,16 +15,17 @@
 A90k + model-only再训练60k：完成，封存为完整输入参考
 B-fixed：1 motion / 16窗口 / 128fixture / 20k，完成
 B-dynamic：同16窗口 / 20k，完成，固定及另一Mask bank均显著改善
-→ 建议下一步：32-motion全部T64窗口，随机初始化B-fixed，120k上限，分段审核
-→ B-fixed审核后，再独立启动同规模B-dynamic
-回放按用户选择暂缓；恢复时仍先原始Action双基线，物理结论不可跳过此门槛
+C：32-motion全部T64窗口 / 1504窗口 / 动态Mask / 随机初始化 / 360k，完成
+→ 下一步：先做C末步紧凑尾部诊断，再按replay65执行原始Action双基线和C模型回放
+回放仍是诊断流程；原始Action双基线失败时，模型物理质量保持不可判定
 ```
 
-本次支持扩大**数据范围**，不支持扩大模型或直接进入最终随机生成阶段。
+本路线先支持扩大**数据范围**，再独立检验随机latent部署；不把C完成自动等同于最终随机生成阶段。
 16窗口均来自同一motion；动态训练后bank可能与训练采样重合，不称新motion泛化或严格未见Mask。
-本次两轮summary的quality_pass仍为null，工程PASS不等于预注册质量PASS。
-32-motion为新的独立condition-only容量实验，不加载A或16窗口B权重，不绕过数据身份校验。
-以下第2～4节为A及B-fixed已完成记录；最新B-dynamic和下一步见第5～7节。
+此前B两轮summary的quality_pass仍为null，工程PASS不等于预注册质量PASS；C的quality_pass也保持null。
+32-motion B是独立condition-only容量实验；C则是同规模独立随机初始化的联合CVAE部署实验，
+二者都不加载A或16窗口B权重，也不绕过数据身份校验。
+以下第2～4节为A及B-fixed已完成记录；B-dynamic见第10节，C及下一步见第11节。
 
 ## 2. A：完整序列 Posterior 重建基线
 
@@ -301,8 +302,8 @@ B-fixed通过后再启动同32-motion的B-dynamic；回放继续独立待执行�
 用zip压缩并输出所选文件hash索引；压缩体积以实际打印为准，不保证固定MB上限。
 发现特定中间异常时再补传对应step文件，不删本地证据。
 
-当前只给出新训练与精简打包命令，没有在Ubuntu启动训练；不修改训练/采样/evaluator代码。
-真实Isaac/MuJoCo回放仍未收到结果。Windows文档与CLI静态检查不替代新32-motion工程/质量验收。
+本节命令是B-dynamic阶段的训练与精简打包记录；该阶段不修改训练/采样/evaluator代码。
+真实Isaac/MuJoCo回放仍未收到结果。Windows文档与CLI静态检查不替代Ubuntu工程/质量验收。
 
 ## 8. 本轮协议落地状态（Windows，2026-09-24）
 
@@ -314,4 +315,119 @@ B-fixed通过后再启动同32-motion的B-dynamic；回放继续独立待执行�
 - replay65 报告新增相对原始 Action baseline 的模型质量判定：joint position、root position、body MPJPE 比值阈值为 1.2；baseline 无效时仍可生成视频，但模型质量保持 `MODEL_QUALITY_UNDETERMINED`。
 - Windows 验证已通过：`test_cvae_protocol_v2` 8项、`test_replay65` 12项、`test_replay65_runtime` 6项、Python compile、CLI/协议读回及 `git diff --check`；另修正了 `best_heldout_step` 在 summary/checkpoint 中漏写的问题。全量 discovery 的唯一已知失败仍是 Windows 环境缺少 `h5py` 导致的3个既有模块导入错误，未涉及本轮代码。
 
-仍待 Ubuntu 验证：32-motion B-fixed 的最终 summary、双 bank 曲线和实际 batch；32-motion B-dynamic；C 独立随机初始化；真实 Isaac/MuJoCo 的原始 Action 双基线和模型回放。当前训练可继续使用旧源码完成；新阶段必须在 Windows 静态核验通过后同步同一份源码。
+C 独立随机初始化已在Ubuntu完成，结果见第11节；仍待真实 Isaac/MuJoCo 的原始 Action 双基线和模型回放。
+32-motion B-fixed、B-dynamic和C均已完成，后续回放阶段必须在Windows静态核验通过后同步同一份源码。
+
+## 9. 32-motion B-fixed 完成结论（2026-09-24）
+
+run：`/home/helloworld/bly/runs/cvae_v2_B_fixed_m32_s120000_tWXXU9fj`。
+本轮使用32 motion、256 episode、1504窗口、12032 fixed fixture、batch 32，完成120000步，累计
+样本暴露3,840,000；参数量64,377,959。checkpoint readback、日志、评测和归档均完成，
+因此 `engineering_pass=true`。
+
+研究质量结论为 `fixed_quality_pass=false`、`heldout_quality_pass=false`。fixed bank末步的
+masked State/Action RMSE为0.020689/0.012962，尚未达到本阶段参考的0.01；visible
+State/Action RMSE为0.009949/0.009520，说明主要瓶颈是隐藏元素补全，而不是普通序列重建。
+held-out bank末步masked State/Action RMSE为0.079144/0.035262，明显高于已见坐标
+0.020982/0.012834；新坐标误差不能解释为单个异常点。
+
+fixed选择MSE从110k的3.39937e-4降至120k的3.28276e-4，末段仍在下降但已明显变慢；
+fixed State max由0.774821降至0.771466，基本平台。held-out选择MSE在约70k后平台化。
+因此不对同一fixed run做普通续训，不以增加步数替代Mask泛化训练。
+
+本节结论后的B-dynamic已执行，结果见第10节；本run的`best.pt`仍是fixed bank基线，不能替代
+动态阶段的held-out选择。旧run使用的代码尚未写入`best_heldout.pt`选择别名，但held-out summary已存在；
+这只是记录版本差异，不是重新训练理由。
+
+## 10. 32-motion B-dynamic 完成结论（2026-09-25）
+
+run：`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_random_20260924_125341`。
+本轮从32-motion B-fixed的`best.pt`做model-only初始化，stage=B、mask_mode=dynamic，保持
+64,377,959参数、batch32、120000步和3,840,000 exposure。Posterior调用为0、Condition调用为1、
+KL为0，工程执行和checkpoint readback通过。
+
+Dynamic的主要结果是held-out Mask泛化明显改善，但fixed bank出现回退：fixed selection从源基线
+0.000328276升至0.000514385（约+56.7%），因此`best_step=0`；held-out selection从0.007004692
+降至0.000551900（约-92.1%），`best_heldout_step=120000`。最终fixed/held-out masked
+State/Action RMSE分别为0.023536/0.012274和0.022965/0.013237，仍未达到0.01参考门限，
+但held-out已经从B-fixed的0.079144/0.035262大幅下降。质量状态仍为`quality_pass=null`，
+并记录`primary_regression_over_20_percent_for_3_evaluations`。
+
+该结果支持Dynamic Mask采样确实解决了fixed坐标过拟合的一部分；它没有证明模型已达到最终补全质量，
+也没有证明新motion泛化。held-out selection从100k的0.000609318降到120k的0.000551900，
+改善9.42%，但最后10k仅改善2.92%，且学习率已到1e-6；继续同一合同的边际收益有限。
+因此下一步进入第11节记录的独立随机初始化C，使用standard-normal部署路径进行审核，不加载任一A/B checkpoint。
+若C前仍需B回放，必须显式选择`best_heldout.pt`或`last.pt`，不能使用本run的`best.pt`（它对应step0源权重）。
+不通过修改loss、网络宽度和Mask分布同时消除这次fixed回退；C完成后的真实下一步见第11节末尾。
+
+## 11. C：独立随机初始化与标准正态部署完成结论（2026-09-28）
+
+回传包：`C:/Users/86136/Desktop/replay/C train/cvae_C_return`。
+Ubuntu run：`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113`。
+合同为`stage=C`、`mask_mode=dynamic`、32 motion、256 episode、1504个T64窗口、
+每步batch32、360000 optimizer step、11520000 sample exposure；参数量64,377,959。
+`source_checkpoint=null`，因此本轮是独立随机初始化，不是A或B的权重延长。
+实际生效的初始化／Mask seed为20260921／20260920；`command.txt`中的shell seed为20260824，
+属于启动元数据与effective config不一致，数值诊断以effective config为准，后续启动命令应消除该歧义。
+
+### 11.1 工程执行门禁
+
+训练日志含连续360000条`train`记录、无step缺口；73次完整评测；每步batch均为32，
+Posterior与Condition各调用一次；顶层loss、重建、KL和梯度标量均为有限值。末步训练记录为
+loss `4.14769e-5`、reconstruction `3.29129e-5`、KL `8.56401e-3`、梯度范数
+`1.10230e-3`、学习率`1e-6`，累计暴露`11520000`。最终和best均为step360000。
+
+checkpoint严格读回通过，optimizer已读回，scheduler step为360000，forward comparison通过，
+checkpoint SHA256为`21a4545c50a9fcd7847c8f7d62b120d1a7be9abdc512935082269bf111cf5392`；
+`cvae_posterior_standard_cvae_execution.ok`存在，summary的`execution_pass=true`、
+`quality_pass=null`、warnings为空。因此C的工程执行有效，但这不是质量通过标记。
+
+### 11.2 四条latent路径的末步结果
+
+下表均为归一化空间；masked RMSE是8次sample的单样本期望聚合，full RMSE和max为summary的全量聚合。
+`energy`只对随机样本路径有部署意义，posterior mean／sample／zero的值用于受控对照。
+
+| 路径（step360000，fixed bank） | energy | masked State / Action RMSE | full State / Action RMSE | State / Action max |
+|---|---:|---:|---:|---:|
+| posterior mean | 0.013585 | 0.016604 / 0.007912 | 0.008654 / 0.006309 | 0.7277 / 0.2511 |
+| posterior sample | 0.012063 | 0.017468 / 0.008526 | 0.009039 / 0.006644 | 0.9293 / 0.2525 |
+| standard normal（部署路径） | 0.027423 | 0.081051 / 0.040847 | 0.036627 / 0.026234 | 14.3284 / 2.4324 |
+| zero latent | 0.032803 | 0.070393 / 0.033941 | 0.031667 / 0.021927 | 14.7097 / 2.6927 |
+
+posterior mean到standard-normal的masked State／Action RMSE约放大4.88／4.83倍；
+standard-normal甚至比zero latent的单样本masked RMSE更差，虽然其energy优于zero，说明它带来了
+样本多样性，却没有学到足够校准的部署先验。C不是“重建能力不存在”：posterior mean和sample仍能
+把已见序列压到约`1e-2`量级；失败集中在不读取真值posterior的部署路径。
+
+fixed与held-out的standard-normal结果也没有明显的坐标迁移断崖：held-out energy为`0.026876`，
+full State／Action RMSE为`0.034439`／`0.025993`，masked State／Action RMSE为`0.078670`／
+`0.041141`，State／Action max为`17.9064`／`1.8786`。held-out中已见坐标的masked
+State／Action micro RMSE为`0.073941`／`0.042200`，新坐标为`0.077882`／`0.038218`；
+因此当前主问题不是B-dynamic那种固定坐标过拟合，而是C从posterior训练分布切换到标准正态部署后的
+latent先验／条件融合失配。两者都是同一32-motion已见序列范围，不能称新motion泛化。
+
+### 11.3 趋势、消融与研究结论
+
+standard-normal fixed energy从step300000的`0.031322`降到step360000的`0.027423`，
+最后20k仅改善约2.17%，最后10k约0.86%；学习率已到1e-6，继续原合同追加训练的边际收益
+已经很小。best为末步不代表达到部署质量门限。
+
+step345000的4个跨motion窗口posterior-mean消融显示：global latent置零／置换几乎不变
+（State／Action MSE约`4.60e-5`／`2.67e-5`），local latent置零或置换会明显变差，
+condition memory置零／置换则升至`0.398`／`0.495`或`1.454`／`1.789`，FiLM置零／置换升至
+`0.0263`／`0.0347`或`0.0387`／`0.0436`。这支持Decoder主要依赖condition memory和FiLM，
+global posterior通道在该小样本消融中近似不敏感；它是posterior-mean依赖证据，不足以单独证明
+完整模型的latent表达能力或标准正态先验已完全坍缩。训练末步KL也呈global约`1e-5`、local约
+`1.7e-2`，与该风险方向一致。
+
+本轮最终判定：**C工程执行通过；posterior路径可重建；standard-normal部署质量未通过，
+quality_pass保持null；不能直接进入随机生成的成功宣称。** 不对同一run做普通续训，也不同时改
+loss、latent、pooling或网络宽度。下一步先从已有step360000 checkpoint做紧凑末步尾部诊断，
+补齐最差window／coordinate和latent统计；随后按replay65先跑原始Action双基线，再在相同窗口运行
+C模型回放。回放是物理诊断，不把视频结果倒写成训练质量通过；基线失效时模型物理质量保持
+`MODEL_QUALITY_UNDETERMINED`。
+
+回传包的证据限制必须保留：`evaluations_summaries/step_000360000/`含五条最终summary，
+但`evaluations_detail/`没有step360000的逐元素diagnostics，只有step0完整diagnostics和
+step20000至345000的消融文件。因此当前报告不能从该回传包给出末步最差坐标、最差window或
+末步逐坐标trace；这些只能通过Ubuntu源run对step360000做一次只读精简导出获得。

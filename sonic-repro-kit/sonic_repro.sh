@@ -370,6 +370,7 @@ mark_stage() {
   local run_dir="$1"
   local marker_name="$2"
   local marker tmp
+  mkdir -p -- "$run_dir/markers"
   marker="$run_dir/markers/$marker_name"
   tmp="$marker.tmp.$$"
   printf 'completed_at=%s\n' "$(date -Is)" > "$tmp"
@@ -1181,6 +1182,9 @@ phase_replay_action_mask() {
   local expected_actions_hash num_envs output_dir slice_dir slice_manifest
   local exact_init_file exact_init_hash actual_exact_init_hash
   run_dir="$(validated_run_dir "$ACTION_MASK_RUN_DIR")"
+  # replay65 creates each simulation child itself. Keep the generic shell
+  # phase safe when it is called from a child that has not created markers yet.
+  ensure_run_layout "$run_dir"
   request="$run_dir/manifests/action_replay_request.json"
   source_request="$run_dir/manifests/action_mask_request.json"
   [[ -s "$request" && -s "$source_request" ]] \
