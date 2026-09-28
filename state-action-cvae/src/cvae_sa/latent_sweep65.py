@@ -482,7 +482,9 @@ def simulate(args) -> None:
         _simulation_child(motion_dir, "posterior_mean", ["posterior_mean_reference"], [reference])
         for seed in seeds:
             raw = np.load(motion_dir / "samples" / f"seed_{seed}" / "prediction.npz", allow_pickle=False)["executed_raw"].copy()
-            _simulation_child(motion_dir, str(seed), [f"seed_{seed}"], [raw])
+            # Keep the simulation directory aligned with the prepared sample
+            # directory and with render/report lookup: samples/seed_<N>/...
+            _simulation_child(motion_dir, f"seed_{seed}", [f"seed_{seed}"], [raw])
     atomic_write_text(run / "markers/latent_sweep_simulation_complete.ok", "SIMULATION COMPLETE\n")
 
 

@@ -503,3 +503,8 @@ Windows 已通过：`python -m compileall -q state-action-cvae/src/cvae_sa`、�
 使 `simulate` 将其判定为未完成 child。现已修复为只预创建 simulation 的 parent 目录，
 并让 render 运行时显式加入 `sonic-repro-kit` 到 Python import path。旧 smoke/full 目录
 均是不完整 run，必须创建新 run 重试，不能补 marker 或复用其中的空 simulation 目录。
+
+随后一次 smoke 还发现 Ubuntu 磁盘返回 `errno=28`，并且 sample simulation 的 seed 目录
+曾写成 `samples/20260924` 而 render 查找 `samples/seed_20260924`；现已修复为统一的
+`samples/seed_<seed>/simulations/full_action`。磁盘空间和 inode 必须先恢复正常，再用
+新 run 重跑；包含旧命名的 run 不得继续复用。
