@@ -463,3 +463,31 @@ step20000至345000的消融文件。因此当前报告不能从该回传包给�
 `--allow-recovered-dataset`；原始 Action 双基线仍先于模型物理回放执行，基线失败时
 模型物理质量保持不可判定。新数据集元数据应单独压缩备份，不能再次只保留 HDF5 而丢失
 manifest、episodes、normalization 和 markers。
+
+## 13. C latent 敏感性与五 seed full-action 回放（代码已实现，待 Ubuntu 执行）
+
+新增独立入口 `state-action-cvae/src/cvae_sa/latent_sweep65.py`，协议版本为
+`65-token-latent-sweep-v1`。它不改变训练、loss、checkpoint 或 C 的部署合同：标准正态
+sample 仍只调用 `encode_condition` 和 `infer_from_condition`，posterior encoder 只在
+完整真实 State--Action 输入上生成名为 `full_truth_posterior_mean` 的诊断参考。
+
+`prepare` 固定 `full_action`、window 844 的 `jump_right_004__A029`，再按 seed
+`20260928` 选择两个不同 motion；默认 sample seed 为 `20260923`--`20260927`，
+`sample_index=0`，Isaac `simulation_seed=20260930`。每个 motion 的 reference、五个
+sample、原始 Action 双基线和精确初始化均位于一个新 run 下，sample 物理回放互不复用
+目录。reference 保存 global/local posterior mean、logvar、std；sample 保存
+`epsilon_*`、`sampled_*`、归一化/物理 State--Action、`executed_raw` 和
+`achieved_action`。report 生成 latent distance、offline output、seed spread、
+physical replay JSONL 与 SVG 图；render 生成每个 seed 的独立 `*_full_action_action.mp4`、
+posterior mean reference MP4 和 original repeatability MP4。
+
+新入口显式记录 `recovered_dataset`、`exact_identity_verified` 及所有身份不一致字段。
+由于重建数据集可能同时改变 manifest、normalization 或固定窗口集合，只有显式加入
+`--allow-recovered-dataset` 才允许诊断性 sweep；这不把数据集恢复宣称为原始 bitwise
+identity。baseline 无效时 report 仍保留 latent/offline 结果，但物理质量字段为
+`UNDETERMINED`。该实验不是训练质量门禁，也不触发续训、改 loss 或扩模型。
+
+Windows 已通过：`python -m compileall -q state-action-cvae/src/cvae_sa`、新增
+`test_latent_sweep65.py`（3 tests）、既有 `test_replay65.py`（12 tests）、CLI help
+和 `git diff --check`。尚未执行 Ubuntu HDF5/CUDA smoke、Isaac sweep 或 MP4 render；
+这些必须从新 run 开始，并按 smoke → full 顺序回传实际 manifest/report。
