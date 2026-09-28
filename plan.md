@@ -458,6 +458,12 @@ step20000至345000的消融文件。因此当前报告不能从该回传包给�
 `recovered_dataset=true`、`exact_identity_verified=false` 和对应警告。默认不放宽，
 新训练仍必须使用新数据集和新 run，不能把恢复回放写成原始数据集的精确复现。
 
+若旧数据集已经不可恢复，且用户明确接受把结果标记为诊断性而非严格复现，可额外使用
+`--allow-recovered-identity`。它允许 normalization、episodes index 或 selected-window
+identity 的显式漂移，但不会允许缺失身份字段；manifest 会记录
+`recovered_identity_override=true`，报告必须将 `exact_identity_verified=false` 保留。
+该开关不能用于训练或质量门禁，只用于当前 A/B/C 物理回放的可审计诊断。
+
 当前 window 844 的 A/B/C 回放下一步是：同步新增的 `replay65.py` 与
 `cvae_training.py`，为每个 route 创建全新的输出目录，并在 `prepare` 中显式加入
 `--allow-recovered-dataset`；原始 Action 双基线仍先于模型物理回放执行，基线失败时
@@ -491,3 +497,9 @@ Windows 已通过：`python -m compileall -q state-action-cvae/src/cvae_sa`、�
 `test_latent_sweep65.py`（3 tests）、既有 `test_replay65.py`（12 tests）、CLI help
 和 `git diff --check`。尚未执行 Ubuntu HDF5/CUDA smoke、Isaac sweep 或 MP4 render；
 这些必须从新 run 开始，并按 smoke → full 顺序回传实际 manifest/report。
+
+首次 Ubuntu smoke 还暴露两个工程问题：该环境不存在 `/mnt/c/Users/...`，所以原同步
+命令实际没有传输文件；旧实现也会在 `prepare` 阶段预创建空的 `baseline/simulations`，
+使 `simulate` 将其判定为未完成 child。现已修复为只预创建 simulation 的 parent 目录，
+并让 render 运行时显式加入 `sonic-repro-kit` 到 Python import path。旧 smoke/full 目录
+均是不完整 run，必须创建新 run 重试，不能补 marker 或复用其中的空 simulation 目录。

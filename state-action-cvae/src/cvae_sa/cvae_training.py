@@ -79,10 +79,12 @@ def check_source_identity(
     exact=False,
     allow_unknown=False,
     allow_manifest_mismatch=False,
+    allow_identity_mismatch=False,
 ):
     old = checkpoint.get("dataset_identity") or {}
     missing = []
     recovered_manifest_mismatch = False
+    recovered_identity_mismatches = []
     for key in ("dataset_manifest_sha256", "episodes_index_sha256", "normalization_sha256", "selected_windows_sha256", "selected_window_count"):
         if old.get(key) is None:
             missing.append(key)
@@ -90,17 +92,22 @@ def check_source_identity(
             if key == "dataset_manifest_sha256" and allow_manifest_mismatch:
                 recovered_manifest_mismatch = True
                 continue
+            if allow_identity_mismatch:
+                recovered_identity_mismatches.append(key)
+                continue
             raise ValueError(f"source dataset identity mismatch: {key}")
     if missing and (exact or not allow_unknown):
         raise ValueError("legacy source identity unknown: " + ", ".join(missing) + "; read-only evaluation is allowed, training needs --allow-legacy-identity")
     return {
         "verified_fields": sorted(set(identity) & set(old)),
         "unknown_fields": missing,
-        "exact_identity_verified": not missing and not recovered_manifest_mismatch,
+        "exact_identity_verified": not missing and not recovered_manifest_mismatch and not recovered_identity_mismatches,
         "recovered_manifest_mismatch": recovered_manifest_mismatch,
+        "recovered_identity_mismatches": recovered_identity_mismatches,
         "identity_warning": (
-            "dataset_manifest_sha256 differs; allowed only by explicit recovered-dataset replay"
-            if recovered_manifest_mismatch else None
+            "dataset identity differs; allowed only by explicit recovered identity override: "
+            + ", ".join((["dataset_manifest_sha256"] if recovered_manifest_mismatch else []) + recovered_identity_mismatches)
+            if recovered_manifest_mismatch or recovered_identity_mismatches else None
         ),
     }
 

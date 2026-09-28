@@ -349,6 +349,7 @@ def prepare(args):
             identity,
             allow_unknown=args.route == "A",
             allow_manifest_mismatch=getattr(args, "allow_recovered_dataset", False),
+            allow_identity_mismatch=getattr(args, "allow_recovered_identity", False),
         )
         norm = read_normalization(dataset_run / "data/normalization.npz")
         run.mkdir(parents=True, exist_ok=True)
@@ -403,6 +404,7 @@ def prepare(args):
             "training_mask_seed":training_mask_seed,"replay_mask_seed":args.mask_seed,
             "exact_training_fixture": args.route == "B" and args.mask_seed == training_mask_seed and checkpoint.get("training_contract",{}).get("mask_mode")=="fixed",
             "recovered_dataset": bool(getattr(args, "allow_recovered_dataset", False)),
+            "recovered_identity_override": bool(getattr(args, "allow_recovered_identity", False)),
         })
         # Seal all prepared input files. Reports and simulation outputs are intentionally not sealed here.
         hashes = {str(p.relative_to(run)):file_sha256(p) for p in run.rglob("*") if p.is_file() and p.name != "progress.json"}
@@ -748,6 +750,14 @@ def main(argv=None):
         help=(
             "allow only a dataset_manifest hash mismatch for a deliberately rebuilt "
             "dataset; episodes, normalization, selected windows and count must still match"
+        ),
+    )
+    p.add_argument(
+        "--allow-recovered-identity",
+        action="store_true",
+        help=(
+            "diagnostic-only override for explicit dataset identity drift beyond the manifest "
+            "(normalization/index/window identity); report will set exact_identity_verified=false"
         ),
     )
     p.add_argument("--device")

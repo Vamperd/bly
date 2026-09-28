@@ -338,7 +338,10 @@ def prepare(args) -> None:
             index = int(row["window_index"])
             source, init, schema, source_meta = load_source(dataset, index)
             motion_dir = run / "motions" / f"m{ordinal:03d}_window{index:05d}"
-            for folder in ("reference", "samples", "baseline/simulations", "metrics", "videos", "data", "manifests", "logs", "markers"):
+            # Do not create a simulation child here.  An existing child without
+            # its worker completion seal is deliberately treated as incomplete
+            # by _simulation_child, so only create its parent container.
+            for folder in ("reference", "samples", "baseline", "metrics", "videos", "data", "manifests", "logs", "markers"):
                 (motion_dir / folder).mkdir(parents=True, exist_ok=True)
             _write_npz(motion_dir / "data/recorded_hdf.replay.npz", **source)
             _write_trajectory(motion_dir / "data/recorded_hdf.trajectory.pkl",
@@ -735,6 +738,8 @@ def _render(args) -> None:
     import imageio.v2 as imageio
     from imageio_ffmpeg import count_frames_and_secs
     import mujoco
+    if str(KIT) not in sys.path:
+        sys.path.insert(0, str(KIT))
     from render_h50a_exact_action_replays import _validate_joint_order, _writer
     from render_mujoco_trajectory import G1_ISAACLAB_JOINT_NAMES, build_mujoco_qpos, load_trajectory, prepare_runtime_xml
     sweep = load_json(run / "manifests/sweep.json"); seeds = [int(v) for v in sweep["sample_seeds"]]
