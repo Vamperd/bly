@@ -24,6 +24,15 @@ def compare_runtime(expected, actual):
     return checks
 
 
+def _normalise_mode(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null"}:
+        return None
+    return text.rsplit(".", 1)[-1].lower()
+
+
 def audit_and_freeze(raw, values):
     contract = json.loads(str(values["replay65_contract"].tolist()))
     source_events = contract.get("active_events")
@@ -68,6 +77,26 @@ def audit_and_freeze(raw, values):
         actuator_rows[name] = {**current,"buffers":buffers}
     if isinstance(source_groups,dict) and set(source_groups) != set(actuator_rows):
         raise ValueError("recorded/runtime actuator groups differ")
+    expected_ground = contract.get("ground_material") or {}
+    scene_cfg = getattr(getattr(raw, "cfg", None), "scene", None)
+    ground_cfg = getattr(getattr(scene_cfg, "terrain", None), "physics_material", None)
+    ground_modes = {
+        name: _normalise_mode(getattr(ground_cfg, name, None))
+        for name in ("friction_combine_mode", "restitution_combine_mode")
+    }
+    ground_mode_checks = {
+        name: (
+            True
+            if _normalise_mode(expected_ground.get(name)) is None
+            else ground_modes[name] == _normalise_mode(expected_ground.get(name))
+        )
+        for name in ground_modes
+    }
+    if not all(ground_mode_checks.values()):
+        raise ValueError(
+            f"ground material combine mode contract mismatch: "
+            f"expected={expected_ground}, actual={ground_modes}"
+        )
     asset_path = getattr(robot.cfg.spawn,"usd_path",None)
     asset_sha = None
     if asset_path and Path(asset_path).is_file():
@@ -87,10 +116,12 @@ def audit_and_freeze(raw, values):
         "simulation":actual,"simulation_checks":timing,"actuators":actuator_rows,
         "runtime_versions":{"python":platform.python_version(),"torch":torch.__version__,"cuda":torch.version.cuda},
         "asset":{"path":asset_path,"sha256":asset_sha,"matches_source":asset_matches},
+        "ground_material":{"expected_combine_modes":expected_ground,
+            "runtime_combine_modes":ground_modes,"checks":ground_mode_checks},
         "events_before_freeze":before,"suppressed_interval_events":suppressed,
         "events_after_freeze":{k:[n for n in v if n not in suppressed] for k,v in before.items()},
         "hidden_state":{"solver_contact_cache":"unknown_not_recorded","actuator_queue":"unknown" if unknown_delay else "zero_delay_not_needed"},
-        "contract_verified":all(v is True for v in timing.values()) and actuator_identity and not unknown_delay and isinstance(source_events,dict),
+        "contract_verified":all(v is True for v in timing.values()) and actuator_identity and not unknown_delay and isinstance(source_events,dict) and all(ground_mode_checks.values()),
         "midrun_reset":False,"control_steps":0,"substeps_per_control":int(raw.cfg.decimation)}
     raw._replay65_audit = report
     # No claim that reconstructing exposed state restores the entire simulator.

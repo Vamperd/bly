@@ -172,6 +172,17 @@ def load_source(dataset, index):
         raise ValueError("replay requires a complete 64-transition window")
     schema = load_physics_schema(Path(record["schema_path"]))
     sim = schema["simulation"]
+    terrain = schema.get("terrain") or {}
+    missing_terrain_contract = [
+        name
+        for name in ("friction_combine_mode", "restitution_combine_mode")
+        if terrain.get(name) in (None, "")
+    ]
+    if missing_terrain_contract:
+        raise ValueError(
+            "replay65 requires recorded terrain combine modes; missing "
+            + ", ".join(missing_terrain_contract)
+        )
     if not (np.isclose(sim["sim_dt"], .005) and np.isclose(sim["control_dt"], .02) and int(sim["decimation"]) == 4):
         raise ValueError("replay65 requires recorded 50 Hz, decimation=4")
     if len(schema["joint_names"]) != 29 or len(set(schema["joint_names"])) != 29:
@@ -224,6 +235,10 @@ def load_source(dataset, index):
         replay65_contract=np.asarray(json.dumps({"version": VERSION, "simulation": sim,
             "actuators": schema.get("actuator_groups", "unknown"), "active_events": schema.get("active_events", "unknown"),
             "asset":schema.get("asset"),"contact":schema.get("contact"),
+            "ground_material": {
+                "friction_combine_mode": terrain["friction_combine_mode"],
+                "restitution_combine_mode": terrain["restitution_combine_mode"],
+            },
             "window_start": start, "hidden_simulator_state": "not_recorded"})))
     motion, motion_info = _resolve_motion_file(record)
     return source, init, schema, {"record": record, "raw_source": raw_source, "motion_file": str(motion),

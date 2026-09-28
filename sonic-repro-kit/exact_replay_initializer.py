@@ -211,8 +211,21 @@ def _set_actuator_parameters(robot: Any, values: dict[str, np.ndarray]) -> None:
             current[:] = restored
 
 
+def _normalise_combine_mode(value: Any) -> str | None:
+    """Return the stable text form used by the recorder contract."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null"}:
+        return None
+    return text.rsplit(".", 1)[-1].lower()
+
+
 def _set_ground_material(
-    raw_env: Any, ground: np.ndarray
+    raw_env: Any,
+    ground: np.ndarray,
+    combine_modes: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Bind a dedicated replay material to the actual plane and read it back.
 
@@ -236,6 +249,22 @@ def _set_ground_material(
     material_cfg.static_friction = float(ground[0])
     material_cfg.dynamic_friction = float(ground[1])
     material_cfg.restitution = float(ground[2])
+    expected_modes = {
+        "friction_combine_mode": _normalise_combine_mode(
+            (combine_modes or {}).get("friction_combine_mode")
+        ),
+        "restitution_combine_mode": _normalise_combine_mode(
+            (combine_modes or {}).get("restitution_combine_mode")
+        ),
+    }
+    configured_modes = {
+        name: _normalise_combine_mode(getattr(material_cfg, name, None))
+        for name in expected_modes
+    }
+    combine_modes_match = all(
+        expected is None or configured_modes[name] == expected
+        for name, expected in expected_modes.items()
+    )
 
     stage = get_current_stage()
     terrain_path = str(raw_env.cfg.scene.terrain.prim_path).rstrip("/")
@@ -313,6 +342,9 @@ def _set_ground_material(
         "collision_discovery": discovery,
         "binding_result": None if binding_result is None else bool(binding_result),
         "binding_targets": binding_targets,
+        "expected_combine_modes": expected_modes,
+        "configured_combine_modes": configured_modes,
+        "combine_modes_match": bool(combine_modes_match),
     }
 
 
@@ -409,8 +441,15 @@ def apply_exact_replay_initialization(
         current = getter().clone()
         current[0] = torch.as_tensor(values[name], device=current.device, dtype=current.dtype)
         setter(current, env_ids_cpu)
+    replay_contract: dict[str, Any] = {}
+    if "replay65_contract" in values:
+        try:
+            replay_contract = json.loads(_scalar_text(values["replay65_contract"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid replay65_contract in exact initialization") from exc
+    ground_modes = replay_contract.get("ground_material") or {}
     ground_readback, ground_binding = _set_ground_material(
-        raw, values["ground_material"]
+        raw, values["ground_material"], ground_modes
     )
 
     origin = _numpy(raw.scene.env_origins[0])
@@ -530,6 +569,9 @@ def apply_exact_replay_initialization(
             values["initial_joint_target_abs"], readback["initial_joint_target_abs"]
         ),
         "runtime_context_max_abs": max(context_errors.values()),
+        "ground_material_combine_modes_match": bool(
+            ground_binding["combine_modes_match"]
+        ),
     }
     report = {
         "format_version": "sonic_exact_replay_initialization_readback_v1",
@@ -553,14 +595,36 @@ def apply_exact_replay_initialization(
         },
         "ground_material_binding": ground_binding,
         "readback": {name: value.tolist() for name, value in readback.items()},
-        "application_complete": True,
+        "application_complete": False,
     }
     _atomic_json(Path(report_path).expanduser().resolve(), report)
 
+    contract_errors = []
+    if errors["runtime_context_max_abs"] > 1.0e-5:
+        contract_errors.append(
+            "runtime context max abs="
+            f"{errors['runtime_context_max_abs']:.9g}"
+        )
+    if not errors["ground_material_combine_modes_match"]:
+        contract_errors.append("ground material combine mode mismatch")
+    if contract_errors:
+        raise RuntimeError(
+            "exact replay initialization contract failed: "
+            + "; ".join(contract_errors)
+        )
     if "replay65_contract" in values:
         from replay65_runtime import audit_and_freeze
 
-        audit_and_freeze(raw, values)
+        audit = audit_and_freeze(raw, values)
+        if not audit.get("contract_verified", False):
+            raise RuntimeError(
+                "exact replay runtime contract is not verified; "
+                "hidden actuator delay or an incomplete source contract prevents "
+                "a strict original-action replay"
+            )
+
+    report["application_complete"] = True
+    _atomic_json(Path(report_path).expanduser().resolve(), report)
 
     raw.observation_manager.reset(env_ids_device)
     raw.obs_buf = raw.observation_manager.compute(update_history=True)

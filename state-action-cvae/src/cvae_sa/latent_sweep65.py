@@ -58,24 +58,26 @@ from .replay65 import (
 from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
 
 
-VERSION = "65-token-latent-sweep-v2-post64"
+VERSION = "65-token-latent-sweep-v3-strict-original"
 MASK = "full_action"
 MASK_SLOT = PHYSICAL_MASK_NAMES.index(MASK)
 DEFAULT_SEEDS = (20260923, 20260924, 20260925, 20260926, 20260927)
 HARD_WINDOW = 844
 HARD_MOTION = "jump_right_004__A029"
 SIMULATION_SEED = 20260930
-# The learned C decoder still produces one T64 window.  The physical replay
-# deliberately continues for another 64 control cycles by holding the last
-# raw Action.  This makes the post-window behavior visible without pretending
-# that the fixed-length decoder performed an autoregressive 64-step rollout.
+# The learned C decoder still produces one T64 window.  Physical replay is
+# extended to 128 control cycles only when the source HDF5 contains the next
+# 64 recorded raw Actions.  This keeps the original baseline an open-loop
+# replay of the recorded source, rather than asking SONIC to generate a new
+# Action or silently substituting a held Action.
 REPLAY_ACTION_STEPS = 64
 POST_ACTION_STEPS = 64
 TOTAL_ACTION_STEPS = REPLAY_ACTION_STEPS + POST_ACTION_STEPS
 REPLAY_STATE_FRAMES = REPLAY_ACTION_STEPS + 1
 TOTAL_STATE_FRAMES = TOTAL_ACTION_STEPS + 1
 POST_ACTION_MODE = "hold_final_action"
-POST_ACTION_POLICY = "source_direct_else_hold_final"
+POST_ACTION_POLICY = "source_direct_required_for_original_baseline"
+POST_ACTION_FALLBACK_MODE = "none_strict_source"
 LATENT_NAMES = (
     "global_mean",
     "local_mean",
@@ -186,6 +188,32 @@ def _original_extended_actions(motion_dir: Path, source: dict[str, np.ndarray]) 
     if not np.array_equal(candidate[:REPLAY_ACTION_STEPS], source["raw_action"]):
         return None
     return candidate
+
+
+def _require_original_extended_actions(
+    motion_dir: Path, source: dict[str, np.ndarray]
+) -> np.ndarray:
+    """Load the complete recorded T128 Action sequence for the baseline.
+
+    A T64 window padded with a repeated final Action is useful for an isolated
+    model diagnostic, but it is not an original-action baseline.  Failing here
+    prevents a missing/deleted source HDF5 from being mistaken for a physical
+    replay of the recorded motion.
+    """
+
+    actions = _original_extended_actions(motion_dir, source)
+    if actions is None:
+        meta = load_json(motion_dir / "manifests/replay65.json")
+        record = meta.get("source", {}).get("record", {})
+        hdf5_path = str(record.get("hdf5_path", ""))
+        episode = str(record.get("episode", ""))
+        start = int(meta.get("window", {}).get("window_start", -1))
+        raise RuntimeError(
+            "strict original 128-step replay requires the source HDF5 "
+            "raw_policy_action slice; no fallback to hold_final_action is "
+            f"allowed (hdf5={hdf5_path!r}, episode={episode!r}, window_start={start})"
+        )
+    return actions
 
 
 def _append_original_continuation(
@@ -397,7 +425,7 @@ def _motion_manifest(source: dict, source_meta: dict, row: dict, init_manifest: 
         "total_action_steps": TOTAL_ACTION_STEPS,
         "total_state_frames": TOTAL_STATE_FRAMES,
         "post_action_policy": POST_ACTION_POLICY,
-        "post_action_fallback_mode": POST_ACTION_MODE,
+        "post_action_fallback_mode": POST_ACTION_FALLBACK_MODE,
         "source": source_meta,
         "initialization": init_manifest,
         "entries": [],
@@ -490,7 +518,7 @@ def prepare(args) -> None:
             "total_action_steps": TOTAL_ACTION_STEPS,
             "total_state_frames": TOTAL_STATE_FRAMES,
             "post_action_policy": POST_ACTION_POLICY,
-            "post_action_fallback_mode": POST_ACTION_MODE,
+            "post_action_fallback_mode": POST_ACTION_FALLBACK_MODE,
             "selection_seed": int(args.selection_seed), "identity_check": identity_check,
             "recovered_dataset": bool(args.allow_recovered_dataset),
             "exact_identity_verified": bool(identity_check["exact_identity_verified"]),
@@ -692,8 +720,8 @@ def simulate(args) -> None:
     seeds = [int(v) for v in sweep["sample_seeds"]]
     for motion_dir in sorted((run / "motions").glob("m*_window*")):
         source = _load_replay(motion_dir / "data/recorded_hdf.replay.npz")
-        original = _original_extended_actions(motion_dir, source)
-        baseline_actions = original if original is not None else source["raw_action"]
+        original = _require_original_extended_actions(motion_dir, source)
+        baseline_actions = original
         _simulation_child(motion_dir, "baseline", ["original_1", "original_2"], [baseline_actions] * 2)
         reference = np.load(motion_dir / "reference/posterior_mean.npz", allow_pickle=False)["executed_raw"].copy()
         _simulation_child(
@@ -958,7 +986,7 @@ def report(args) -> dict:
         "total_action_steps": TOTAL_ACTION_STEPS,
         "total_state_frames": TOTAL_STATE_FRAMES,
         "post_action_policy": POST_ACTION_POLICY,
-        "post_action_fallback_mode": POST_ACTION_MODE,
+        "post_action_fallback_mode": POST_ACTION_FALLBACK_MODE,
         "recovered_dataset": bool(sweep["recovered_dataset"]),
         "exact_identity_verified": bool(sweep["exact_identity_verified"]),
         "latent_rows": len(latent_rows), "output_rows": len(output_rows),

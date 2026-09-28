@@ -395,3 +395,32 @@ shell的`mark_stage`和Action-mask阶段也有防御性目录创建。`test_repl
 `joint_gap_8`在A中是困难窗口的诊断标签，不会把A误写成condition-only或masked Action训练。
 随后将三条路线改为共享同一个最难motion/window；A生成四个代表性State视频并只执行一次等价的
 Action物理回放，B/C生成四个代表性State视频及各自的四个Action物理回放视频。
+
+## 12. 64+64 延长回放的严格原始 Action 合同（2026-09-28）
+
+用户已回退把后 64 步交给 SONIC policy 或用模型 desired-State 外推的改动。这一实验的
+物理问题定义是 open-loop：同一 motion、同一初始化、同一仿真参数下，原始 source
+`raw_policy_action[window_start:window_start+128]` 必须逐步送入 Isaac。`latent_sweep65.py`
+此前在 source HDF5 不可读时会把 original baseline 降级为 T64 加 hold-final；这会让一个
+“原始回放”其实执行了不同的 Action 序列，现已改为 fail-closed。缺少连续 T128 source
+Action、前 64 步 hash/逐元素校验失败或 HDF5 不可读时，simulation 不生成 baseline。
+
+当前代码把 `terrain.friction_combine_mode` 和 `terrain.restitution_combine_mode` 写入
+`replay65_contract`。`exact_replay_initializer.py` 在绑定专用 ground material 后记录期望值、
+运行时配置值和 `combine_modes_match`，并对所有已记录的数值 runtime context 做读回比较。
+`runtime_context_max_abs > 1e-5` 或 ground combine mode 不匹配会留下失败的 readback JSON 并
+停止 worker；因此摩擦数值、恢复系数、combine mode、关节/刚体参数、gravity、solver、dt 等
+可见差异不会再被视频掩盖；非零且无法恢复的 actuator delay queue 也会让 exact
+initialization 失败。
+
+这项修复不能保证跨独立 Isaac 进程 bitwise 相同：Physics State–Action v3 没有记录 PhysX
+接触 warm-start/cache，也没有记录非零 actuator delay queue 的历史内容。runtime audit 会把
+前者记为 `solver_contact_cache=unknown_not_recorded`；若配置出现非零 delay，exact worker
+会停止而不是继续输出视频。若第一处 divergence 出现在可见参数全部通过之后，应将物理结论写成“隐藏模拟器状态未确定”，
+而不是继续猜测地面摩擦或启动训练修改。
+
+Windows 静态测试新增了严格 baseline 缺源失败和 combine-mode/读回合同检查。Ubuntu 下一次
+必须建立全新 run，先确认每个 child 的 `action_replay_request.json` 为
+`post_action_mode=direct_original_action`，再检查 `exact_initialization_readback_*.json`、
+`*.runtime.json` 和 `recorded_to_original_1_errors.npz` 的首个阈值帧。旧的 hold-final 或
+policy-continuation run 不得作为原始 Action 一致性证据。

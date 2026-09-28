@@ -91,6 +91,11 @@ class ExactReplayInitializationTest(unittest.TestCase):
             "exactReplayPhysicsMaterial",
             "get_first_matching_child_prim",
             "bind_physics_material",
+            "friction_combine_mode",
+            "restitution_combine_mode",
+            "ground_material_combine_modes_match",
+            "runtime_context_max_abs",
+            "exact replay initialization contract failed",
             "write_root_state_to_sim",
             "write_joint_state_to_sim",
             "term.process_actions(previous_raw)",
@@ -105,7 +110,7 @@ class ExactReplayInitializationTest(unittest.TestCase):
                 self.assertIn(operation, source)
         self.assertLess(source.index("write_root_state_to_sim"), source.index("raw.sim.forward()"))
         self.assertLess(source.index("term.process_actions(previous_raw)"), source.index("raw.sim.forward()"))
-        self.assertLess(source.index("raw.sim.forward()"), source.index('"application_complete": True'))
+        self.assertLess(source.index("raw.sim.forward()"), source.index('report["application_complete"] = True'))
         self.assertNotIn(
             'ground physics material prim is missing: {prim_path}',
             source,

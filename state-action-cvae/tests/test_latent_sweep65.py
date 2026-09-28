@@ -1,5 +1,7 @@
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
+import tempfile
 
 import numpy as np
 import torch
@@ -16,6 +18,7 @@ from cvae_sa.latent_sweep65 import (
     _latent_metrics,
     _output_metrics,
     _pad_recorded_trajectory,
+    _require_original_extended_actions,
     _selection,
 )
 
@@ -113,6 +116,19 @@ class LatentSweep65Tests(unittest.TestCase):
         self.assertEqual(padded["root_pos_w"].shape, (TOTAL_STATE_FRAMES, 3))
         self.assertEqual(padded["total_frames"], TOTAL_STATE_FRAMES)
         self.assertEqual(padded["post_replay_reference"], "held_last_recorded_pose")
+
+    def test_original_baseline_fails_closed_without_source_t128_actions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            motion_dir = Path(temporary)
+            (motion_dir / "manifests").mkdir()
+            (motion_dir / "manifests/replay65.json").write_text(
+                '{"source":{"record":{"hdf5_path":"/missing/source.h5",'
+                '"episode":"demo_0"}},"window":{"window_start":0}}',
+                encoding="utf-8",
+            )
+            source = {"raw_action": np.zeros((REPLAY_ACTION_STEPS, 29), dtype=np.float32)}
+            with self.assertRaisesRegex(RuntimeError, "strict original 128-step replay"):
+                _require_original_extended_actions(motion_dir, source)
 
 
 if __name__ == "__main__":
