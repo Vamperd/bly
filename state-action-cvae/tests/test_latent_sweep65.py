@@ -6,8 +6,16 @@ import torch
 
 from cvae_sa.cvae_diagnostics import epsilon_for
 from cvae_sa.latent_sweep65 import (
+    POST_ACTION_STEPS,
+    REPLAY_ACTION_STEPS,
+    TOTAL_ACTION_STEPS,
+    TOTAL_STATE_FRAMES,
+    _continuation_mode,
+    _extend_action_sequence,
+    _append_original_continuation,
     _latent_metrics,
     _output_metrics,
+    _pad_recorded_trajectory,
     _selection,
 )
 
@@ -75,6 +83,36 @@ class LatentSweep65Tests(unittest.TestCase):
         self.assertEqual(len(output["state"]["per_timestep_rmse"]), 65)
         self.assertTrue(np.isfinite(latent["global"]["rmse"]))
         self.assertTrue(np.isfinite(output["action"]["full_rmse"]))
+
+    def test_physical_continuation_holds_final_action_or_accepts_direct_t128(self):
+        actions = np.arange(REPLAY_ACTION_STEPS * 29, dtype=np.float32).reshape(REPLAY_ACTION_STEPS, 29)
+        extended = _extend_action_sequence(actions)
+        self.assertEqual(extended.shape, (TOTAL_ACTION_STEPS, 29))
+        np.testing.assert_array_equal(extended[:REPLAY_ACTION_STEPS], actions)
+        np.testing.assert_array_equal(
+            extended[REPLAY_ACTION_STEPS:],
+            np.repeat(actions[-1:], POST_ACTION_STEPS, axis=0),
+        )
+        self.assertEqual(_continuation_mode([actions, actions.copy()]), "hold_final_action")
+        direct = np.concatenate((actions, actions + 1000), axis=0)
+        np.testing.assert_array_equal(_extend_action_sequence(direct), direct)
+        self.assertEqual(_continuation_mode([direct]), "direct_original_action")
+        np.testing.assert_array_equal(_append_original_continuation(actions, direct), direct)
+        np.testing.assert_array_equal(_append_original_continuation(actions, None), actions)
+        self.assertEqual(POST_ACTION_STEPS, 64)
+
+    def test_recorded_reference_is_padded_only_for_video(self):
+        trajectory = {
+            "dof_pos": np.zeros((REPLAY_ACTION_STEPS + 1, 29), dtype=np.float32),
+            "root_pos_w": np.zeros((REPLAY_ACTION_STEPS + 1, 3), dtype=np.float32),
+            "root_quat_w": np.tile(np.array([[1, 0, 0, 0]], dtype=np.float32), (REPLAY_ACTION_STEPS + 1, 1)),
+            "total_frames": REPLAY_ACTION_STEPS + 1,
+        }
+        padded = _pad_recorded_trajectory(trajectory)
+        self.assertEqual(padded["dof_pos"].shape, (TOTAL_STATE_FRAMES, 29))
+        self.assertEqual(padded["root_pos_w"].shape, (TOTAL_STATE_FRAMES, 3))
+        self.assertEqual(padded["total_frames"], TOTAL_STATE_FRAMES)
+        self.assertEqual(padded["post_replay_reference"], "held_last_recorded_pose")
 
 
 if __name__ == "__main__":

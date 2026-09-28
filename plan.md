@@ -472,8 +472,9 @@ manifest、episodes、normalization 和 markers。
 
 ## 13. C latent 敏感性与五 seed full-action 回放（代码已实现，待 Ubuntu 执行）
 
-新增独立入口 `state-action-cvae/src/cvae_sa/latent_sweep65.py`，协议版本为
-`65-token-latent-sweep-v1`。它不改变训练、loss、checkpoint 或 C 的部署合同：标准正态
+新增独立入口 `state-action-cvae/src/cvae_sa/latent_sweep65.py`，协议版本基础为
+`65-token-latent-sweep-v1`，当前视频延长实现升为 `65-token-latent-sweep-v2-post64`。
+它不改变训练、loss、checkpoint 或 C 的部署合同：标准正态
 sample 仍只调用 `encode_condition` 和 `infer_from_condition`，posterior encoder 只在
 完整真实 State--Action 输入上生成名为 `full_truth_posterior_mean` 的诊断参考。
 
@@ -494,7 +495,7 @@ identity。baseline 无效时 report 仍保留 latent/offline 结果，但物理
 `UNDETERMINED`。该实验不是训练质量门禁，也不触发续训、改 loss 或扩模型。
 
 Windows 已通过：`python -m compileall -q state-action-cvae/src/cvae_sa`、新增
-`test_latent_sweep65.py`（3 tests）、既有 `test_replay65.py`（12 tests）、CLI help
+`test_latent_sweep65.py`（5 tests）、既有 `test_replay65.py`（12 tests）、CLI help
 和 `git diff --check`。尚未执行 Ubuntu HDF5/CUDA smoke、Isaac sweep 或 MP4 render；
 这些必须从新 run 开始，并按 smoke → full 顺序回传实际 manifest/report。
 
@@ -508,3 +509,30 @@ Windows 已通过：`python -m compileall -q state-action-cvae/src/cvae_sa`、�
 曾写成 `samples/20260924` 而 render 查找 `samples/seed_20260924`；现已修复为统一的
 `samples/seed_<seed>/simulations/full_action`。磁盘空间和 inode 必须先恢复正常，再用
 新 run 重跑；包含旧命名的 run 不得继续复用。
+
+## 14. C latent sweep 的 64+64 帧物理延长（Windows 已实现，待 Ubuntu 同步）
+
+为避免 64-step replay 的 MP4 过短，协议版本已升为
+`65-token-latent-sweep-v2-post64`；`latent_sweep65.py` 的 Isaac 请求现在包含
+`REPLAY_ACTION_STEPS=64` 加 `POST_ACTION_STEPS=64`，因此每个物理 trajectory 必须有
+128 个 Action 和 129 个 State frame。默认策略为 `source_direct_else_hold_final`：若无后续
+原始 Action，则 `post_action_mode=hold_final_action`，第 65--128
+个控制周期重复该场景最后一个已经执行的 raw Action。这个选择只观察回放结束后的稳定、漂移
+或倒地结果，不把固定 T64 decoder 误写成已经具备 64-step 自回归外推能力。
+
+如果调用方已经拥有完整的 128-step 原始 Action 序列，延长辅助函数会保持其第 65--128
+个原始 Action，并在该 simulation request 中写入 `post_action_mode=direct_original_action`；
+`simulate` 会从 source record 的 HDF5 尝试读取窗口之后的 64 个原始 raw Action，并先校验
+前 64 步与准备阶段完全一致；读取不到或身份不一致时才回退。当前 recovered T64 dataset
+的 `load_source` 本身只提供窗口内 64 步；simulation 会把可读的 HDF5 后续 64 步追加到
+baseline，并也追加到每个 C sample/reference 的后 64 步，使所有场景在 continuation 段使用
+相同的原始 Action。若后续 HDF5 Action 不可读，baseline 与每个模型场景分别回退到
+hold-final。真正的 model-autoregressive desired-State 外推仍是独立后续实验，不与本回放混合。
+
+每个 MP4 现在必须为 129 帧、50 Hz，叠加层标出 `REPLAY 0-64` 与
+`POST-DIRECT-ORIGINAL 65-128` 或 `POST-HOLD-FINAL 65-128`。
+Recorded HDF 只有原始 65 帧，视频左侧在后 64 帧重复最后记录姿态并标注
+`Recorded HDF pose (held after 64)`；Isaac baseline、posterior reference 和五个 sample
+均为真实 129-frame 物理录制。report 保留原始 0--64 窗口指标，并额外写入
+`post_hold_frames_64_128` 和 post-hold seed spread；旧 65-frame run 不得补 marker 冒充新协议，
+必须建立新的 latent sweep run。

@@ -58,13 +58,24 @@ from .replay65 import (
 from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
 
 
-VERSION = "65-token-latent-sweep-v1"
+VERSION = "65-token-latent-sweep-v2-post64"
 MASK = "full_action"
 MASK_SLOT = PHYSICAL_MASK_NAMES.index(MASK)
 DEFAULT_SEEDS = (20260923, 20260924, 20260925, 20260926, 20260927)
 HARD_WINDOW = 844
 HARD_MOTION = "jump_right_004__A029"
 SIMULATION_SEED = 20260930
+# The learned C decoder still produces one T64 window.  The physical replay
+# deliberately continues for another 64 control cycles by holding the last
+# raw Action.  This makes the post-window behavior visible without pretending
+# that the fixed-length decoder performed an autoregressive 64-step rollout.
+REPLAY_ACTION_STEPS = 64
+POST_ACTION_STEPS = 64
+TOTAL_ACTION_STEPS = REPLAY_ACTION_STEPS + POST_ACTION_STEPS
+REPLAY_STATE_FRAMES = REPLAY_ACTION_STEPS + 1
+TOTAL_STATE_FRAMES = TOTAL_ACTION_STEPS + 1
+POST_ACTION_MODE = "hold_final_action"
+POST_ACTION_POLICY = "source_direct_else_hold_final"
 LATENT_NAMES = (
     "global_mean",
     "local_mean",
@@ -86,6 +97,150 @@ def _finite_array(name: str, value: np.ndarray, shape: tuple[int, ...] | None = 
     if not np.isfinite(value).all():
         raise ValueError(f"{name}: non-finite values")
     return value
+
+
+def _extend_action_sequence(
+    value: np.ndarray,
+    *,
+    post_steps: int = POST_ACTION_STEPS,
+    mode: str = POST_ACTION_MODE,
+) -> np.ndarray:
+    """Append a deterministic physical continuation to a T64 Action sequence.
+
+    ``hold_final_action`` is intentionally explicit: it repeats the final raw
+    Action sent during the learned window.  A model-autoregressive continuation
+    is not silently substituted because the current C decoder has no contract
+    for producing another 64 actions from its own predicted State.
+    """
+
+    actions = np.asarray(value, dtype=np.float32)
+    if actions.shape == (TOTAL_ACTION_STEPS, 29):
+        if not np.isfinite(actions).all():
+            raise ValueError("raw Action sequence contains NaN/Inf")
+        # Callers that already have the next 64 original Actions can pass
+        # them through unchanged.  The current T64 dataset loader supplies
+        # only the window, so normal C samples take the hold-final branch.
+        if mode not in {POST_ACTION_MODE, "direct_original_action"}:
+            raise ValueError(f"unsupported post Action mode {mode!r}")
+        return actions.copy()
+    if actions.shape != (REPLAY_ACTION_STEPS, 29):
+        raise ValueError(
+            f"expected a T64 raw Action sequence with shape "
+            f"{(REPLAY_ACTION_STEPS, 29)}, got {actions.shape}"
+        )
+    if post_steps < 0:
+        raise ValueError("post_steps must be non-negative")
+    if mode != POST_ACTION_MODE:
+        raise ValueError(
+            f"unsupported post Action mode {mode!r}; only {POST_ACTION_MODE!r} "
+            "is defined for this fixed-length C replay"
+        )
+    if not np.isfinite(actions).all():
+        raise ValueError("raw Action sequence contains NaN/Inf")
+    if post_steps == 0:
+        return actions.copy()
+    held = np.repeat(actions[-1:, :], post_steps, axis=0)
+    return np.concatenate((actions, held), axis=0).astype(np.float32, copy=False)
+
+
+def _continuation_mode(raws: list[np.ndarray]) -> str:
+    """Select direct-original versus hold-final continuation for one child."""
+
+    shapes = {tuple(np.asarray(raw).shape) for raw in raws}
+    if shapes == {(TOTAL_ACTION_STEPS, 29)}:
+        return "direct_original_action"
+    if shapes == {(REPLAY_ACTION_STEPS, 29)}:
+        return POST_ACTION_MODE
+    raise ValueError(
+        "all scenarios in one replay child must provide either T64 Actions "
+        f"or already extended T128 Actions; found {sorted(shapes)}"
+    )
+
+
+def _original_extended_actions(motion_dir: Path, source: dict[str, np.ndarray]) -> np.ndarray | None:
+    """Read the post-window recorded raw Actions when the source HDF has them."""
+
+    meta = load_json(motion_dir / "manifests/replay65.json")
+    record = meta.get("source", {}).get("record", {})
+    hdf5_path = Path(str(record.get("hdf5_path", ""))).expanduser()
+    episode = str(record.get("episode", ""))
+    start = int(meta.get("window", {}).get("window_start", -1))
+    if not hdf5_path.is_file() or not episode or start < 0:
+        return None
+    try:
+        import h5py
+
+        with h5py.File(hdf5_path, "r") as stream:
+            actions = stream[f"data/{episode}/actions"]
+            if "raw_policy_action" not in actions:
+                return None
+            candidate = np.asarray(
+                actions["raw_policy_action"][start : start + TOTAL_ACTION_STEPS],
+                dtype=np.float32,
+            )
+    except (ImportError, OSError, KeyError, ValueError):
+        return None
+    if candidate.shape != (TOTAL_ACTION_STEPS, 29) or not np.isfinite(candidate).all():
+        return None
+    # Do not silently splice a different source into the learned window.
+    if not np.array_equal(candidate[:REPLAY_ACTION_STEPS], source["raw_action"]):
+        return None
+    return candidate
+
+
+def _append_original_continuation(
+    value: np.ndarray, original_extended: np.ndarray | None
+) -> np.ndarray:
+    """Use recorded post-window Actions after a model's T64 replay."""
+
+    actions = np.asarray(value, dtype=np.float32)
+    if original_extended is None:
+        return actions
+    if actions.shape != (REPLAY_ACTION_STEPS, 29):
+        raise ValueError(
+            "model replay must be T64 before appending original continuation, "
+            f"got {actions.shape}"
+        )
+    if original_extended.shape != (TOTAL_ACTION_STEPS, 29):
+        raise ValueError(f"original continuation must be T128, got {original_extended.shape}")
+    return np.concatenate((actions, original_extended[REPLAY_ACTION_STEPS:]), axis=0)
+
+
+def _pad_recorded_trajectory(
+    trajectory: dict,
+    *,
+    total_frames: int = TOTAL_STATE_FRAMES,
+) -> dict:
+    """Pad the 65-frame recorded-HDF pose for equal-length comparison video.
+
+    Isaac trajectories are physically simulated for all 129 frames.  The
+    source HDF only contains the learned 65-frame window, so its last pose is
+    repeated in the video-only reference panel after the window boundary.
+    """
+
+    result = dict(trajectory)
+    required = ("dof_pos", "root_pos_w", "root_quat_w")
+    lengths = {name: int(np.asarray(result[name]).shape[0]) for name in required}
+    if len(set(lengths.values())) != 1:
+        raise ValueError(f"recorded trajectory fields have different lengths: {lengths}")
+    current = next(iter(lengths.values()))
+    if current == total_frames:
+        result["total_frames"] = int(total_frames)
+        return result
+    if current != REPLAY_STATE_FRAMES or total_frames < current:
+        raise ValueError(
+            f"expected a {REPLAY_STATE_FRAMES}-frame recorded trajectory to pad, "
+            f"got {current} frames and target {total_frames}"
+        )
+    for name in required:
+        values = np.asarray(result[name])
+        result[name] = np.concatenate(
+            (values, np.repeat(values[-1:, ...], total_frames - current, axis=0)),
+            axis=0,
+        )
+    result["total_frames"] = int(total_frames)
+    result["post_replay_reference"] = "held_last_recorded_pose"
+    return result
 
 
 def _physical_state(normalized: np.ndarray, norm: dict[str, tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
@@ -237,6 +392,12 @@ def _motion_manifest(source: dict, source_meta: dict, row: dict, init_manifest: 
         "route": "C",
         "mask": MASK,
         "simulation_seed": int(simulation_seed),
+        "replay_action_steps": REPLAY_ACTION_STEPS,
+        "post_action_steps": POST_ACTION_STEPS,
+        "total_action_steps": TOTAL_ACTION_STEPS,
+        "total_state_frames": TOTAL_STATE_FRAMES,
+        "post_action_policy": POST_ACTION_POLICY,
+        "post_action_fallback_mode": POST_ACTION_MODE,
         "source": source_meta,
         "initialization": init_manifest,
         "entries": [],
@@ -324,6 +485,12 @@ def prepare(args) -> None:
             "checkpoint_sha256": file_sha256(checkpoint_path), "dataset_run": str(dataset_run),
             "mask": MASK, "mask_slot": MASK_SLOT, "sample_seeds": list(seeds),
             "sample_index": int(args.sample_index), "simulation_seed": int(args.simulation_seed),
+            "replay_action_steps": REPLAY_ACTION_STEPS,
+            "post_action_steps": POST_ACTION_STEPS,
+            "total_action_steps": TOTAL_ACTION_STEPS,
+            "total_state_frames": TOTAL_STATE_FRAMES,
+            "post_action_policy": POST_ACTION_POLICY,
+            "post_action_fallback_mode": POST_ACTION_MODE,
             "selection_seed": int(args.selection_seed), "identity_check": identity_check,
             "recovered_dataset": bool(args.allow_recovered_dataset),
             "exact_identity_verified": bool(identity_check["exact_identity_verified"]),
@@ -405,6 +572,12 @@ def prepare(args) -> None:
             atomic_write_json(motion_dir / "manifests/prepared.json", {
                 "window": row, "motion_index": ordinal, "sample_seeds": list(seeds),
                 "reference": "reference/posterior_mean.npz", "baseline": "baseline/raw_actions.npz",
+                "replay_action_steps": REPLAY_ACTION_STEPS,
+                "post_action_steps": POST_ACTION_STEPS,
+                "total_action_steps": TOTAL_ACTION_STEPS,
+                "total_state_frames": TOTAL_STATE_FRAMES,
+                "post_action_policy": POST_ACTION_POLICY,
+                "post_action_fallback_mode": POST_ACTION_MODE,
                 "source": source_meta,
             })
         # Seal only read-only prepared inputs. Simulation/render/report artifacts are intentionally excluded.
@@ -426,6 +599,36 @@ def _verify_prepared(run: Path) -> None:
             raise ValueError(f"prepared artifact changed or missing: {relative}")
 
 
+def _verify_extended_replay(path: Path) -> None:
+    """Require the physical worker to contain the 64+64 continuation."""
+
+    with np.load(path, allow_pickle=False) as values:
+        expected = {
+            "physics_state_v3": (TOTAL_STATE_FRAMES, 70),
+            "joint_pos": (TOTAL_STATE_FRAMES, 29),
+            "joint_vel": (TOTAL_STATE_FRAMES, 29),
+            "root_pos": (TOTAL_STATE_FRAMES, 3),
+            "root_quat": (TOTAL_STATE_FRAMES, 4),
+            "root_lin_vel": (TOTAL_STATE_FRAMES, 3),
+            "root_ang_vel": (TOTAL_STATE_FRAMES, 3),
+            "raw_action": (TOTAL_ACTION_STEPS, 29),
+        }
+        for name, shape in expected.items():
+            if name not in values or tuple(values[name].shape) != shape:
+                found = None if name not in values else tuple(values[name].shape)
+                raise ValueError(f"extended replay {path}: {name} has shape {found}, expected {shape}")
+            if not np.isfinite(values[name]).all():
+                raise ValueError(f"extended replay {path}: {name} contains NaN/Inf")
+        if "body_pos" not in values or values["body_pos"].ndim < 2 or values["body_pos"].shape[0] != TOTAL_STATE_FRAMES:
+            found = None if "body_pos" not in values else tuple(values["body_pos"].shape)
+            raise ValueError(
+                f"extended replay {path}: body_pos has shape {found}, "
+                f"expected first dimension {TOTAL_STATE_FRAMES}"
+            )
+        if not np.isfinite(values["body_pos"]).all():
+            raise ValueError(f"extended replay {path}: body_pos contains NaN/Inf")
+
+
 def _simulation_child(motion_dir: Path, tag: str, names: list[str], raws: list[np.ndarray]) -> Path:
     if tag == "baseline":
         child = motion_dir / "baseline/simulations"
@@ -437,6 +640,8 @@ def _simulation_child(motion_dir: Path, tag: str, names: list[str], raws: list[n
         complete = child / "manifests/replay65_worker_complete.json"
         if complete.is_file():
             verify_worker(child)
+            for index in range(len(names)):
+                _verify_extended_replay(child / f"data/replay/{index:06d}.replay.npz")
             return child
         raise FileExistsError(f"incomplete/changed simulation is not overwritten: {child}")
     for folder in ("data", "manifests", "logs", "markers"):
@@ -444,12 +649,20 @@ def _simulation_child(motion_dir: Path, tag: str, names: list[str], raws: list[n
     shutil.copy2(motion_dir / "data/exact_initialization.npz", child / "data/exact_initialization.npz")
     meta = load_json(motion_dir / "manifests/replay65.json")
     raw_path = child / "data/raw_actions.npz"
-    _write_npz(raw_path, raw_actions=np.stack(raws, axis=1), scenario_names=np.asarray(names))
+    continuation_mode = _continuation_mode(raws)
+    extended_raws = [
+        _extend_action_sequence(raw, post_steps=POST_ACTION_STEPS, mode=continuation_mode)
+        for raw in raws
+    ]
+    _write_npz(raw_path, raw_actions=np.stack(extended_raws, axis=1), scenario_names=np.asarray(names))
     request = {
         "schema_version": "65-token-replay-v1", "representation": "physics_v4", "replay65_guard": True,
         "motion_file": meta["source"]["motion_file"], "motion_file_sha256": meta["source"]["motion_file_sha256"],
         "motion_key": meta["window"]["motion_key"], "raw_actions_file": str(raw_path),
-        "raw_actions_sha256": file_sha256(raw_path), "steps": 64, "num_envs": len(names),
+        "raw_actions_sha256": file_sha256(raw_path), "steps": TOTAL_ACTION_STEPS,
+        "replay_action_steps": REPLAY_ACTION_STEPS, "post_action_steps": POST_ACTION_STEPS,
+        "total_action_steps": TOTAL_ACTION_STEPS, "total_state_frames": TOTAL_STATE_FRAMES,
+        "post_action_mode": continuation_mode, "num_envs": len(names),
         "scenario_names": names, "control_dt": .02,
         "exact_initialization_file": str(child / "data/exact_initialization.npz"),
         "exact_initialization_file_sha256": meta["initialization"]["file_sha256"],
@@ -465,6 +678,8 @@ def _simulation_child(motion_dir: Path, tag: str, names: list[str], raws: list[n
     for i in range(len(names)):
         for rel in (f"data/replay/{i:06d}.replay.npz", f"data/replay/{i:06d}.trajectory.pkl",
                     f"manifests/exact_initialization_readback_{i:06d}.json", f"data/replay/{i:06d}.runtime.json"):
+            if rel.endswith(".replay.npz"):
+                _verify_extended_replay(child / rel)
             hashes[rel] = file_sha256(child / rel)
     atomic_write_json(child / "manifests/replay65_worker_complete.json", {"hashes": hashes})
     return child
@@ -477,14 +692,26 @@ def simulate(args) -> None:
     seeds = [int(v) for v in sweep["sample_seeds"]]
     for motion_dir in sorted((run / "motions").glob("m*_window*")):
         source = _load_replay(motion_dir / "data/recorded_hdf.replay.npz")
-        _simulation_child(motion_dir, "baseline", ["original_1", "original_2"], [source["raw_action"]] * 2)
+        original = _original_extended_actions(motion_dir, source)
+        baseline_actions = original if original is not None else source["raw_action"]
+        _simulation_child(motion_dir, "baseline", ["original_1", "original_2"], [baseline_actions] * 2)
         reference = np.load(motion_dir / "reference/posterior_mean.npz", allow_pickle=False)["executed_raw"].copy()
-        _simulation_child(motion_dir, "posterior_mean", ["posterior_mean_reference"], [reference])
+        _simulation_child(
+            motion_dir,
+            "posterior_mean",
+            ["posterior_mean_reference"],
+            [_append_original_continuation(reference, original)],
+        )
         for seed in seeds:
             raw = np.load(motion_dir / "samples" / f"seed_{seed}" / "prediction.npz", allow_pickle=False)["executed_raw"].copy()
             # Keep the simulation directory aligned with the prepared sample
             # directory and with render/report lookup: samples/seed_<N>/...
-            _simulation_child(motion_dir, f"seed_{seed}", [f"seed_{seed}"], [raw])
+            _simulation_child(
+                motion_dir,
+                f"seed_{seed}",
+                [f"seed_{seed}"],
+                [_append_original_continuation(raw, original)],
+            )
     atomic_write_text(run / "markers/latent_sweep_simulation_complete.ok", "SIMULATION COMPLETE\n")
 
 
@@ -543,6 +770,29 @@ def _output_metrics(sample: dict[str, np.ndarray], reference: dict[str, np.ndarr
     return result
 
 
+def _trajectory_segment(trajectory: dict[str, np.ndarray], start: int, stop: int) -> dict[str, np.ndarray]:
+    """Return an inclusive-boundary State segment for replay diagnostics."""
+
+    if start < 0 or stop <= start or stop > trajectory["joint_pos"].shape[0]:
+        raise ValueError(f"invalid trajectory segment [{start}, {stop})")
+    fields = (
+        "physics_state_v3", "joint_pos", "joint_vel", "root_pos", "root_quat",
+        "root_lin_vel", "root_ang_vel", "body_pos",
+    )
+    result = {name: np.asarray(trajectory[name][start:stop]) for name in fields}
+    result["physical_state"] = result["physics_state_v3"]
+    return result
+
+
+def _trajectory_segment_metrics(
+    reference: dict[str, np.ndarray], value: dict[str, np.ndarray], start: int, stop: int
+) -> dict[str, float]:
+    return _trajectory_metrics(
+        _trajectory_segment(reference, start, stop),
+        _trajectory_segment(value, start, stop),
+    )
+
+
 def _physical_for_motion(motion_dir: Path, seeds: list[int]) -> dict:
     result = {}
     seed_replays = []
@@ -571,14 +821,26 @@ def _physical_for_motion(motion_dir: Path, seeds: list[int]) -> dict:
             if label.startswith("seed_"):
                 seed_replays.append(replay)
             result[label] = _trajectory_metrics(base0, replay)
+            result[label]["replay_window_frames_0_64"] = _trajectory_segment_metrics(
+                base0, replay, 0, REPLAY_STATE_FRAMES
+            )
+            result[label]["post_hold_frames_64_128"] = _trajectory_segment_metrics(
+                base0, replay, REPLAY_ACTION_STEPS, TOTAL_STATE_FRAMES
+            )
             result[label]["joint_position_rmse_rad"] = float(_rmse(base0["joint_pos"], replay["joint_pos"]))
             result[label]["root_position_rmse_m"] = float(_rmse(base0["root_pos"], replay["root_pos"]))
             result[label]["first_threshold_crossing_frame"] = _first_threshold_crossings(_per_frame_errors(base0, replay))
     if len(seed_replays) == len(seeds):
+        seed_joint = np.stack([row["joint_pos"] for row in seed_replays])
+        seed_root = np.stack([row["root_pos"] for row in seed_replays])
+        seed_body = np.stack([row["body_pos"] for row in seed_replays])
         result["realized_seed_spread"] = {
-            "realized_joint_position_seed_std": np.stack([row["joint_pos"] for row in seed_replays]).std(axis=0).tolist(),
-            "realized_root_position_seed_std": np.stack([row["root_pos"] for row in seed_replays]).std(axis=0).tolist(),
-            "realized_body_position_seed_std": np.stack([row["body_pos"] for row in seed_replays]).std(axis=0).tolist(),
+            "realized_joint_position_seed_std": seed_joint.std(axis=0).tolist(),
+            "realized_root_position_seed_std": seed_root.std(axis=0).tolist(),
+            "realized_body_position_seed_std": seed_body.std(axis=0).tolist(),
+            "post_hold_joint_position_seed_std": seed_joint[:, REPLAY_ACTION_STEPS:, :].std(axis=0).tolist(),
+            "post_hold_root_position_seed_std": seed_root[:, REPLAY_ACTION_STEPS:, :].std(axis=0).tolist(),
+            "post_hold_body_position_seed_std": seed_body[:, REPLAY_ACTION_STEPS:, :, :].std(axis=0).tolist(),
         }
     return result
 
@@ -691,6 +953,12 @@ def report(args) -> dict:
     atomic_write_json(run / "aggregate/latent_output_correlations.json", correlations)
     aggregate = {
         "version": VERSION, "mask": MASK, "sample_seeds": seeds,
+        "replay_action_steps": REPLAY_ACTION_STEPS,
+        "post_action_steps": POST_ACTION_STEPS,
+        "total_action_steps": TOTAL_ACTION_STEPS,
+        "total_state_frames": TOTAL_STATE_FRAMES,
+        "post_action_policy": POST_ACTION_POLICY,
+        "post_action_fallback_mode": POST_ACTION_MODE,
         "recovered_dataset": bool(sweep["recovered_dataset"]),
         "exact_identity_verified": bool(sweep["exact_identity_verified"]),
         "latent_rows": len(latent_rows), "output_rows": len(output_rows),
@@ -710,8 +978,24 @@ def report(args) -> dict:
         for seed in seeds:
             required.append(motion_dir / f"samples/seed_{seed}/prediction.npz")
     simulations_complete = all(path.is_file() and path.stat().st_size > 0 for path in required)
+    if simulations_complete:
+        try:
+            for motion_dir in sorted((run / "motions").glob("m*_window*")):
+                _verify_extended_replay(motion_dir / "baseline/simulations/data/replay/000000.replay.npz")
+                _verify_extended_replay(motion_dir / "baseline/simulations/data/replay/000001.replay.npz")
+                _verify_extended_replay(motion_dir / "reference/simulations/full_action/data/replay/000000.replay.npz")
+                for seed in seeds:
+                    _verify_extended_replay(motion_dir / f"samples/seed_{seed}/simulations/full_action/data/replay/000000.replay.npz")
+        except (OSError, ValueError):
+            simulations_complete = False
     videos = list(run.glob("motions/*/videos/*.mp4"))
     render_complete = len(videos) == len(list((run / "motions").glob("m*_window*"))) * (2 + len(seeds)) and all(p.stat().st_size > 0 for p in videos)
+    if render_complete:
+        try:
+            from imageio_ffmpeg import count_frames_and_secs
+            render_complete = all(count_frames_and_secs(str(path))[0] == TOTAL_STATE_FRAMES for path in videos)
+        except Exception:
+            render_complete = False
     aggregate["simulation_complete"] = simulations_complete
     aggregate["render_complete"] = render_complete
     aggregate["execution_complete"] = bool(simulations_complete and render_complete)
@@ -752,36 +1036,67 @@ def _render(args) -> None:
         data = mujoco.MjData(model); renderer = mujoco.Renderer(model, height=480, width=640)
         camera = mujoco.MjvCamera(); mujoco.mjv_defaultCamera(camera); camera.type = mujoco.mjtCamera.mjCAMERA_FREE; camera.azimuth = 135; camera.elevation = -15; camera.distance = 3.5
         truth = motion_dir / "data/recorded_hdf.trajectory.pkl"; baseline = motion_dir / "baseline/simulations/data/replay"
-        jobs = [("original_repeatability", [truth, baseline / "000000.trajectory.pkl", baseline / "000001.trajectory.pkl"], ["Recorded HDF pose", "Original Action replay 1", "Original Action replay 2"], None)]
-        jobs.append(("posterior_mean_full_action_action", [truth, baseline / "000000.trajectory.pkl", motion_dir / "reference/simulations/full_action/data/replay/000000.trajectory.pkl"], ["Recorded HDF pose", "Original Action replay", "C | full_action | posterior_mean_reference"], "posterior"))
+        jobs = [("original_repeatability", [truth, baseline / "000000.trajectory.pkl", baseline / "000001.trajectory.pkl"], ["Recorded HDF pose (held after 64)", "Original Action replay 1", "Original Action replay 2"], None)]
+        jobs.append(("posterior_mean_full_action_action", [truth, baseline / "000000.trajectory.pkl", motion_dir / "reference/simulations/full_action/data/replay/000000.trajectory.pkl"], ["Recorded HDF pose (held after 64)", "Original Action replay", "C | full_action | posterior_mean_reference"], "posterior"))
         for seed in seeds:
-            jobs.append((f"seed_{seed}_full_action_action", [truth, baseline / "000000.trajectory.pkl", motion_dir / f"samples/seed_{seed}/simulations/full_action/data/replay/000000.trajectory.pkl"], ["Recorded HDF pose", "Original Action replay", f"C | full_action | seed={seed}"], "sample"))
+            jobs.append((f"seed_{seed}_full_action_action", [truth, baseline / "000000.trajectory.pkl", motion_dir / f"samples/seed_{seed}/simulations/full_action/data/replay/000000.trajectory.pkl"], ["Recorded HDF pose (held after 64)", "Original Action replay", f"C | full_action | seed={seed}"], "sample"))
         try:
             for name, paths, labels, kind in jobs:
                 if any(not path.is_file() for path in paths):
                     raise FileNotFoundError(f"render input missing for {name}")
-                trajectories = [load_trajectory(path) for path in paths]; qposes = [build_mujoco_qpos(t) for t in trajectories]
-                if any(q.shape != (65, 36) or not np.isfinite(q).all() for q in qposes):
-                    raise ValueError("video requires 65 finite frames")
+                post_mode = "hold-final"
+                for path in paths[1:]:
+                    for parent in path.parents:
+                        request_path = parent / "manifests/action_replay_request.json"
+                        if request_path.is_file():
+                            if load_json(request_path).get("post_action_mode") == "direct_original_action":
+                                post_mode = "direct-original"
+                            break
+                trajectories = [load_trajectory(path) for path in paths]
+                # The recorded HDF trajectory ends at frame 64.  It is padded
+                # only as a visual reference; all replay trajectories are the
+                # 129-frame Isaac recordings produced by the extended Action
+                # request above.
+                trajectories[0] = _pad_recorded_trajectory(trajectories[0])
+                qposes = [build_mujoco_qpos(t) for t in trajectories]
+                if any(q.shape != (TOTAL_STATE_FRAMES, 36) or not np.isfinite(q).all() for q in qposes):
+                    raise ValueError(f"video requires {TOTAL_STATE_FRAMES} finite frames")
                 output = motion_dir / "videos" / f"{name}.mp4"; writer = _writer(imageio, output, 50.)
                 try:
-                    for t in range(65):
+                    for t in range(TOTAL_STATE_FRAMES):
                         panels = []
                         for qpos, label in zip(qposes, labels):
                             data.qpos[:] = qpos[t]; data.qvel[:] = 0; mujoco.mj_forward(model, data); camera.lookat[:] = qposes[0][t, :3]; renderer.update_scene(data, camera=camera); frame = renderer.render().copy()
                             cv2.rectangle(frame, (0, 0), (640, 84), (25, 25, 25), -1)
                             cv2.putText(frame, label, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, .52, (245, 245, 245), 1)
                             cv2.putText(frame, "LATENT SENSITIVITY / diagnostic only", (10, 47), cv2.FONT_HERSHEY_SIMPLEX, .40, (80, 190, 255), 1)
-                            cv2.putText(frame, f"C | full_action | frame {t}/64 | 50 Hz", (10, 71), cv2.FONT_HERSHEY_SIMPLEX, .43, (230, 230, 230), 1)
+                            phase = "REPLAY 0-64" if t <= REPLAY_ACTION_STEPS else f"POST-{post_mode.upper()} 65-128"
+                            phase_color = (230, 230, 230) if t <= REPLAY_ACTION_STEPS else (120, 235, 170)
+                            cv2.putText(frame, f"C | full_action | frame {t}/128 | {phase} | 50 Hz", (10, 71), cv2.FONT_HERSHEY_SIMPLEX, .43, phase_color, 1)
                             panels.append(frame)
                         writer.append_data(np.concatenate(panels, axis=1))
                 finally:
                     writer.close()
                 frames, seconds = count_frames_and_secs(str(output))
-                if frames != 65 or output.stat().st_size <= 0: raise RuntimeError(f"invalid video {output}")
+                if frames != TOTAL_STATE_FRAMES or output.stat().st_size <= 0:
+                    raise RuntimeError(f"invalid {TOTAL_STATE_FRAMES}-frame video {output}")
         finally:
             renderer.close()
-    atomic_write_json(run / "manifests/render.json", {"version": VERSION, "videos": [str(p.relative_to(run)) for p in run.glob("motions/*/videos/*.mp4")]})
+    videos = sorted(run.glob("motions/*/videos/*.mp4"))
+    atomic_write_json(
+        run / "manifests/render.json",
+        {
+            "version": VERSION,
+            "fps": 50,
+            "total_state_frames": TOTAL_STATE_FRAMES,
+            "replay_state_frames": REPLAY_STATE_FRAMES,
+            "post_hold_state_frames": TOTAL_STATE_FRAMES - REPLAY_ACTION_STEPS,
+            "videos": [str(p.relative_to(run)) for p in videos],
+        },
+    )
+    print(f"Rendered {len(videos)} videos under {run}", flush=True)
+    for video in videos:
+        print(f"VIDEO={video}", flush=True)
 
 
 def render(args) -> None:
