@@ -1,6 +1,6 @@
 # CVAE 必要异常与根因诊断
 
-最后更新：2026-09-28。本文只记录会影响实验判断的反常结果、证据、候选原因和验证边界，
+最后更新：2026-09-29。本文只记录会影响实验判断的反常结果、证据、候选原因和验证边界，
 不复制常规训练流水或整体实验路线。路线与概要结果见 [plan.md](plan.md)，模型合同见 [model.md](model.md)。
 
 ## 1. 本次证据与可比性
@@ -303,7 +303,7 @@ Dynamic step0源基线；`best_heldout_step=120000`，真正的Dynamic质量chec
 继续同一Dynamic合同的预期收益有限。因此当时的下一步是进入C独立随机初始化训练；该C已在第10节完成，
 仍不使用本B checkpoint，也不把本次`best.pt`误作为Dynamic最佳模型。
 
-## 10. C阶段：训练执行有效，但标准正态部署出现latent路径失配（2026-09-28）
+## 10. C阶段：训练执行有效，但标准正态部署出现latent路径失配（2026-09-29）
 
 回传包：`C:/Users/86136/Desktop/replay/C train/cvae_C_return`。
 Ubuntu run：`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113`。
@@ -364,9 +364,7 @@ step360000的逐元素diagnostics；只有step0完整diagnostics以及step20000�
 因此本报告不能诚实给出末步最差window、最差coordinate或末步逐坐标trace。需要在Ubuntu源run
 对step360000做一次只读、紧凑的尾部导出，补齐这些证据和posterior/global/local统计。
 
-完成该补诊后，再按`replay65`先验证原始Action双基线，再在相同窗口运行C模型回放。回放用于
-物理诊断；原始基线无效时，模型物理质量仍为`MODEL_QUALITY_UNDETERMINED`。在补齐尾部和回放
-之前，不把C标记为质量通过，也不启动新的结构性训练分支。
+在补齐尾部证据之前，不把C标记为质量通过，也不启动新的结构性训练分支。
 
 ## 11. replay65 baseline：Isaac结束后marker目录缺失（2026-09-28）
 
@@ -423,3 +421,17 @@ Windows 静态测试覆盖了 T64 source-window 回放和 combine-mode/读回合
 `post_action_mode=none`，再检查 `exact_initialization_readback_*.json`、`*.runtime.json`
 和 `recorded_to_original_1_errors.npz` 的首个阈值帧。旧的 129-frame、hold-final 或
 policy-continuation run 不得作为本轮原始 Action 一致性证据。
+
+## 13. 运行时优化的证据边界（2026-10-04）
+
+本轮实现针对 v2 runtime，不改变数据统计或 Action 语义。源码现在显式区分 FP32 保留区与
+BF16 autocast 区域，并把 compile、BF16、TF32、cache、pin-memory 和 non-blocking 选项写进
+runtime contract；旧 C 的 FP32 eager 结果仍是历史基线。标准化窗口缓存只写入当前新 run，缓存
+identity 绑定 dataset manifest、episode index、normalization 和 selected-window hash，缓存失效
+或超预算时回到同步 HDF5 读取。
+
+Windows 已通过 Python compile 与现有 v2 posterior/protocol 测试，并新增缓存 identity/selected
+index 回归测试。尚未在 Ubuntu RTX 4090 上执行四类 BF16/compile smoke、数值 parity 或稳态基准，
+因此目前只能报告 execution implementation；不能把 compile callable 创建成功、缓存文件生成或
+静态测试通过解释为训练吞吐提升、BF16 精度满足阈值或 standard-normal 质量改善。若 compile 在
+运行时触发 graph break/异常，summary 必须保留 fallback 原因并按既定门槛选择 eager 路径。

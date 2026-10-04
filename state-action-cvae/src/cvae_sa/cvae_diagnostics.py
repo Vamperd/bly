@@ -6,7 +6,9 @@ incompatible units. Quantiles use NumPy, not torch.quantile's size-limited path.
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import nullcontext
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
@@ -118,11 +120,13 @@ class Diagnostics:
     def add(self, batch, output, sm, am, names, *, export_dir=None):
         ids = batch_ids(batch)
         sm, am = sm.cpu().numpy(), am.cpu().numpy()
-        predictions = {"state": output.physical_state.detach().cpu().numpy(), "action": output.action.detach().cpu().numpy()}
-        targets = {"state": batch["physical_state"].cpu().numpy(), "action": batch["action"].cpu().numpy()}
+        predictions = {"state": output.physical_state.detach().float().cpu().numpy(), "action": output.action.detach().float().cpu().numpy()}
+        targets = {"state": batch["physical_state"].detach().float().cpu().numpy(), "action": batch["action"].detach().float().cpu().numpy()}
         validity = {d: batch["valid_" + d].cpu().numpy().astype(bool) for d in self.errors}
         masks = {"state": sm, "action": am}
-        contact_bce = F.binary_cross_entropy_with_logits(output.state_contact_logits, batch["physical_state"][..., 68:], reduction="none").cpu().numpy()
+        contact_bce = F.binary_cross_entropy_with_logits(
+            output.state_contact_logits.float(), batch["physical_state"][..., 68:].float(), reduction="none"
+        ).float().cpu().numpy()
         if not np.isfinite(contact_bce[validity["state"]]).all():
             raise FloatingPointError("non-finite contact evaluation")
         c_pred, c_true = predictions["state"][..., 68:] >= .5, targets["state"][..., 68:] >= .5
@@ -270,8 +274,8 @@ class Diagnostics:
 
 
 def ensemble_scores(outputs, batch, sm, am):
-    pred = torch.cat((torch.stack([o.physical_state[..., :68] for o in outputs]).flatten(2),
-                      torch.stack([o.action for o in outputs]).flatten(2)), dim=2).double()
+    pred = torch.cat((torch.stack([o.physical_state[..., :68].float() for o in outputs]).flatten(2),
+                      torch.stack([o.action.float() for o in outputs]).flatten(2)), dim=2).double()
     truth = torch.cat((batch["physical_state"][..., :68].flatten(1), batch["action"].flatten(1)), dim=1).double()
     valid = torch.cat((batch["valid_state"][..., None].expand(-1, -1, 68).flatten(1),
                        batch["valid_action"][..., None].expand(-1, -1, 29).flatten(1)), dim=1).bool()
@@ -302,16 +306,22 @@ def ensemble_scores(outputs, batch, sm, am):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, normalization, *, route, seed, held_out=False, samples=8, output_dir=None, export_all=False, heartbeat=None, reference_mask_seed=None):
+def evaluate(model, loader, device, normalization, *, route, seed, held_out=False, samples=8, output_dir=None,
+             export_all=False, heartbeat=None, reference_mask_seed=None, route_callable=None,
+             non_blocking=False, precision="FP32", compile_info=None):
     was_training = model.training
     with isolated_rng():
         model.eval()
         diagnostics = Diagnostics(normalization)
         ensemble = []
         overlap_flags = []
+        compile_cold_start = True
+        evaluation_started = time.perf_counter()
+        evaluated_fixtures = 0
         try:
             for ordinal, cpu in enumerate(loader):
-                batch = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in cpu.items()}
+                batch = {key: value.to(device, non_blocking=non_blocking) if isinstance(value, torch.Tensor) else value
+                         for key, value in cpu.items()}
                 if route == "A":
                     sm = torch.zeros_like(batch["physical_state"], dtype=torch.bool)
                     am = torch.zeros_like(batch["action"], dtype=torch.bool)
@@ -323,7 +333,55 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
                         overlap_flags.extend((sm.eq(reference_sm).flatten(1).all(1) & am.eq(reference_am).flatten(1).all(1)).tolist())
                     sm, am = sm.to(device), am.to(device)
                 count = samples if route in {"posterior_sample", "standard_normal"} else 1
-                outputs = [route_output(model, batch, sm, am, route, epsilon_for(model, cpu, k, seed, device)) for k in range(count)]
+                outputs = []
+                for k in range(count):
+                    epsilon = epsilon_for(model, cpu, k, seed, device)
+                    if route_callable is not None:
+                        try:
+                            dynamo_before = None
+                            if compile_info is not None and compile_info.get("succeeded"):
+                                try:
+                                    from torch._dynamo.utils import counters
+                                    dynamo_before = {
+                                        "graph_break_count": sum(int(v) for v in counters.get("graph_break", {}).values()),
+                                        "recompile_count": sum(int(v) for v in counters.get("recompiles", {}).values()),
+                                        "compiled_graph_count": int(counters.get("stats", {}).get("unique_graphs", 0)),
+                                    }
+                                except (ImportError, AttributeError, TypeError):
+                                    pass
+                            compile_started = time.perf_counter() if compile_cold_start else None
+                            output = route_callable(batch, sm, am, epsilon[0], epsilon[1])
+                            if dynamo_before is not None:
+                                try:
+                                    from torch._dynamo.utils import counters
+                                    dynamo_after = {
+                                        "graph_break_count": sum(int(v) for v in counters.get("graph_break", {}).values()),
+                                        "recompile_count": sum(int(v) for v in counters.get("recompiles", {}).values()),
+                                        "compiled_graph_count": int(counters.get("stats", {}).get("unique_graphs", 0)),
+                                    }
+                                    for key in ("graph_break_count", "recompile_count", "compiled_graph_count"):
+                                        compile_info[key] += max(0, dynamo_after[key] - dynamo_before[key])
+                                except (ImportError, AttributeError, TypeError):
+                                    pass
+                            if compile_info is not None and compile_cold_start:
+                                compile_info["cold_start_seconds"] = time.perf_counter() - compile_started
+                            compile_cold_start = False
+                        except Exception as error:
+                            if compile_info is None or not compile_info.get("succeeded"):
+                                raise
+                            compile_info["succeeded"] = False
+                            compile_info["fallback_reason"] = f"compile_runtime:{type(error).__name__}: {error}"
+                            route_callable = None
+                            output = None
+                        if output is not None:
+                            outputs.append(output)
+                            continue
+                    autocast = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                                if str(precision).upper() == "BF16" and device.type == "cuda"
+                                else nullcontext())
+                    with autocast:
+                        outputs.append(route_output(model, batch, sm, am, route, epsilon))
+                evaluated_fixtures += len(cpu["physical_state"])
                 diagnostics.add(batch, outputs[0], sm, am, names, export_dir=(output_dir / "all_predictions") if export_all and output_dir else None)
                 if route != "A":
                     ensemble.extend({**identity, "mask_name": name, **score} for identity, name, score in
@@ -334,7 +392,10 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
         finally:
             model.train(was_training)
     details.update(route=route, samples=samples if route in {"posterior_sample", "standard_normal"} else 1,
-                   distribution_diagnostics_draw=0, ensemble=ensemble, held_out=held_out, epsilon_seed=seed)
+                   distribution_diagnostics_draw=0, ensemble=ensemble, held_out=held_out, epsilon_seed=seed,
+                   evaluation_seconds=time.perf_counter() - evaluation_started,
+                   evaluated_fixtures=evaluated_fixtures,
+                   fixtures_per_second=evaluated_fixtures / max(time.perf_counter() - evaluation_started, 1e-9))
     if overlap_flags:
         details["heldout_coordinate_overlap"] = {"reference_seed": reference_mask_seed, "seen": sum(overlap_flags),
             "new": len(overlap_flags) - sum(overlap_flags), "note": "full_action and some sampled gaps can equal fixed fixtures"}
@@ -349,6 +410,9 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
         "state_abs_p99": full["state"]["p99"], "action_abs_p99": full["action"]["p99"],
         "partitions": details["partitions"], "mask_families": details["mask_families"],
         "diagnostic_draw": 0, "samples": details["samples"]}
+    summary["evaluation_seconds"] = details["evaluation_seconds"]
+    summary["evaluated_fixtures"] = details["evaluated_fixtures"]
+    summary["fixtures_per_second"] = details["fixtures_per_second"]
     if ensemble:
         families = []
         for family in details["mask_families"].values():

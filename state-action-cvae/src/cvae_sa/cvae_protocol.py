@@ -74,6 +74,109 @@ class Fixtures(Dataset):
         return rows
 
 
+class CachedWindowDataset(Dataset):
+    """Read-only cache of already normalized windows for one run."""
+
+    def __init__(self, samples: list[dict[str, Any]], *, source_indices: list[int] | None = None,
+                 source: Dataset | None = None,
+                 cache_path: str | Path | None = None,
+                 cache_identity: str | None = None) -> None:
+        self.samples = samples
+        self.source_indices = list(source_indices) if source_indices is not None else list(range(len(samples)))
+        self._positions = {index: position for position, index in enumerate(self.source_indices)}
+        self.source = source
+        self.cache_path = str(cache_path) if cache_path is not None else None
+        self.cache_identity = cache_identity
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        # Fixtures adds metadata to a copy; the cached sample stays immutable.
+        return dict(self.samples[self._positions[int(index)]])
+
+    def close(self) -> None:
+        close = getattr(self.source, "close", None)
+        if callable(close):
+            close()
+
+
+def _sample_tensor_nbytes(sample: dict[str, Any]) -> int:
+    return sum(int(value.numel() * value.element_size())
+               for value in sample.values() if isinstance(value, torch.Tensor))
+
+
+def materialize_normalized_window_cache(
+    dataset: Dataset,
+    indices: list[int],
+    *,
+    cache_path: str | Path,
+    cache_identity: dict[str, Any],
+    max_bytes: int,
+) -> tuple[Dataset, dict[str, Any]]:
+    """Cache selected normalized windows without changing sampler semantics."""
+
+    selected = [int(index) for index in indices]
+    path = Path(cache_path)
+    identity_json = json.dumps(cache_identity, sort_keys=True, separators=(",", ":"))
+    identity_digest = hashlib.sha256(identity_json.encode("utf-8")).hexdigest()
+    info: dict[str, Any] = {
+        "requested": True, "enabled": False, "cache_path": str(path),
+        "identity": identity_digest, "selected_count": len(selected),
+        "estimated_bytes": 0, "max_bytes": int(max_bytes),
+        "reason": None, "loaded_existing": False,
+    }
+    if not selected:
+        info["reason"] = "empty_selection"
+        return dataset, info
+    if int(max_bytes) <= 0:
+        info["reason"] = "cache_max_bytes_nonpositive"
+        return dataset, info
+
+    first = dataset[selected[0]]
+    estimated = _sample_tensor_nbytes(first) * len(selected)
+    info["estimated_bytes"] = int(estimated)
+    if estimated > int(max_bytes):
+        info["reason"] = "estimated_size_exceeds_limit"
+        return dataset, info
+
+    payload: dict[str, Any] | None = None
+    if path.exists():
+        try:
+            loaded = torch.load(path, map_location="cpu", weights_only=False)
+            if (isinstance(loaded, dict)
+                    and loaded.get("format") == "normalized-window-cache-v1"
+                    and loaded.get("identity") == identity_digest
+                    and [int(i) for i in loaded.get("indices", [])] == selected
+                    and isinstance(loaded.get("samples"), list)):
+                payload = loaded
+                info["loaded_existing"] = True
+        except Exception:
+            # A stale or partial cache is safely rebuilt in the current run.
+            payload = None
+
+    if payload is None:
+        samples = [dict(dataset[index]) for index in selected]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        torch.save({
+            "format": "normalized-window-cache-v1",
+            "identity": identity_digest,
+            "identity_payload": dict(cache_identity),
+            "indices": selected,
+            "samples": samples,
+        }, temp_path)
+        os.replace(temp_path, path)
+        payload = {"samples": samples}
+        info["reason"] = "materialized"
+    else:
+        info["reason"] = "loaded_existing"
+
+    info["enabled"] = True
+    return CachedWindowDataset(list(payload["samples"]), source_indices=selected, source=dataset,
+                               cache_path=path, cache_identity=identity_digest), info
+
+
 class RecoverableSampler:
     """No prefetch: checkpoint state denotes the next unconsumed sample exactly."""
     def __init__(self, size: int, batch_size: int, seed: int):

@@ -14,8 +14,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from .cvae_diagnostics import evaluate, read_normalization
-from .cvae_protocol import CHECKPOINT, PROTOCOL, Fixtures
-from .cvae_training import check_source_identity, data_identity, make_dataset, source_info, provenance
+from .cvae_protocol import CHECKPOINT, PROTOCOL, Fixtures, materialize_normalized_window_cache
+from .cvae_training import (_autocast_context, _make_eval_route, check_source_identity,
+                            data_identity, make_dataset, source_info, provenance)
 from .models import build_model
 from .posterior_direct_output import assert_output_isolated
 from .posterior_hierarchical_standard_cvae import load_checkpoint
@@ -35,29 +36,63 @@ def evaluate_checkpoint(args):
     model = build_model(config["model"])
     load_checkpoint(model, source_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    precision = str(config.get("training", {}).get("precision", "FP32")).upper()
+    if precision == "BF16":
+        _autocast_context(device, precision)
+    model.to(device=device, dtype=torch.float32)
     dataset, indices = make_dataset(dataset_run, config)
     try:
-        fixtures = Fixtures(dataset, indices, expand=args.route != "A")
-        identity = data_identity(dataset_run, fixtures.manifest())
+        base_fixtures = Fixtures(dataset, indices, expand=False)
+        windows = base_fixtures.manifest()
+        identity = data_identity(dataset_run, windows)
         check = check_source_identity(checkpoint, identity, allow_unknown=True)
         normalization = read_normalization(dataset_run / "data/normalization.npz")
         (run / "data").mkdir(parents=True, exist_ok=True)
+        data_cfg = config.get("data", {})
+        cache_mode = str(data_cfg.get("cache_mode", "none")).lower()
+        cached_dataset, cache_info = dataset, {"requested": False, "enabled": False, "reason": "disabled"}
+        if cache_mode in {"auto", "on"}:
+            cached_dataset, cache_info = materialize_normalized_window_cache(
+                dataset, indices, cache_path=run / "data/normalized_windows.pt",
+                cache_identity={"protocol_version": PROTOCOL, "dataset_identity": identity,
+                                "selected_window_ids": [row["stable_window_id"] for row in windows]},
+                max_bytes=int(data_cfg.get("cache_max_bytes", 0)),
+            )
+        fixtures = Fixtures(cached_dataset, indices, expand=args.route != "A")
         shutil.copy2(dataset_run / "data/normalization.npz", run / "data/normalization.npz")
-        atomic_write_json(run / "manifests/selected_windows.json", fixtures.manifest())
-        atomic_write_json(run / "manifests/provenance.json", provenance(config, {"route": args.route, "samples": args.samples, "mask_seed": args.mask_seed}, identity, source_info(source_path, checkpoint)))
-        loader = DataLoader(fixtures, batch_size=args.micro_batch, shuffle=False, generator=torch.Generator().manual_seed(0))
+        atomic_write_json(run / "manifests/selected_windows.json", windows)
+        runtime_contract = checkpoint.get("runtime_contract", {})
+        atomic_write_json(run / "manifests/provenance.json", provenance(config, {
+            "route": args.route, "samples": args.samples, "mask_seed": args.mask_seed,
+            "runtime_contract": runtime_contract,
+        }, identity, source_info(source_path, checkpoint)))
+        pin_memory = bool(data_cfg.get("pin_memory", False)) and device.type == "cuda"
+        non_blocking = bool(data_cfg.get("non_blocking_transfer", False)) and pin_memory
+        loader = DataLoader(fixtures, batch_size=args.micro_batch, shuffle=False, pin_memory=pin_memory,
+                            generator=torch.Generator().manual_seed(0))
         routes = ("posterior_mean", "posterior_sample", "standard_normal", "zero") if args.route == "C" else (args.route,)
+        compile_cfg = config.get("compile", {})
+        compiled_routes = {}
+        compile_infos = []
+        for route in routes:
+            compiled, eager, info = _make_eval_route(model, route, device, precision, compile_cfg)
+            compiled_routes[route] = compiled
+            compile_infos.append(info)
         reports = {}
         for route in routes:
             print(f"RUN_DIR={run} route={route} checkpoint={source_path}", flush=True)
             reports[route], _ = evaluate(model, loader, device, normalization, route=route, seed=args.mask_seed,
                 samples=args.samples, output_dir=run / "evaluations" / route, export_all=args.export_all,
-                heartbeat=lambda n: print(f"[{route}] evaluation batch {n}/{len(loader)}", flush=True) if n % 10 == 0 else None)
+                heartbeat=lambda n: print(f"[{route}] evaluation batch {n}/{len(loader)}", flush=True) if n % 10 == 0 else None,
+                route_callable=compiled_routes[route], non_blocking=non_blocking,
+                precision=precision, compile_info=compile_infos[routes.index(route)])
         summary = {"protocol_version": PROTOCOL, "execution_pass": True, "quality_pass": None,
             "source_checkpoint": source_info(source_path, checkpoint), "identity_check": check,
             "historical_reassessment_not_original_fixture_replay": checkpoint.get("format_version") != CHECKPOINT and args.route != "A",
-            "dataset_identity": identity, "reports": reports, "unique_next_step": "REVIEW_TAIL_COORDINATES_AND_TRACES"}
+            "dataset_identity": identity, "reports": reports, "runtime_contract": runtime_contract,
+            "cache_info": cache_info, "compile_info": compile_infos,
+            "data_transfer": {"pin_memory": pin_memory, "non_blocking": non_blocking},
+            "unique_next_step": "REVIEW_TAIL_COORDINATES_AND_TRACES"}
         atomic_write_json(run / "manifests/diagnostic_summary.json", summary)
         return summary
     finally:

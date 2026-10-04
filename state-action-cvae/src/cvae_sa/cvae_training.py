@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import nullcontext
 import json
 import hashlib
 import os
@@ -17,7 +18,8 @@ import torch
 from torch.utils.data import DataLoader, default_collate
 
 from .cvae_protocol import (CHECKPOINT, LEGACY_CHECKPOINT, PROTOCOL, Fixtures, RecoverableSampler,
-    capture_rng, digest, durable_save, isolated_rng, lr_factor, quality_warnings, restore_rng, run_lock)
+    capture_rng, digest, durable_save, isolated_rng, lr_factor, materialize_normalized_window_cache,
+    quality_warnings, restore_rng, run_lock)
 from .cvae_diagnostics import ablations, batch_ids, epsilon_for, evaluate, read_normalization, route_output
 from .models import build_model
 from .posterior_direct_output import assert_output_isolated
@@ -32,8 +34,145 @@ def append(path, row):
         handle.flush()
 
 
-def to_device(batch, device):
-    return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+def to_device(batch, device, *, non_blocking=False):
+    return {k: v.to(device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()}
+
+
+def pin_batch(batch, *, enabled):
+    if not enabled:
+        return batch
+    return {k: (v.pin_memory() if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+
+
+def _autocast_context(device, precision):
+    precision = str(precision).upper()
+    if precision == "FP32":
+        return nullcontext()
+    if precision != "BF16":
+        raise ValueError(f"unsupported training precision: {precision}")
+    if device.type != "cuda":
+        raise RuntimeError("BF16 mixed precision requires a CUDA device")
+    if not torch.cuda.is_bf16_supported():
+        raise RuntimeError("requested BF16 but torch.cuda.is_bf16_supported() is false")
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+
+
+def _runtime_contract(config, device, model, optimizer, precision):
+    compile_cfg = config.get("compile", {})
+    data_cfg = config.get("data", {})
+    bf16_supported = bool(torch.cuda.is_bf16_supported()) if device.type == "cuda" else False
+    return {
+        "precision": str(precision).upper(),
+        "autocast_dtype": "torch.bfloat16" if str(precision).upper() == "BF16" else None,
+        "model_parameter_dtype": str(next(model.parameters()).dtype),
+        "optimizer_state_dtype": "torch.float32",
+        "grad_scaler_enabled": False,
+        "cuda_bf16_supported": bf16_supported,
+        "tf32_enabled": bool(torch.backends.cuda.matmul.allow_tf32) if torch.cuda.is_available() else False,
+        "compile_requested": bool(compile_cfg.get("enabled", False)),
+        "compile_mode": compile_cfg.get("mode", "max-autotune"),
+        "compile_dynamic": bool(compile_cfg.get("dynamic", False)),
+        "compile_fullgraph": bool(compile_cfg.get("fullgraph", False)),
+        "cache_mode": data_cfg.get("cache_mode", "none"),
+        "cache_max_bytes": int(data_cfg.get("cache_max_bytes", 0)),
+        "pin_memory": bool(data_cfg.get("pin_memory", False)),
+        "non_blocking_transfer": bool(data_cfg.get("non_blocking_transfer", False)),
+    }
+
+
+def _dynamo_counts():
+    """Read process-wide Dynamo counters immediately around one callable."""
+    try:
+        from torch._dynamo.utils import counters
+        return {
+            "graph_break_count": sum(int(v) for v in counters.get("graph_break", {}).values()),
+            "recompile_count": sum(int(v) for v in counters.get("recompiles", {}).values()),
+            "compiled_graph_count": int(counters.get("stats", {}).get("unique_graphs", 0)),
+        }
+    except (ImportError, AttributeError, TypeError):
+        return None
+
+
+def _update_compile_counts(info, before):
+    after = _dynamo_counts()
+    if before is None or after is None:
+        return
+    for key in ("graph_break_count", "recompile_count", "compiled_graph_count"):
+        info[key] += max(0, after[key] - before[key])
+
+
+def _compile_callable(fn, *, enabled, device, mode, dynamic, fullgraph, label):
+    info = {
+        "label": label, "requested": bool(enabled), "succeeded": False,
+        "fallback_reason": None, "graph_break_count": 0, "recompile_count": 0,
+        "compiled_graph_count": 0,
+        "cold_start_seconds": None,
+    }
+    if not enabled:
+        info["fallback_reason"] = "disabled"
+        return fn, fn, info
+    if device.type != "cuda":
+        info["fallback_reason"] = "compile_requires_cuda_for_this_runtime"
+        return fn, fn, info
+    if not hasattr(torch, "compile"):
+        info["fallback_reason"] = "torch.compile_unavailable"
+        return fn, fn, info
+    try:
+        compiled = torch.compile(fn, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+        info["succeeded"] = True
+        return compiled, fn, info
+    except Exception as error:
+        info["fallback_reason"] = f"compile_creation:{type(error).__name__}: {error}"
+        return fn, fn, info
+
+
+def _make_train_callable(model, code, device, precision, compile_cfg):
+    from .posterior_hierarchical_standard_cvae import hierarchical_kl, weighted_reconstruction_loss
+
+    def eager(batch, state_mask, action_mask, beta_tensor):
+        with _autocast_context(device, precision):
+            if code == "A":
+                output = model.forward_stage_a(batch)
+            else:
+                if code == "B":
+                    output = model.forward_stage_b(batch, state_mask, action_mask)
+                else:
+                    # C uses a deterministic epsilon supplied by the caller
+                    # only for evaluation; training samples internally.
+                    output = model(batch, state_mask, action_mask, stage="C")
+            valid_state = batch["valid_state"][..., None].expand_as(batch["physical_state"])
+            valid_action = batch["valid_action"][..., None].expand_as(batch["action"])
+            reconstruction = weighted_reconstruction_loss(output, batch, valid_state, valid_action,
+                                                           masked_weight=0., full_weight=1.)
+            if code == "C":
+                kl = hierarchical_kl(output.posterior)
+            else:
+                zero = reconstruction["total"] * 0.0
+                kl = {key: zero for key in ("global", "local", "total")}
+            loss = reconstruction["total"].float() + beta_tensor.float() * kl["total"].float()
+        return (loss, reconstruction["total"], reconstruction["state"], reconstruction["action"],
+                reconstruction["contact"], kl["global"], kl["local"], kl["total"])
+
+    compiled, eager_fn, info = _compile_callable(
+        eager, enabled=bool(compile_cfg.get("enabled", False)), device=device,
+        mode=compile_cfg.get("mode", "max-autotune"),
+        dynamic=bool(compile_cfg.get("dynamic", False)),
+        fullgraph=bool(compile_cfg.get("fullgraph", False)), label=f"train_{code}")
+    return compiled, eager_fn, info
+
+
+def _make_eval_route(model, route, device, precision, compile_cfg):
+    def eager(batch, state_mask, action_mask, global_epsilon, local_epsilon):
+        with _autocast_context(device, precision):
+            return route_output(model, batch, state_mask, action_mask, route,
+                                (global_epsilon, local_epsilon))
+
+    return _compile_callable(
+        eager, enabled=bool(compile_cfg.get("enabled", False)), device=device,
+        mode=compile_cfg.get("mode", "max-autotune"),
+        dynamic=bool(compile_cfg.get("dynamic", False)),
+        fullgraph=bool(compile_cfg.get("fullgraph", False)), label=f"eval_{route}")
 
 
 def load_rows(path):
@@ -330,10 +469,36 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     beta_warmup = int(options["beta_warmup_steps"] if options["beta_warmup_steps"] is not None else cfg.get("kl", {}).get("beta_warmup_steps", 10000))
     if not np.isfinite(beta) or beta < 0 or beta_warmup < 1:
         raise ValueError("invalid KL schedule")
-    fixtures = Fixtures(data, indices, expand=code != "A" and options["mask_mode"] == "fixed")
-    eval_fixtures = Fixtures(data, indices, expand=code != "A")
-    windows = fixtures.manifest()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    precision = str(cfg.get("precision", "FP32")).upper()
+    if precision not in {"FP32", "BF16"}:
+        raise ValueError("training.precision must be FP32 or BF16")
+    if precision == "BF16":
+        # Fail before materializing a cache or creating optimizer state when
+        # the requested hardware capability is unavailable.
+        _autocast_context(device, precision)
+    compile_cfg = config.get("compile", {})
+    # Build the stable identity from the uncached normalized dataset first.
+    # The cache is an in-run acceleration layer and must never alter fixture
+    # ordering or RecoverableSampler state.
+    base_fixtures = Fixtures(data, indices, expand=False)
+    windows = base_fixtures.manifest()
     identity = data_identity(dataset_run, windows)
+    data_cfg = config.get("data", {})
+    cache_mode = str(data_cfg.get("cache_mode", "none")).lower()
+    cache_info = {"requested": cache_mode in {"auto", "on"}, "enabled": False,
+                  "reason": "disabled", "cache_path": None}
+    cached_data = data
+    if cache_mode in {"auto", "on"}:
+        cache_identity = {"protocol_version": PROTOCOL, "dataset_identity": identity,
+                          "selected_window_ids": [row["stable_window_id"] for row in windows]}
+        cached_data, cache_info = materialize_normalized_window_cache(
+            data, indices, cache_path=run / "data/normalized_windows.pt",
+            cache_identity=cache_identity,
+            max_bytes=int(data_cfg.get("cache_max_bytes", 0)),
+        )
+    fixtures = Fixtures(cached_data, indices, expand=code != "A" and options["mask_mode"] == "fixed")
+    eval_fixtures = Fixtures(cached_data, indices, expand=code != "A")
     normalization = read_normalization(dataset_run / "data/normalization.npz")
     selection = {"A": "full_reconstruction_loss", "B": "equal_family_masked_domain_mean_MSE", "C": "standard_normal_masked_energy_score"}[code]
     contract = {"protocol_version": PROTOCOL, "stage": code, "mask_mode": options["mask_mode"], "max_steps": maximum,
@@ -341,18 +506,27 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         "lr_schedule": schedule, **intervals, "initialization_seed": seed, "training_mask_seed": mask_seed,
         "eval_samples": options["eval_samples"], "kl_beta": beta if code == "C" else 0., "beta_warmup_steps": beta_warmup,
         "objective": "full_state_continuous_action_contact_equal_mean_v1", "selection": selection,
-        "fixture_count": len(fixtures), "selected_window_count": len(windows), "quality_rule_version": "warnings-v1"}
+        "fixture_count": len(fixtures), "selected_window_count": len(windows), "quality_rule_version": "warnings-v1",
+        "runtime_precision": precision, "compile": {"enabled": bool(compile_cfg.get("enabled", False)),
+            "mode": compile_cfg.get("mode", "max-autotune"), "dynamic": bool(compile_cfg.get("dynamic", False)),
+            "fullgraph": bool(compile_cfg.get("fullgraph", False))},
+        "cache": {"mode": cache_mode, "max_bytes": int(data_cfg.get("cache_max_bytes", 0)),
+            "enabled": bool(cache_info.get("enabled", False))}}
     seed_everything(seed)
     model = build_model(config["model"])
     counts = model.set_training_stage(code)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    # Keep weights in FP32; autocast controls only dense forward kernels.
+    model.to(device=device, dtype=torch.float32)
     parameters = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(parameters, lr=rate, weight_decay=0.)
+    runtime_contract = _runtime_contract(config, device, model, optimizer, precision)
+    runtime_contract["cache_enabled"] = bool(cache_info.get("enabled", False))
+    contract["runtime_contract"] = runtime_contract
     sampler = RecoverableSampler(len(fixtures), batch_size, seed)
     effective_config = json.loads(json.dumps(config))
     effective_config["model"] = model.config
-    effective_config["data"] = {**config.get("data", {}), "window_transitions": 64, "max_windows": len(indices), "num_workers": 0}
+    effective_config["data"] = {**config.get("data", {}), "window_transitions": 64, "max_windows": len(indices), "num_workers": 0,
+                                  "cache_info": cache_info}
     effective_config["training"] = {**cfg, **contract, stage_name: {**cfg.get(stage_name, {}), "max_optimizer_steps": maximum}}
     current_provenance = provenance(effective_config, contract, identity, None)
     start, source_step, source, resumed = 0, 0, None, None
@@ -394,6 +568,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             if checkpoint["format_version"] == CHECKPOINT and any(old_contract.get(k) != contract[k] for k in
                 ("mask_mode", "micro_batch", "initialization_seed", "training_mask_seed", "objective", "kl_beta", "beta_warmup_steps")):
                 raise ValueError("continuation must preserve sampling/objective; use model-only init for a changed experiment")
+            if checkpoint["format_version"] == CHECKPOINT and old_contract.get("runtime_contract") != contract["runtime_contract"]:
+                raise ValueError("continuation must preserve runtime contract; use model-only init for BF16/compile/cache changes")
             optimizer.load_state_dict(checkpoint["optimizer"])
             source_step = int(checkpoint.get("cumulative_step", checkpoint["optimizer_step"]))
             if checkpoint.get("sampler"):
@@ -415,8 +591,21 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         optimizer.load_state_dict(resumed["optimizer"])
         scheduler.load_state_dict(resumed["scheduler"])
     mode = "resume" if resumed else ("continue" if options["continue_checkpoint"] else "init" if path else "random")
-    loader = DataLoader(eval_fixtures, batch_size=batch_size, shuffle=False, num_workers=0, generator=torch.Generator().manual_seed(seed + 1))
+    pin_memory = bool(data_cfg.get("pin_memory", False)) and device.type == "cuda"
+    non_blocking_transfer = bool(data_cfg.get("non_blocking_transfer", False)) and pin_memory
+    loader = DataLoader(eval_fixtures, batch_size=batch_size, shuffle=False, num_workers=0,
+                        pin_memory=pin_memory, generator=torch.Generator().manual_seed(seed + 1))
     probe = default_collate([eval_fixtures[i] for i in range(min(2, len(eval_fixtures)))])
+    compile_routes = {}
+    compile_infos = []
+    train_callable, eager_train_callable, train_compile_info = _make_train_callable(
+        model, code, device, precision, compile_cfg)
+    compile_infos.append(train_compile_info)
+    routes_for_compile = [code] if code != "C" else ["posterior_mean", "posterior_sample", "standard_normal", "zero"]
+    for route in routes_for_compile:
+        compiled_route, eager_route, route_info = _make_eval_route(model, route, device, precision, compile_cfg)
+        compile_routes[route] = (compiled_route, eager_route, route_info)
+        compile_infos.append(route_info)
     if not resumed:
         shutil.copy2(dataset_run / "data/normalization.npz", run / "data/normalization.npz")
         atomic_write_json(run / "manifests/selected_windows.json", windows)
@@ -461,12 +650,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             model.eval()
             sm, am, _ = make_physical_masks(probe, mask_seed)
             with torch.no_grad():
-                output = route_output(model, to_device(probe, device), sm.to(device), am.to(device), code if code != "C" else "posterior_mean")
+                output = route_output(model, to_device(probe, device, non_blocking=non_blocking_transfer), sm.to(device), am.to(device), code if code != "C" else "posterior_mean")
                 deployment_output = None
                 if code == "C":
                     deployment_epsilon = epsilon_for(model, probe, 0, mask_seed, device)
                     deployment_output = route_output(
-                        model, to_device(probe, device), sm.to(device), am.to(device),
+                        model, to_device(probe, device, non_blocking=non_blocking_transfer), sm.to(device), am.to(device),
                         "standard_normal", deployment_epsilon
                     )
             model.train(was_training)
@@ -476,7 +665,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "source_hashes": current_provenance["source_hashes"],
             "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
             "optimizer_step": step, "source_step": source_step, "cumulative_step": source_step + step, "stage": code,
-            "training_contract": contract, "dataset_identity": identity, "sampler": sampler.state_dict(), "rng_state": capture_rng(),
+            "training_contract": contract, "runtime_contract": runtime_contract, "cache_info": cache_info,
+            "compile_info": compile_infos, "dataset_identity": identity, "sampler": sampler.state_dict(), "rng_state": capture_rng(),
             "source_checkpoint": source, "best_metrics": best, "best_optimizer_step": best_step,
             "best_heldout_metrics": best_heldout, "best_heldout_step": best_heldout_step,
             "best_reconstruction_loss": best_reconstruction, "best_reconstruction_step": best_reconstruction_step,
@@ -517,18 +707,25 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         reports = {}
         for route in routes:
             progress(phase="evaluation", route=route, evaluation_batches=0)
+            compiled_route, eager_route, route_info = compile_routes[route]
             reports[route], _ = evaluate(model, loader, device, normalization, route=route, seed=mask_seed,
                 samples=options["eval_samples"], output_dir=run / f"evaluations/step_{last_step:09d}/fixed/{route}",
-                heartbeat=lambda n: progress(phase="evaluation", route=route, evaluation_batches=n))
+                heartbeat=lambda n: progress(phase="evaluation", route=route, evaluation_batches=n),
+                route_callable=compiled_route, non_blocking=non_blocking_transfer,
+                precision=precision, compile_info=route_info)
         primary = reports[code if code != "C" else "standard_normal"]
         row = {**primary, "optimizer_step": last_step, "cumulative_step": source_step + last_step,
                "phase": "evaluation", "routes": reports}
         if code != "A":
-            held, _ = evaluate(model, loader, device, normalization, route=code if code == "B" else "standard_normal",
+            held_route = code if code == "B" else "standard_normal"
+            held_compiled, _, held_info = compile_routes[held_route]
+            held, _ = evaluate(model, loader, device, normalization, route=held_route,
                 seed=mask_seed + 700001, held_out=True, samples=options["eval_samples"],
                 reference_mask_seed=mask_seed,
                 output_dir=run / f"evaluations/step_{last_step:09d}/heldout",
-                heartbeat=lambda n: progress(phase="evaluation", route="heldout", evaluation_batches=n))
+                heartbeat=lambda n: progress(phase="evaluation", route="heldout", evaluation_batches=n),
+                route_callable=held_compiled, non_blocking=non_blocking_transfer,
+                precision=precision, compile_info=held_info)
             row["heldout_mask"] = held
         eval_rows.append(row)
         if code != "A":
@@ -628,8 +825,11 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         def hook(module, args):
             encoder_calls[name] += 1
         return hook
-    route_hooks = [model.posterior_encoder.register_forward_pre_hook(count_call("posterior")),
-                   model.condition_encoder.register_forward_pre_hook(count_call("condition"))]
+    route_hooks = []
+    def install_route_hooks():
+        if not route_hooks:
+            route_hooks.extend((model.posterior_encoder.register_forward_pre_hook(count_call("posterior")),
+                                model.condition_encoder.register_forward_pre_hook(count_call("condition"))))
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous_handlers[signum] = signal.getsignal(signum)
         signal.signal(signum, lambda number, frame: stop_requested.append(number))
@@ -673,30 +873,86 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         elif best is None or not eval_rows or (start == maximum and eval_rows[-1]["optimizer_step"] != maximum):
             full_eval()
         progress()
+        expected_calls = {"posterior": int(code in {"A", "C"}), "condition": int(code in {"B", "C"})}
+        if train_compile_info["succeeded"]:
+            # Validate route isolation once in eager mode, then remove hooks
+            # before compiling so Python side effects do not force graph breaks.
+            with isolated_rng():
+                was_training = model.training
+                model.eval()
+                encoder_calls.update(posterior=0, condition=0)
+                probe_sm, probe_am, _ = make_physical_masks(probe, mask_seed)
+                with torch.no_grad():
+                    eager_train_callable(
+                        to_device(probe, device, non_blocking=non_blocking_transfer),
+                        probe_sm.to(device), probe_am.to(device),
+                        torch.tensor(0., device=device, dtype=torch.float32),
+                    )
+                model.train(was_training)
+            if encoder_calls != expected_calls:
+                raise RuntimeError(f"stage route violation: {encoder_calls} expected {expected_calls}")
+        else:
+            install_route_hooks()
         model.train()
         for step in range(start + 1, maximum + 1):
             if stop_requested:
                 break
             committed = False
             started = time.perf_counter()
+            fetch_started = started
             cpu = sampler.next(fixtures)
-            batch = to_device(cpu, device)
+            cpu = pin_batch(cpu, enabled=pin_memory)
+            batch = to_device(cpu, device, non_blocking=non_blocking_transfer)
+            data_fetch_seconds = time.perf_counter() - fetch_started
             encoder_calls.update(posterior=0, condition=0)
             if code == "A":
-                output = model(batch, stage="A")
+                sm = cpu["valid_state"][..., None].expand_as(cpu["physical_state"])
+                am = cpu["valid_action"][..., None].expand_as(cpu["action"])
             else:
                 dynamic = source_step + step if options["mask_mode"] == "dynamic" else None
                 sm, am, names = make_physical_masks(cpu, mask_seed, dynamic_step=dynamic)
-                output = model(batch, sm.to(device), am.to(device), stage=code)
+            state_mask = sm.to(device, non_blocking=non_blocking_transfer)
+            action_mask = am.to(device, non_blocking=non_blocking_transfer)
             expected_calls = {"posterior": int(code in {"A", "C"}), "condition": int(code in {"B", "C"})}
-            if encoder_calls != expected_calls:
-                raise RuntimeError(f"stage route violation: {encoder_calls} expected {expected_calls}")
-            vs = batch["valid_state"][..., None].expand_as(batch["physical_state"])
-            va = batch["valid_action"][..., None].expand_as(batch["action"])
-            reconstruction = weighted_reconstruction_loss(output, batch, vs, va, masked_weight=0., full_weight=1.)
-            kl = hierarchical_kl(output.posterior) if code == "C" else {k: reconstruction["total"] * 0 for k in ("global", "local", "total")}
             actual_beta = beta * min((source_step + step) / beta_warmup, 1.) if code == "C" else 0.
-            loss = reconstruction["total"] + actual_beta * kl["total"]
+            beta_tensor = torch.tensor(actual_beta, device=device, dtype=torch.float32)
+            dynamo_before = _dynamo_counts() if train_compile_info["succeeded"] else None
+            try:
+                if train_compile_info["cold_start_seconds"] is None and train_compile_info["succeeded"]:
+                    compile_started = time.perf_counter()
+                    result = train_callable(batch, state_mask, action_mask, beta_tensor)
+                    train_compile_info["cold_start_seconds"] = time.perf_counter() - compile_started
+                else:
+                    result = train_callable(batch, state_mask, action_mask, beta_tensor)
+                _update_compile_counts(train_compile_info, dynamo_before)
+            except Exception as error:
+                _update_compile_counts(train_compile_info, dynamo_before)
+                if not train_compile_info["succeeded"]:
+                    raise
+                train_compile_info["succeeded"] = False
+                train_compile_info["fallback_reason"] = f"compile_runtime:{type(error).__name__}: {error}"
+                install_route_hooks()
+                train_callable = eager_train_callable
+                encoder_calls.update(posterior=0, condition=0)
+                result = train_callable(batch, state_mask, action_mask, beta_tensor)
+            if train_compile_info["succeeded"] and not route_hooks:
+                # The eager probe above established the static route; compiled
+                # calls intentionally run without Python forward hooks.
+                encoder_calls.update(expected_calls)
+            if encoder_calls != expected_calls:
+                if train_compile_info["succeeded"]:
+                    train_compile_info["succeeded"] = False
+                    train_compile_info["fallback_reason"] = f"route_hook_mismatch:{encoder_calls}!={expected_calls}"
+                    install_route_hooks()
+                    train_callable = eager_train_callable
+                    encoder_calls.update(posterior=0, condition=0)
+                    result = train_callable(batch, state_mask, action_mask, beta_tensor)
+                if encoder_calls != expected_calls:
+                    raise RuntimeError(f"stage route violation: {encoder_calls} expected {expected_calls}")
+            loss, reconstruction_total, reconstruction_state, reconstruction_action, reconstruction_contact, kl_global, kl_local, kl_total = result
+            reconstruction = {"total": reconstruction_total, "state": reconstruction_state,
+                              "action": reconstruction_action, "contact": reconstruction_contact}
+            kl = {"global": kl_global, "local": kl_local, "total": kl_total}
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"non-finite loss before update {step}")
             optimizer.zero_grad(set_to_none=True)
@@ -719,7 +975,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 raise FloatingPointError("non-finite parameters after update; preserving preceding durable checkpoint")
             last_step, committed = step, True
             row = {"phase": "train", "optimizer_step": step, "source_step": source_step, "cumulative_step": source_step + step,
-                "loss": float(loss.detach()), "reconstruction": float(reconstruction["total"].detach()),
+                "loss": float(loss.detach().float()), "reconstruction": float(reconstruction["total"].detach().float()),
                 **{f"reconstruction_{k}": float(reconstruction[k].detach()) for k in ("state", "action", "contact")},
                 "kl_global": float(kl["global"].detach()), "kl_local": float(kl["local"].detach()), "kl": float(kl["total"].detach()),
                 "kl_beta": actual_beta, "weighted_kl_global": actual_beta * .5 * float(kl["global"].detach()),
@@ -728,6 +984,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 "gradient_norm_after_clip": float(torch.linalg.vector_norm(torch.stack([p.grad.norm() for p in parameters if p.grad is not None]))),
                 "batch_size": len(cpu["physical_state"]), "sample_identity_sha256": digest(batch_ids(cpu)),
                 "sample_exposures": sampler.exposures, "sampler_epoch": sampler.epoch, "step_seconds": time.perf_counter() - started,
+                "data_fetch_seconds": data_fetch_seconds,
+                "compute_update_seconds": time.perf_counter() - started - data_fetch_seconds,
                 "elapsed_seconds": time.perf_counter() - started_at, "updated_at": datetime.now(timezone.utc).isoformat()}
             row["encoder_calls"] = dict(encoder_calls)
             if code != "A":
@@ -764,6 +1022,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "architecture_version": model.ARCHITECTURE_VERSION, "stage": code, "execution_pass": True, "quality_pass": None,
             "smoke": options["smoke"], "completed_optimizer_steps": last_step, "cumulative_step": source_step + last_step,
             "source_checkpoint": source, "training_contract": contract, "dataset_identity": identity,
+            "runtime_contract": runtime_contract, "cache_info": cache_info, "compile_info": compile_infos,
+            "data_transfer": {"pin_memory": pin_memory, "non_blocking": non_blocking_transfer},
             "model_contract": {**model.config, "actual_parameter_count": sum(p.numel() for p in model.parameters())},
             "stage_parameter_counts": counts, "best_step": best_step, "best_metrics": best,
             "best_heldout_step": best_heldout_step, "best_heldout_metrics": best_heldout,

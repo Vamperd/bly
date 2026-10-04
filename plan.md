@@ -1,6 +1,6 @@
 # 65-token CVAE：当前 A／B／C 实验计划与结果
 
-最后更新：2026-09-28
+最后更新：2026-09-29
 
 只保留当前65-token A/B/C的实验路径、概要结果及下一步；历史条目仅从本文移除，
 任何历史run、checkpoint、数据和源码均未删除。结构合同见[model.md](model.md)，
@@ -16,8 +16,7 @@ A90k + model-only再训练60k：完成，封存为完整输入参考
 B-fixed：1 motion / 16窗口 / 128fixture / 20k，完成
 B-dynamic：同16窗口 / 20k，完成，固定及另一Mask bank均显著改善
 C：32-motion全部T64窗口 / 1504窗口 / 动态Mask / 随机初始化 / 360k，完成
-→ 下一步：先做C末步紧凑尾部诊断，再按replay65执行原始Action双基线和C模型回放
-回放仍是诊断流程；原始Action双基线失败时，模型物理质量保持不可判定
+→ 下一步：先做C末步紧凑尾部诊断，补齐最差窗口、最差坐标和 latent 统计
 ```
 
 本路线先支持扩大**数据范围**，再独立检验随机latent部署；不把C完成自动等同于最终随机生成阶段。
@@ -25,8 +24,6 @@ C：32-motion全部T64窗口 / 1504窗口 / 动态Mask / 随机初始化 / 360k�
 此前B两轮summary的quality_pass仍为null，工程PASS不等于预注册质量PASS；C的quality_pass也保持null。
 32-motion B是独立condition-only容量实验；C则是同规模独立随机初始化的联合CVAE部署实验，
 二者都不加载A或16窗口B权重，也不绕过数据身份校验。
-当前尚未形成有效的 Isaac/MuJoCo 回放结论：曾有一个 C 窗口0 run 在 worker 完成后因缺少
-`markers/` 子目录而封存失败，该目录和其导出报告均不作为证据；修复后的源码必须建立新 run。
 以下第2～4节为A及B-fixed已完成记录；B-dynamic见第10节，C及下一步见第11节。
 
 ## 2. A：完整序列 Posterior 重建基线
@@ -289,7 +286,7 @@ data为T64、stride64、max_windows=null、max_episodes256。
 30k～60k延长；否则先诊断family/window覆盖与可见／隐藏误差，不默认追加步数或扩大网络。
 这个10%是预算决策参考，不替代质量阈值；边界情况与非单调波动必须看完整曲线。
 工程错误停止，质量告警不自动停止或改LR。
-B-fixed通过后再启动同32-motion的B-dynamic；回放继续独立待执行。
+B-fixed通过后再启动同32-motion的B-dynamic；训练结论与其他工程验证独立记录。
 
 ## 7. 记录与精简回传
 
@@ -305,7 +302,7 @@ B-fixed通过后再启动同32-motion的B-dynamic；回放继续独立待执行�
 发现特定中间异常时再补传对应step文件，不删本地证据。
 
 本节命令是B-dynamic阶段的训练与精简打包记录；该阶段不修改训练/采样/evaluator代码。
-真实Isaac/MuJoCo回放仍未收到结果。Windows文档与CLI静态检查不替代Ubuntu工程/质量验收。
+Windows文档与CLI静态检查不替代Ubuntu HDF5/CUDA训练验收。
 
 ## 8. 本轮协议落地状态（Windows，2026-09-24）
 
@@ -314,11 +311,10 @@ B-fixed通过后再启动同32-motion的B-dynamic；回放继续独立待执行�
 - B 训练保留 `best.pt`，新增 `best_fixed.pt` 与 `best_heldout.pt`，并将两者的 step、指标、progress、summary 和严格 readback 写入记录。
 - 每五次评测的消融优先按 motion 选择窗口，再用均匀间隔补足；结果记录窗口身份和真正跨 motion donor 数量。单 motion smoke 会保留 same-motion 限制。
 - C checkpoint 新增固定 epsilon 的 standard-normal readback probe，严格读回同时验证 posterior-mean 与部署标准正态路径。
-- replay65 报告新增相对原始 Action baseline 的模型质量判定：joint position、root position、body MPJPE 比值阈值为 1.2；baseline 无效时仍可生成视频，但模型质量保持 `MODEL_QUALITY_UNDETERMINED`。
-- Windows 验证已通过：`test_cvae_protocol_v2` 8项、`test_replay65` 12项、`test_replay65_runtime` 6项、Python compile、CLI/协议读回及 `git diff --check`；另修正了 `best_heldout_step` 在 summary/checkpoint 中漏写的问题。全量 discovery 的唯一已知失败仍是 Windows 环境缺少 `h5py` 导致的3个既有模块导入错误，未涉及本轮代码。
+- Windows 已完成 v2 训练协议、CLI、checkpoint 读回、Python compile 和 `git diff --check` 静态核验；另修正了 `best_heldout_step` 在 summary/checkpoint 中漏写的问题。全量 discovery 的唯一已知失败仍是 Windows 环境缺少 `h5py` 导致的3个既有模块导入错误，未涉及本轮代码。
 
-C 独立随机初始化已在Ubuntu完成，结果见第11节；仍待真实 Isaac/MuJoCo 的原始 Action 双基线和模型回放。
-32-motion B-fixed、B-dynamic和C均已完成，后续回放阶段必须在Windows静态核验通过后同步同一份源码。
+C 独立随机初始化已在 Ubuntu 完成，结果见第11节。32-motion B-fixed、B-dynamic 和 C 均已完成，
+当前只需补齐 C 末步诊断证据。
 
 ## 9. 32-motion B-fixed 完成结论（2026-09-24）
 
@@ -359,10 +355,9 @@ State/Action RMSE分别为0.023536/0.012274和0.022965/0.013237，仍未达到0.
 也没有证明新motion泛化。held-out selection从100k的0.000609318降到120k的0.000551900，
 改善9.42%，但最后10k仅改善2.92%，且学习率已到1e-6；继续同一合同的边际收益有限。
 因此下一步进入第11节记录的独立随机初始化C，使用standard-normal部署路径进行审核，不加载任一A/B checkpoint。
-若C前仍需B回放，必须显式选择`best_heldout.pt`或`last.pt`，不能使用本run的`best.pt`（它对应step0源权重）。
 不通过修改loss、网络宽度和Mask分布同时消除这次fixed回退；C完成后的真实下一步见第11节末尾。
 
-## 11. C：独立随机初始化与标准正态部署完成结论（2026-09-28）
+## 11. C：独立随机初始化与标准正态部署完成结论（2026-09-29）
 
 回传包：`C:/Users/86136/Desktop/replay/C train/cvae_C_return`。
 Ubuntu run：`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113`。
@@ -425,9 +420,7 @@ global posterior通道在该小样本消融中近似不敏感；它是posterior-
 本轮最终判定：**C工程执行通过；posterior路径可重建；standard-normal部署质量未通过，
 quality_pass保持null；不能直接进入随机生成的成功宣称。** 不对同一run做普通续训，也不同时改
 loss、latent、pooling或网络宽度。下一步先从已有step360000 checkpoint做紧凑末步尾部诊断，
-补齐最差window／coordinate和latent统计；随后按replay65先跑原始Action双基线，再在相同窗口运行
-C模型回放。回放是物理诊断，不把视频结果倒写成训练质量通过；基线失效时模型物理质量保持
-`MODEL_QUALITY_UNDETERMINED`。
+补齐最差window、coordinate和latent统计。
 
 回传包的证据限制必须保留：`evaluations_summaries/step_000360000/`含五条最终summary，
 但`evaluations_detail/`没有step360000的逐元素diagnostics，只有step0完整diagnostics和
@@ -533,3 +526,24 @@ solver iteration。`runtime_context_max_abs > 1e-5`、combine mode 不一致或�
 
 每个 MP4 为 65 帧、50 Hz，叠加层标出 `REPLAY 0-64`。Recorded HDF 和 Isaac replay
 都保持同样的 65 帧；旧的 129-frame run 不得补 marker 冒充本协议，必须建立新的 run。
+
+## 15. v2 BF16、compile 与同步数据管线优化（2026-10-04）
+
+已在 Windows 实现新的运行时层，下一轮只建立新 run，不覆盖历史 C checkpoint：
+
+1. 保留逐特征 z-score 与 canonical Action，不添加 Action residual。默认配置把训练 precision
+   设为 BF16；参数、AdamW、KL/重建/contact loss、latent 统计与评测保持 FP32，CUDA dense forward
+   使用 autocast，BF16 不使用 GradScaler，硬件不支持时直接失败。
+2. 为 A、B、C 和 standard-normal inference 建立独立 compiled callable，默认
+   `max-autotune/dynamic=false/fullgraph=false`。strict readback 保持 eager；cold-start、成功/回退、
+   graph break 和 recompile 信息写入 runtime contract、checkpoint 与 summary。
+3. 同步 sampler 继续负责 permutation/cursor/epoch/exposure/RNG。`cache_mode=auto` 时按 dataset、
+   normalization 与 selected-window hash 建立 run 内标准化窗口缓存；八个 fixture 复用同一个基础窗口，
+   超出 `cache_max_bytes` 自动走未缓存路径。可选 pinned memory 与 non-blocking copy 只在 CUDA 生效。
+
+Ubuntu 验收按四个 2-step smoke 依次执行：FP32 eager+uncached、BF16 eager+uncached、BF16
+compiled+uncached、BF16 compiled+cached。之后对同一 FP32 probe 做 BF16/FP32 p99、最大误差、RMSE、
+contact BCE 对照，再以 20-step warm-up + 200-step steady-state 测训练 samples/s、step latency、
+评测 fixtures/s、显存峰值和 CPU/HDF5 占比。只有吞吐达到训练 1.25x、评测 1.15x 且数值门禁通过，
+才将对应组合设为活动配置；否则按 BF16 eager、FP32 compiled、FP32 eager 的顺序降级。当前 Windows
+测试只证明工程与合同，不代表 Ubuntu CUDA/BF16/compile 的性能或质量已经通过。

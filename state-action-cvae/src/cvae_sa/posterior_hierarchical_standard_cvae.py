@@ -61,8 +61,14 @@ def hierarchical_kl(
 ) -> dict[str, torch.Tensor]:
     """KL(q||N(0,I)); ``prior`` is ignored and exists only for old callers."""
     del prior
-    global_kl = 0.5 * (torch.exp(posterior.global_logvar) + posterior.global_mean.square() - 1.0 - posterior.global_logvar).mean()
-    local_kl = 0.5 * (torch.exp(posterior.local_logvar) + posterior.local_mean.square() - 1.0 - posterior.local_logvar).mean()
+    # Keep exponentials, reductions, and the returned KL scalar in FP32 even
+    # when the surrounding decoder is running under BF16 autocast.
+    global_mean = posterior.global_mean.float()
+    global_logvar = posterior.global_logvar.float()
+    local_mean = posterior.local_mean.float()
+    local_logvar = posterior.local_logvar.float()
+    global_kl = 0.5 * (torch.exp(global_logvar) + global_mean.square() - 1.0 - global_logvar).mean()
+    local_kl = 0.5 * (torch.exp(local_logvar) + local_mean.square() - 1.0 - local_logvar).mean()
     return {"global": global_kl, "local": local_kl, "total": 0.5 * (global_kl + local_kl)}
 
 
@@ -87,13 +93,13 @@ def weighted_reconstruction_loss(
         raise ValueError("masked/full reconstruction weights must sum to one")
 
     def one(sm: torch.Tensor, am: torch.Tensor) -> dict[str, torch.Tensor]:
-        state_mask_cont = sm[..., :68]
-        state_values = (output.physical_state[..., :68] - batch["physical_state"][..., :68]).square().masked_select(state_mask_cont)
-        action_values = (output.action - batch["action"]).square().masked_select(am)
+        state_mask_cont = sm[..., :68].bool()
+        state_values = (output.physical_state[..., :68].float() - batch["physical_state"][..., :68].float()).square().masked_select(state_mask_cont)
+        action_values = (output.action.float() - batch["action"].float()).square().masked_select(am.bool())
         contact_values = F.binary_cross_entropy_with_logits(
-            output.state_contact_logits, batch["physical_state"][..., 68:70], reduction="none"
-        ).masked_select(sm[..., 68:70])
-        zeros = output.action.sum() * 0.0
+            output.state_contact_logits.float(), batch["physical_state"][..., 68:70].float(), reduction="none"
+        ).masked_select(sm[..., 68:70].bool())
+        zeros = output.action.float().sum() * 0.0
         state = state_values.mean() if state_values.numel() else zeros
         action = action_values.mean() if action_values.numel() else zeros
         contact = contact_values.mean() if contact_values.numel() else zeros

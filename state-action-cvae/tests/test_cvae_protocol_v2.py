@@ -15,9 +15,11 @@ import torch
 from torch.utils.data import DataLoader, default_collate
 
 from test_posterior_hierarchical_standard_cvae import batch, config
-from cvae_sa.cvae_protocol import Fixtures, RecoverableSampler, capture_rng, restore_rng, lr_factor, quality_warnings
+from cvae_sa.cvae_protocol import (Fixtures, RecoverableSampler, capture_rng, restore_rng, lr_factor,
+                                   materialize_normalized_window_cache, quality_warnings)
 from cvae_sa.cvae_diagnostics import Diagnostics, evaluate, ensemble_scores, epsilon_for, route_output, stats, ablations
-from cvae_sa.cvae_training import run_experiment, append, load_rows
+from cvae_sa.cvae_training import (_autocast_context, _compile_callable, run_experiment, append,
+                                   load_rows)
 from cvae_sa.models import build_model
 from cvae_sa.posterior_t64_protocol import make_physical_masks
 
@@ -71,6 +73,37 @@ class ProtocolTests(unittest.TestCase):
             a, b = original.next(fixture), resumed.next(fixture)
             self.assertTrue(torch.equal(a["fixture_index"], b["fixture_index"]))
             self.assertTrue(torch.equal(a["sample_ordinal"], b["sample_ordinal"]))
+
+    def test_normalized_cache_preserves_selected_indices_and_identity(self):
+        source = FakeDataset()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "windows.pt"
+            identity = {"dataset": "fixture", "normalization": "sha", "selected": [2, 0]}
+            cached, info = materialize_normalized_window_cache(
+                source, [2, 0], cache_path=path, cache_identity=identity, max_bytes=10_000_000
+            )
+            self.assertTrue(info["enabled"])
+            self.assertTrue(torch.equal(cached[0]["physical_state"], source[0]["physical_state"]))
+            reloaded, reload_info = materialize_normalized_window_cache(
+                source, [2, 0], cache_path=path, cache_identity=identity, max_bytes=10_000_000
+            )
+            self.assertTrue(reload_info["loaded_existing"])
+            self.assertTrue(torch.equal(reloaded[2]["action"], cached[2]["action"]))
+
+    def test_compile_contract_falls_back_explicitly_without_cuda(self):
+        eager = lambda value: value + 1
+        compiled, fallback, info = _compile_callable(
+            eager, enabled=True, device=torch.device("cpu"), mode="max-autotune",
+            dynamic=False, fullgraph=False, label="unit",
+        )
+        self.assertIs(compiled, fallback)
+        self.assertFalse(info["succeeded"])
+        self.assertIn("cuda", info["fallback_reason"])
+        self.assertEqual(int(compiled(torch.tensor(2))), 3)
+
+    def test_bf16_preflight_rejects_cpu_without_silent_fallback(self):
+        with self.assertRaisesRegex(RuntimeError, "CUDA"):
+            _autocast_context(torch.device("cpu"), "BF16")
 
     def test_metrics_empty_partition_argmax_and_physical(self):
         fixture = Fixtures(FakeDataset(), [0], expand=False)

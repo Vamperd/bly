@@ -534,3 +534,16 @@ python -m unittest discover -s tests -v
 测试覆盖 runtime Action 映射、per-environment 参数、跨 motion 划分、padding、三类 Mask、
 Action/previous-action 防泄漏、通用 ActionMaskScenario、Transformer/TCN shape 和微型
 数据过拟合，以及State-only Mask、32步分段rollout和root积分重建。
+
+## 65-token v2 运行时优化
+
+v2 保持逐特征标准化和 canonical Action 目标，不使用 Action residual。配置文件默认启用 BF16
+mixed precision、stage-specific `torch.compile`、标准化窗口缓存、pinned memory 和
+non-blocking transfer。模型参数、AdamW 状态、KL/重建/contact loss、latent 统计及评测指标保留
+FP32；BF16 只用于 CUDA 密集前向，且不使用 GradScaler。CUDA 不支持 BF16 时训练直接失败。
+
+缓存写入新 run 的 `data/normalized_windows.pt`，由 dataset manifest、episode index、normalization
+和 selected-window hash 校验，不改源 HDF5。RecoverableSampler 的可恢复状态保持同步语义。
+compile 的 cold-start、fallback、graph break/recompile 和 runtime contract 会写入 checkpoint、
+summary 与 manifests。旧 FP32 eager checkpoint 不覆盖；BF16/compile/cache 的 CUDA smoke、数值
+parity 和稳态吞吐必须在 Ubuntu 新 run 中单独验收。

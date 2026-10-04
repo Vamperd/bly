@@ -1,6 +1,6 @@
 # 65-token 层级 CVAE：活动模型与实验合同
 
-最后更新：2026-09-28。当前 C 已完成训练但标准正态部署质量未通过；真实 Isaac/MuJoCo 回放仍待执行。
+最后更新：2026-09-29。当前 C 已完成训练但标准正态部署质量未通过；正在补齐末步诊断证据。
 
 模型架构版本保持 `65-token-hierarchical-standard-cvae-v1`；实验协议为
 `65-token-experiment-v2`，checkpoint 格式为
@@ -273,9 +273,8 @@ loss=4.14769e-5，learning rate=1e-6，grad=1.102e-3；summary 的 `execution_pa
 随机生成能力。held-out standard-normal 的 energy/full/masked 结果与坐标分组见 plan.md 第11节和
 process.md 第10节；数据仍是同一32-motion已见序列，不能解释为新motion泛化。
 
-当前下一步只允许：从 step360000 做只读末步尾部坐标/latent 统计，然后按本节回放合同执行原始 Action
-双基线和 C 回放。不得对同一 C run 普通续训，也不得同时修改 loss、latent 维度、pooling 或网络宽度。
-回放不改变训练结论；原始基线无效时，模型物理质量保持 `MODEL_QUALITY_UNDETERMINED`。
+当前下一步只允许：从 step360000 做只读末步尾部坐标、窗口身份和 latent 统计。
+不得对同一 C run 普通续训，也不得同时修改 loss、latent 维度、pooling 或网络宽度。
 
 ## 7. 65-token State／Action回放合同（2026-09-23）
 
@@ -409,3 +408,28 @@ A参考另建run使用 `--route A --window-index 0` 和
 `best_heldout.pt`（不能使用 dynamic 的 `best.pt`，它对应 step0 源权重）。C 使用
 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113/checkpoints/best.pt`
 和 `--route C --sample-seed ... --sample-index ...`，走标准正态部署路径。
+
+## 8. v2 运行时优化合同（2026-10-04）
+
+逐特征标准化和 canonical Action 目标保持不变：`A_norm=(A-canonical_mean)/canonical_std`。
+当前模型没有 Action residual 分支，优化不改变 State/Action 数据合同、模型结构、loss 或
+latent 语义。旧 C run 实际是 FP32 eager；下面的设置只用于新 run，既有 checkpoint、HDF5 和
+normalization 统计保持只读。
+
+活动配置默认启用 BF16 mixed precision、stage-specific `torch.compile` 和同步窗口缓存。模型
+参数、AdamW 状态、normalization/denormalization、mask 判断、KL 的 exp/logvar/reduction、
+重建 MSE、contact BCE、最终 reduction、latent mean/logvar/epsilon/variance 与全部评测指标
+保持 FP32；CUDA autocast 只覆盖密集前向。BF16 不启用 GradScaler，启动时不支持 BF16 会直接失败。
+
+runtime contract 会记录 precision、autocast、参数/优化器 dtype、BF16 支持、TF32、compile
+参数、cache、pin-memory 和 non-blocking 状态。精确 resume 要求该 contract 一致；改变运行时选项
+必须建立新的 controlled initialization run。compile 只包住 A/B/C 或标准正态 inference 的
+forward/loss callable，strict readback 仍走 eager；首次编译耗时、是否成功、fallback 原因、
+graph break/recompile 字段写入 checkpoint 和 summary。
+
+`data.cache_mode=auto` 时，选定窗口的已标准化 CPU tensors 写入当前 run 的
+`data/normalized_windows.pt`，identity 同时绑定 dataset manifest、episode index、normalization
+和 selected-window hash。B-fixed/C 的八个 mask fixture 共享一个缓存窗口；超出上限自动回到同步
+HDF5 路径并记录原因。RecoverableSampler 的 permutation、cursor、epoch、exposure 和 RNG 合同
+保持不变。BF16/compile/cache 的 Ubuntu smoke、数值 parity 和稳态吞吐仍需新 run 验证，不能把
+静态实现检查当作速度或模型质量结论。

@@ -3334,11 +3334,19 @@ class HierarchicalStandardCVAETransformer(nn.Module):
         distribution: HierarchicalGaussianLatent,
         epsilon: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Latent statistics stay in FP32 under BF16 autocast.  The decoder can
+        # consume the resulting tensors through autocast afterwards.
+        global_mean = distribution.global_mean.float()
+        global_logvar = distribution.global_logvar.float()
+        local_mean = distribution.local_mean.float()
+        local_logvar = distribution.local_logvar.float()
         if epsilon is None:
-            epsilon = (torch.randn_like(distribution.global_mean), torch.randn_like(distribution.local_mean))
+            epsilon = (torch.randn_like(global_mean), torch.randn_like(local_mean))
+        global_epsilon = epsilon[0].float()
+        local_epsilon = epsilon[1].float()
         return (
-            distribution.global_mean + torch.exp(0.5 * distribution.global_logvar) * epsilon[0],
-            distribution.local_mean + torch.exp(0.5 * distribution.local_logvar) * epsilon[1],
+            global_mean + torch.exp(0.5 * global_logvar) * global_epsilon,
+            local_mean + torch.exp(0.5 * local_logvar) * local_epsilon,
         )
 
     def _fuse_pair(
@@ -3457,6 +3465,26 @@ class HierarchicalStandardCVAETransformer(nn.Module):
         }
         return self._decode(batch, self._fuse_pair(global_latent, local_latents, None), None)
 
+    # Static route entry points keep stage selection outside compiled graphs.
+    # They preserve the historical forward/output interface while giving the
+    # trainer a stable callable for A, B, C and standard-normal inference.
+    def forward_stage_a(self, batch: dict[str, torch.Tensor]) -> "HierarchicalStandardCVAEOutput":
+        return self.forward(batch, stage="A")
+
+    def forward_stage_b(self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor,
+                        action_mask: torch.Tensor) -> "HierarchicalStandardCVAEOutput":
+        return self.forward(batch, state_mask, action_mask, stage="B")
+
+    def forward_stage_c(self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor,
+                        action_mask: torch.Tensor,
+                        epsilon: tuple[torch.Tensor, torch.Tensor]) -> "HierarchicalStandardCVAEOutput":
+        return self.forward(batch, state_mask, action_mask, stage="C", epsilon=epsilon)
+
+    def forward_standard_normal(self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor,
+                                action_mask: torch.Tensor,
+                                epsilon: tuple[torch.Tensor, torch.Tensor]) -> "HierarchicalStandardCVAEOutput":
+        return self.infer_from_condition(batch, state_mask, action_mask, epsilon=epsilon)
+
     def forward(
         self, batch: dict[str, torch.Tensor], state_mask: torch.Tensor | None = None, action_mask: torch.Tensor | None = None,
         *, stage: str = "C", latent_source: str | None = None,
@@ -3494,8 +3522,8 @@ class HierarchicalStandardCVAETransformer(nn.Module):
         elif stage == "infer":
             posterior = None
             condition = self.encode_condition(batch, state_mask, action_mask)
-            global_latent = torch.randn(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
-            local_latents = torch.randn(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
+            global_latent = torch.randn(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=torch.float32)
+            local_latents = torch.randn(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=torch.float32)
             fused = self._fuse_pair(global_latent, local_latents, condition)
         else:
             raise ValueError("stage must be A, B, C or infer")
@@ -3514,11 +3542,11 @@ class HierarchicalStandardCVAETransformer(nn.Module):
         condition = self.encode_condition(batch, state_mask, action_mask)
         if sample:
             if epsilon is None:
-                epsilon = (torch.randn(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype), torch.randn(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype))
+                epsilon = (torch.randn(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=torch.float32), torch.randn(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=torch.float32))
             global_latent, local_latents = epsilon
         else:
-            global_latent = torch.zeros(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
-            local_latents = torch.zeros(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=batch["physical_state"].dtype)
+            global_latent = torch.zeros(batch["physical_state"].shape[0], self.global_latent_dim, device=batch["physical_state"].device, dtype=torch.float32)
+            local_latents = torch.zeros(batch["physical_state"].shape[0], 16, self.local_latent_dim, device=batch["physical_state"].device, dtype=torch.float32)
         decoded = self._decode(batch, self._fuse_pair(global_latent, local_latents, condition), condition)
         return HierarchicalStandardCVAEOutput(decoded.physical_state, decoded.action, decoded.state_contact_logits, None, None, global_latent, local_latents, "standard_normal" if sample else "condition_mean", condition)
 
