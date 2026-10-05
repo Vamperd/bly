@@ -435,3 +435,26 @@ index 回归测试。尚未在 Ubuntu RTX 4090 上执行四类 BF16/compile smok
 因此目前只能报告 execution implementation；不能把 compile callable 创建成功、缓存文件生成或
 静态测试通过解释为训练吞吐提升、BF16 精度满足阈值或 standard-normal 质量改善。若 compile 在
 运行时触发 graph break/异常，summary 必须保留 fallback 原因并按既定门槛选择 eager 路径。
+
+## 14. C latent 分组诊断与 KL×2 实验边界（2026-10-04）
+
+C 当前已知现象是 posterior mean/sample 重建较好，而部署 standard-normal 误差明显增大；全局
+平均 KL 很小只能说明平均意义上的 `q(z|x)` 接近 `N(0,I)`，不能说明十七个 latent group 或
+每个维度都同样接近。新增 `latent_distribution65.py` 后，诊断会对完整 State--Action window
+逐批调用 Posterior Encoder，并按 `global` 与 `local_00`--`local_15` 分组输出：
+
+- `kl_mean/median/p95/max` 与逐维 KL 分数，显示是否只有少数维度承载偏离；
+- posterior mean 的跨窗口方差，区分有信息变化、均值坍缩和仅 logvar 承载变化；
+- posterior sigma 的均值/分布，显示不确定性是否集中在某些 local chunk；
+- 重参数 sample 的经验均值/标准差、直方图和相对标准正态的 gap。
+
+因此在没有实际 `group_stats.json`、逐维热图和 standard-normal 对照前，不能断言“global 已
+坍缩”或“local 只有一部分有效”；这些是待验证的机制假设。诊断只读旧 checkpoint 和重建数据集，
+不改变 replay、训练和质量门禁。
+
+KL×2 运行是单变量对照：仍从随机初始化开始，保留原 beta warmup 10000 steps、BF16/compile
+配置和 360k C 步数，只把 effective `kl_beta` 改为 0.002。若该 run 的 standard-normal
+误差下降，同时 local/global 的 KL 分布没有出现单组过度收缩，才支持“KL 权重不足”这一候选
+机制；若 posterior 重建变差但部署路径不改善，应停止继续放大 KL，转查 posterior-to-prior
+校准、condition 融合和 decoder 对 latent 的利用。此 run 的 `execution_pass` 与 `quality_pass`
+必须分开记录。

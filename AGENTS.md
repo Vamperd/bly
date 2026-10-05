@@ -1,6 +1,6 @@
 # SONIC Physics State–Action 研究：当前代理交接说明
 
-最后更新：2026-09-29。当前活动阶段为 C 训练结果诊断与证据补齐。
+最后更新：2026-10-04。当前活动阶段为 C 的十七组 posterior latent 分布诊断与 KL×2 受控对照。
 
 当前活动模型合同维护在 [model.md](model.md)，整体实验路线与概要结果维护在
 [plan.md](plan.md)，必要反常结果、根因证据与诊断局限维护在 [process.md](process.md)。
@@ -25,8 +25,10 @@ A的model-only初始化60k已完成，max从0.219557降至0.131111；不是保�
 另一bank masked State/Action RMSE为0.000585/0.000391，max为0.006655/0.003503，原最差joint gap显著改善。
 32-motion全1504窗口的B-fixed与B-dynamic均已完成：B-fixed工程通过但fixed/held-out质量均未通过；
 B-dynamic显著改善held-out，同时fixed bank回退并触发质量告警。C已独立随机初始化完成360k步，
-工程通过，但standard-normal部署质量未通过；细则见plan.md与process.md。
-当前下一步是C末步只读尾部补诊，补齐最差窗口、最差坐标和 latent 统计；不自动续训、扩模型或修改loss。
+工程通过，但standard-normal部署质量未通过；细则见plan.md与process.md。现已新增只读
+`cvae_sa.latent_distribution65`，按一个global和16个local分别输出posterior分布、逐维KL、
+跨窗口均值方差及相对标准正态的图表。Ubuntu实际诊断尚待执行；KL×2只允许从随机初始化建立
+新C run，通过现有`--kl-beta 0.002`入口进行单变量对照，不得从旧C恢复optimizer或checkpoint。
 恢复/延长/初始化、mask身份、分域尾部与C部署评测以 `model.md` 的v2合同为唯一活动定义。
 
 2026-09-23 小规模B已完成并审核；新增独立 `python -m cvae_sa.replay65`

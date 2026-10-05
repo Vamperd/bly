@@ -547,3 +547,24 @@ contact BCE 对照，再以 20-step warm-up + 200-step steady-state 测训练 sa
 评测 fixtures/s、显存峰值和 CPU/HDF5 占比。只有吞吐达到训练 1.25x、评测 1.15x 且数值门禁通过，
 才将对应组合设为活动配置；否则按 BF16 eager、FP32 compiled、FP32 eager 的顺序降级。当前 Windows
 测试只证明工程与合同，不代表 Ubuntu CUDA/BF16/compile 的性能或质量已经通过。
+
+## 16. C 的十七组 posterior latent 分布诊断与 KL×2 对照（2026-10-04）
+
+当前 C 的单个 `kl` 标量是 global 256 维与 local `[16,128]` 全部元素的平均值，不能排除
+“一个 global 加十六个 local 中只有部分维度承担信息、其他维度接近标准正态”的情况。为补齐
+这一证据，Windows 新增只读入口 `cvae_sa.latent_distribution65`。它只把完整 State--Action
+window 送入 Posterior Encoder，不调用 Condition Encoder、不解码、不修改 checkpoint；报告
+`global`、`local_00`--`local_15` 十七组的 posterior mean/logvar/std、四次重参数 sample、
+每维 KL、mean variance、sample mean/std/分位数和相对 `N(0,1)` 的偏差。
+
+输出中的 `plots/latent_group_distributions.svg` 直接显示十七组样本分布，
+`plots/latent_group_kl.svg` 显示组平均 KL，`plots/global_dimension_kl.svg` 与
+`plots/local_dimension_kl.svg` 显示逐维 KL 热图；`data/latent_arrays.npz` 和
+`manifests/group_stats.json` 保留可复核数值。重建数据集只能使用显式 recovered 开关，报告
+必须保留 `exact_identity_verified=false`，不能把该诊断写成训练质量通过。
+
+KL 放大二倍的受控 C 对照只改变 `kl_beta: 0.001 -> 0.002`，不改变模型、Mask、初始化、
+optimizer、学习率、warmup 或部署合同。使用现有
+`CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA=0.002` 覆盖入口，产生新的随机初始化 run；不能从旧 C
+恢复 optimizer 或 checkpoint。该 run 仍需独立检查 posterior mean、posterior sample、
+standard-normal 三条评测路径，尤其比较十七组 latent 统计和 standard-normal masked RMSE。

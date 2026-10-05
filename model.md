@@ -433,3 +433,15 @@ graph break/recompile 字段写入 checkpoint 和 summary。
 HDF5 路径并记录原因。RecoverableSampler 的 permutation、cursor、epoch、exposure 和 RNG 合同
 保持不变。BF16/compile/cache 的 Ubuntu smoke、数值 parity 和稳态吞吐仍需新 run 验证，不能把
 静态实现检查当作速度或模型质量结论。
+
+## 9. C latent 分组诊断（2026-10-04）
+
+C 的 KL 定义仍是 `0.5 * (global_kl + local_kl)`，其中 global 是 256 维均值、local 是
+`[16,128]` 均值。为避免这个双重平均掩盖局部坍缩，`cvae_sa.latent_distribution65` 对完整
+State--Action window 只调用 Posterior Encoder，按一个 `global` 和十六个 `local` chunk
+分别保存逐维 KL、posterior mean、sigma 及固定 seed 的 posterior samples。该 posterior
+reference 是完整序列的统计估计，不是可观测物理真值，也不改变 C 的 standard-normal 部署合同。
+
+诊断必须同时查看 group-level 分布图、global/local 逐维 KL 热图、posterior-mean 跨窗口方差
+以及 sample 的均值/标准差相对 `N(0,1)` 的差距；单独一个很小的平均 KL 不足以证明十七组均已
+校准。重建数据集回放必须在 manifest 中标记 recovered identity，不能与严格原始数据复现混同。
