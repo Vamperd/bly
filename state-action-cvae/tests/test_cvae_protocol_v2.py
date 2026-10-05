@@ -18,8 +18,8 @@ from test_posterior_hierarchical_standard_cvae import batch, config
 from cvae_sa.cvae_protocol import (Fixtures, RecoverableSampler, capture_rng, restore_rng, lr_factor,
                                    materialize_normalized_window_cache, quality_warnings)
 from cvae_sa.cvae_diagnostics import Diagnostics, evaluate, ensemble_scores, epsilon_for, route_output, stats, ablations
-from cvae_sa.cvae_training import (_autocast_context, _compile_callable, run_experiment, append,
-                                   load_rows)
+from cvae_sa.cvae_training import (_autocast_context, _compile_callable, _mark_cudagraph_step_begin,
+                                    run_experiment, append, load_rows)
 from cvae_sa.models import build_model
 from cvae_sa.posterior_t64_protocol import make_physical_masks
 
@@ -100,6 +100,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(info["succeeded"])
         self.assertIn("cuda", info["fallback_reason"])
         self.assertEqual(int(compiled(torch.tensor(2))), 3)
+
+    def test_cudagraph_marker_is_optional_and_safe(self):
+        _mark_cudagraph_step_begin()
 
     def test_bf16_preflight_rejects_cpu_without_silent_fallback(self):
         with self.assertRaisesRegex(RuntimeError, "CUDA"):

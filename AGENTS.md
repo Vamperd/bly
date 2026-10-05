@@ -1,6 +1,6 @@
 # SONIC Physics State–Action 研究：当前代理交接说明
 
-最后更新：2026-10-04。当前活动阶段为 C 的十七组 posterior latent 分布诊断与 KL×2 受控对照。
+最后更新：2026-10-05。当前活动阶段为 C 的十七组 posterior latent 分布诊断与 KL×2 受控对照。
 
 当前活动模型合同维护在 [model.md](model.md)，整体实验路线与概要结果维护在
 [plan.md](plan.md)，必要反常结果、根因证据与诊断局限维护在 [process.md](process.md)。
@@ -30,6 +30,8 @@ B-dynamic显著改善held-out，同时fixed bank回退并触发质量告警。C�
 跨窗口均值方差及相对标准正态的图表。Ubuntu实际诊断尚待执行；KL×2只允许从随机初始化建立
 新C run，通过现有`--kl-beta 0.002`入口进行单变量对照，不得从旧C恢复optimizer或checkpoint。
 恢复/延长/初始化、mask身份、分域尾部与C部署评测以 `model.md` 的v2合同为唯一活动定义。
+2026-10-05 的 KL×2 smoke 在 compiled C forward 的 CUDA Graph 输出复用处失败；Windows 已加入
+`cudagraph_mark_step_begin()` 边界，旧失败 run 仅作工程证据，修复后必须新建 run 重试。
 
 2026-09-23 小规模B已完成并审核；新增独立 `python -m cvae_sa.replay65`
 prepare/simulate/render/report 回放入口（合同见model.md第7节）。当前仅Windows工程核验，

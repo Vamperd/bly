@@ -458,3 +458,25 @@ KL×2 运行是单变量对照：仍从随机初始化开始，保留原 beta wa
 机制；若 posterior 重建变差但部署路径不改善，应停止继续放大 KL，转查 posterior-to-prior
 校准、condition 融合和 decoder 对 latent 的利用。此 run 的 `execution_pass` 与 `quality_pass`
 必须分开记录。
+
+## 15. KL×2 smoke 的 CUDA Graph 输出覆盖失败（2026-10-05）
+
+失败 run：`/home/helloworld/bly/runs/cvae_kl2_smoke_ReqoL9gV`。该 run 已完成数据加载、BF16
+能力检查、标准化 cache 建立和 checkpoint 写入，但在 `optimizer_step=0` 的第一次 compiled C
+forward 失败。`failure.json` 的根因是 PyTorch 2.7 CUDA Graph 保留的输出 tensor 被后续 compiled
+调用覆盖：
+
+```text
+accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run
+```
+
+因此这不是 BF16 不支持、磁盘不足或 KL beta 配置错误；summary 显示
+`cuda_bf16_supported=true`、`compile_requested=true`、`cache_enabled=true`，但训练没有完成第一个
+optimizer update。此前 Triton autotune 的 shared-memory `Ignoring this choice` 只是候选 kernel
+被跳过，不能单独视为根因。
+
+Windows 已在 `cvae_training.py::_compile_callable` 的 compiled wrapper 前调用
+`torch.compiler.cudagraph_mark_step_begin()`，并在旧版 torch 没有该 API 时安全跳过。这个边界
+同时覆盖 C 的 train callable 和四条 evaluation callable；eager 路径不改变。旧失败目录保留为
+工程失败证据，不补 marker、不复用；修复后必须建立新的 smoke run，并检查 `failure.json`、
+`progress.json`、`compile_info` 和最终 execution marker。

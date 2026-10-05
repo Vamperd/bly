@@ -102,6 +102,22 @@ def _update_compile_counts(info, before):
         info[key] += max(0, after[key] - before[key])
 
 
+def _mark_cudagraph_step_begin():
+    """Start a fresh CUDA-Graph invocation when the compiled route supports it.
+
+    PyTorch 2.7 can retain output buffers between compiled calls.  Training and
+    evaluation deliberately invoke the same compiled callable repeatedly, so
+    the explicit boundary prevents a later invocation from overwriting a
+    tensor still referenced by the previous graph.  Older torch versions do
+    not expose this helper; in that case the compiled route keeps its previous
+    behavior.
+    """
+    compiler = getattr(torch, "compiler", None)
+    marker = getattr(compiler, "cudagraph_mark_step_begin", None)
+    if callable(marker):
+        marker()
+
+
 def _compile_callable(fn, *, enabled, device, mode, dynamic, fullgraph, label):
     info = {
         "label": label, "requested": bool(enabled), "succeeded": False,
@@ -120,8 +136,13 @@ def _compile_callable(fn, *, enabled, device, mode, dynamic, fullgraph, label):
         return fn, fn, info
     try:
         compiled = torch.compile(fn, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
+
+        def compiled_entry(*args, **kwargs):
+            _mark_cudagraph_step_begin()
+            return compiled(*args, **kwargs)
+
         info["succeeded"] = True
-        return compiled, fn, info
+        return compiled_entry, fn, info
     except Exception as error:
         info["fallback_reason"] = f"compile_creation:{type(error).__name__}: {error}"
         return fn, fn, info

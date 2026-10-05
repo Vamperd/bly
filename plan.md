@@ -568,3 +568,11 @@ optimizer、学习率、warmup 或部署合同。使用现有
 `CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA=0.002` 覆盖入口，产生新的随机初始化 run；不能从旧 C
 恢复 optimizer 或 checkpoint。该 run 仍需独立检查 posterior mean、posterior sample、
 standard-normal 三条评测路径，尤其比较十七组 latent 统计和 standard-normal masked RMSE。
+
+## 17. KL×2 smoke 的 compiled CUDA Graph 修复（2026-10-05）
+
+`cvae_kl2_smoke_ReqoL9gV` 在第 0 步失败，原因是 PyTorch 2.7 compiled C forward 的 CUDA Graph
+输出 buffer 被后续调用覆盖。BF16、cache 和磁盘检查均已通过；失败发生在训练 update 之前，不能
+写成 KL×2 的质量结果。Windows 已为每次 compiled train/eval callable 调用增加
+`torch.compiler.cudagraph_mark_step_begin()` 边界。修复同步后必须使用新目录重跑 smoke，再决定
+是否启动 360k 正式 KL×2 训练。
