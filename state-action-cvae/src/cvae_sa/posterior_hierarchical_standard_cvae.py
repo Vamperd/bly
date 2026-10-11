@@ -541,6 +541,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mask-mode", choices=("fixed", "dynamic"), default="fixed")
     parser.add_argument("--eval-samples", type=int, default=8)
     parser.add_argument("--beta-warmup-steps", type=int)
+    parser.add_argument("--skip-initial-eval", action="store_true",
+                        help="Do not run the step-0 evaluation before optimizer updates")
     parser.add_argument("--smoke", action="store_true")
     return parser.parse_args(argv)
 
@@ -573,6 +575,7 @@ def main(argv: list[str] | None = None) -> int:
         mask_mode=args.mask_mode,
         eval_samples=args.eval_samples,
         beta_warmup_steps=args.beta_warmup_steps,
+        skip_initial_eval=args.skip_initial_eval,
     )
     if summary.get("interrupted"):
         print("Training interrupted at a safe boundary; last.pt saved", flush=True)

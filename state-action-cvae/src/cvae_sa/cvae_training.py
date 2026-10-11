@@ -27,6 +27,9 @@ from .posterior_t64_protocol import make_physical_masks, _svg
 from .util import atomic_write_json, atomic_write_text, file_sha256, seed_everything
 
 
+DEFAULT_COMPILE_MODE = "max-autotune-no-cudagraphs"
+
+
 def append(path, row):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -71,9 +74,10 @@ def _runtime_contract(config, device, model, optimizer, precision):
         "cuda_bf16_supported": bf16_supported,
         "tf32_enabled": bool(torch.backends.cuda.matmul.allow_tf32) if torch.cuda.is_available() else False,
         "compile_requested": bool(compile_cfg.get("enabled", False)),
-        "compile_mode": compile_cfg.get("mode", "max-autotune"),
+        "compile_mode": compile_cfg.get("mode", DEFAULT_COMPILE_MODE),
         "compile_dynamic": bool(compile_cfg.get("dynamic", False)),
         "compile_fullgraph": bool(compile_cfg.get("fullgraph", False)),
+        "compile_output_ownership": "clone_before_eager_readback_v1",
         "cache_mode": data_cfg.get("cache_mode", "none"),
         "cache_max_bytes": int(data_cfg.get("cache_max_bytes", 0)),
         "pin_memory": bool(data_cfg.get("pin_memory", False)),
@@ -102,6 +106,27 @@ def _update_compile_counts(info, before):
         info[key] += max(0, after[key] - before[key])
 
 
+def _dynamo_recompile_limit():
+    try:
+        from torch._dynamo import config
+        return int(getattr(config, "recompile_limit", 8))
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return 8
+
+
+def _compile_limit_reached(info):
+    return bool(info.get("succeeded") and info.get("recompile_count", 0) >= info.get("recompile_limit", 8))
+
+
+def _mark_compile_failed(info, reason, phase=None):
+    info["succeeded"] = False
+    info["compile_succeeded"] = False
+    info["fallback_reason"] = reason
+    info["compile_fallback_reason"] = reason
+    if phase is not None:
+        info["compile_fallback_phase"] = phase
+
+
 def _mark_cudagraph_step_begin():
     """Start a fresh CUDA-Graph invocation when the compiled route supports it.
 
@@ -121,18 +146,22 @@ def _mark_cudagraph_step_begin():
 def _compile_callable(fn, *, enabled, device, mode, dynamic, fullgraph, label):
     info = {
         "label": label, "requested": bool(enabled), "succeeded": False,
+        "compile_requested": bool(enabled), "compile_succeeded": False,
         "fallback_reason": None, "graph_break_count": 0, "recompile_count": 0,
         "compiled_graph_count": 0,
+        "recompile_limit": _dynamo_recompile_limit(),
+        "compile_fallback_reason": None, "compile_fallback_phase": None,
+        "output_clone_enabled": False,
         "cold_start_seconds": None,
     }
     if not enabled:
-        info["fallback_reason"] = "disabled"
+        _mark_compile_failed(info, "disabled", "configuration")
         return fn, fn, info
     if device.type != "cuda":
-        info["fallback_reason"] = "compile_requires_cuda_for_this_runtime"
+        _mark_compile_failed(info, "compile_requires_cuda_for_this_runtime", "preflight")
         return fn, fn, info
     if not hasattr(torch, "compile"):
-        info["fallback_reason"] = "torch.compile_unavailable"
+        _mark_compile_failed(info, "torch.compile_unavailable", "preflight")
         return fn, fn, info
     try:
         compiled = torch.compile(fn, mode=mode, dynamic=dynamic, fullgraph=fullgraph)
@@ -142,58 +171,86 @@ def _compile_callable(fn, *, enabled, device, mode, dynamic, fullgraph, label):
             return compiled(*args, **kwargs)
 
         info["succeeded"] = True
+        info["compile_succeeded"] = True
         return compiled_entry, fn, info
     except Exception as error:
-        info["fallback_reason"] = f"compile_creation:{type(error).__name__}: {error}"
+        _mark_compile_failed(info, f"compile_creation:{type(error).__name__}: {error}", "creation")
         return fn, fn, info
+
+
+def _precision_call(fn, device, precision):
+    """Apply autocast outside a compiled core callable.
+
+    Constructing a context manager inside a function passed to Dynamo can make
+    the graph depend on a short-lived stack object.  The returned wrapper is
+    intentionally eager and owns the context lifetime around the compiled
+    function invocation.
+    """
+    precision = str(precision).upper()
+    if precision == "FP32":
+        return fn
+    if precision != "BF16":
+        raise ValueError(f"unsupported training precision: {precision}")
+    if device.type != "cuda":
+        raise RuntimeError("BF16 mixed precision requires a CUDA device")
+    if not torch.cuda.is_bf16_supported():
+        raise RuntimeError("requested BF16 but torch.cuda.is_bf16_supported() is false")
+
+    def wrapped(*args, **kwargs):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            return fn(*args, **kwargs)
+
+    return wrapped
 
 
 def _make_train_callable(model, code, device, precision, compile_cfg):
     from .posterior_hierarchical_standard_cvae import hierarchical_kl, weighted_reconstruction_loss
 
-    def eager(batch, state_mask, action_mask, beta_tensor):
-        with _autocast_context(device, precision):
-            if code == "A":
-                output = model.forward_stage_a(batch)
+    def core(batch, state_mask, action_mask, beta_tensor):
+        if code == "A":
+            output = model.forward_stage_a(batch)
+        else:
+            if code == "B":
+                output = model.forward_stage_b(batch, state_mask, action_mask)
             else:
-                if code == "B":
-                    output = model.forward_stage_b(batch, state_mask, action_mask)
-                else:
-                    # C uses a deterministic epsilon supplied by the caller
-                    # only for evaluation; training samples internally.
-                    output = model(batch, state_mask, action_mask, stage="C")
-            valid_state = batch["valid_state"][..., None].expand_as(batch["physical_state"])
-            valid_action = batch["valid_action"][..., None].expand_as(batch["action"])
-            reconstruction = weighted_reconstruction_loss(output, batch, valid_state, valid_action,
-                                                           masked_weight=0., full_weight=1.)
-            if code == "C":
-                kl = hierarchical_kl(output.posterior)
-            else:
-                zero = reconstruction["total"] * 0.0
-                kl = {key: zero for key in ("global", "local", "total")}
-            loss = reconstruction["total"].float() + beta_tensor.float() * kl["total"].float()
+                # C uses a deterministic epsilon supplied by the caller only
+                # for evaluation; training samples internally.
+                output = model(batch, state_mask, action_mask, stage="C")
+        valid_state = batch["valid_state"][..., None].expand_as(batch["physical_state"])
+        valid_action = batch["valid_action"][..., None].expand_as(batch["action"])
+        reconstruction = weighted_reconstruction_loss(output, batch, valid_state, valid_action,
+                                                       masked_weight=0., full_weight=1.)
+        if code == "C":
+            kl = hierarchical_kl(output.posterior)
+        else:
+            zero = reconstruction["total"] * 0.0
+            kl = {key: zero for key in ("global", "local", "total")}
+        loss = reconstruction["total"].float() + beta_tensor.float() * kl["total"].float()
         return (loss, reconstruction["total"], reconstruction["state"], reconstruction["action"],
                 reconstruction["contact"], kl["global"], kl["local"], kl["total"])
 
-    compiled, eager_fn, info = _compile_callable(
-        eager, enabled=bool(compile_cfg.get("enabled", False)), device=device,
-        mode=compile_cfg.get("mode", "max-autotune"),
+    compiled_core, eager_core, info = _compile_callable(
+        core, enabled=bool(compile_cfg.get("enabled", False)), device=device,
+        mode=compile_cfg.get("mode", DEFAULT_COMPILE_MODE),
         dynamic=bool(compile_cfg.get("dynamic", False)),
         fullgraph=bool(compile_cfg.get("fullgraph", False)), label=f"train_{code}")
-    return compiled, eager_fn, info
+    return (_precision_call(compiled_core, device, precision),
+            _precision_call(eager_core, device, precision), info)
 
 
 def _make_eval_route(model, route, device, precision, compile_cfg):
-    def eager(batch, state_mask, action_mask, global_epsilon, local_epsilon):
-        with _autocast_context(device, precision):
-            return route_output(model, batch, state_mask, action_mask, route,
-                                (global_epsilon, local_epsilon))
+    def core(batch, state_mask, action_mask, global_epsilon, local_epsilon):
+        return route_output(model, batch, state_mask, action_mask, route,
+                            (global_epsilon, local_epsilon))
 
-    return _compile_callable(
-        eager, enabled=bool(compile_cfg.get("enabled", False)), device=device,
-        mode=compile_cfg.get("mode", "max-autotune"),
+    compiled_core, eager_core, info = _compile_callable(
+        core, enabled=bool(compile_cfg.get("enabled", False)), device=device,
+        mode=compile_cfg.get("mode", DEFAULT_COMPILE_MODE),
         dynamic=bool(compile_cfg.get("dynamic", False)),
         fullgraph=bool(compile_cfg.get("fullgraph", False)), label=f"eval_{route}")
+    info["output_clone_enabled"] = True
+    return (_precision_call(compiled_core, device, precision),
+            _precision_call(eager_core, device, precision), info)
 
 
 def load_rows(path):
@@ -400,7 +457,7 @@ def run_experiment(dataset_run, output_run, source_run, config, *, stage, init_r
     lr_schedule=None, warmup_steps_override=None, min_lr_ratio_override=None, validation_interval_override=None,
     checkpoint_interval_override=None, log_interval_override=None, resume_run=None, mask_mode="fixed",
     init_checkpoint=None, continue_checkpoint=None, additional_steps=None, allow_legacy_identity=False,
-    eval_samples=8, beta_warmup_steps=None):
+    eval_samples=8, beta_warmup_steps=None, skip_initial_eval=False):
     from .posterior_hierarchical_standard_cvae import _stage_key, hierarchical_kl, load_checkpoint, weighted_reconstruction_loss
     code, stage_name = _stage_key(stage)
     if source_run is not None:
@@ -448,7 +505,8 @@ def run_experiment(dataset_run, output_run, source_run, config, *, stage, init_r
             validation_interval_override=validation_interval_override, checkpoint_interval_override=checkpoint_interval_override,
             log_interval_override=log_interval_override, resume_run=resume_run, mask_mode=mask_mode,
             init_checkpoint=init_checkpoint, continue_checkpoint=continue_checkpoint, additional_steps=additional_steps,
-            allow_legacy_identity=allow_legacy_identity, eval_samples=eval_samples, beta_warmup_steps=beta_warmup_steps)
+            allow_legacy_identity=allow_legacy_identity, eval_samples=eval_samples, beta_warmup_steps=beta_warmup_steps,
+            skip_initial_eval=skip_initial_eval)
         except BaseException as error:
             if not resume_run:
                 progress_path = run / "manifests/progress.json"
@@ -525,11 +583,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     contract = {"protocol_version": PROTOCOL, "stage": code, "mask_mode": options["mask_mode"], "max_steps": maximum,
         "micro_batch": batch_size, "learning_rate": rate, "warmup_steps": warmup, "min_lr_ratio": floor,
         "lr_schedule": schedule, **intervals, "initialization_seed": seed, "training_mask_seed": mask_seed,
-        "eval_samples": options["eval_samples"], "kl_beta": beta if code == "C" else 0., "beta_warmup_steps": beta_warmup,
+        "eval_samples": options["eval_samples"], "skip_initial_eval": bool(options["skip_initial_eval"]),
+        "kl_beta": beta if code == "C" else 0., "beta_warmup_steps": beta_warmup,
         "objective": "full_state_continuous_action_contact_equal_mean_v1", "selection": selection,
         "fixture_count": len(fixtures), "selected_window_count": len(windows), "quality_rule_version": "warnings-v1",
         "runtime_precision": precision, "compile": {"enabled": bool(compile_cfg.get("enabled", False)),
-            "mode": compile_cfg.get("mode", "max-autotune"), "dynamic": bool(compile_cfg.get("dynamic", False)),
+            "mode": compile_cfg.get("mode", DEFAULT_COMPILE_MODE), "dynamic": bool(compile_cfg.get("dynamic", False)),
             "fullgraph": bool(compile_cfg.get("fullgraph", False))},
         "cache": {"mode": cache_mode, "max_bytes": int(data_cfg.get("cache_max_bytes", 0)),
             "enabled": bool(cache_info.get("enabled", False))}}
@@ -546,6 +605,13 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     sampler = RecoverableSampler(len(fixtures), batch_size, seed)
     effective_config = json.loads(json.dumps(config))
     effective_config["model"] = model.config
+    effective_config["compile"] = {
+        **config.get("compile", {}),
+        "enabled": bool(compile_cfg.get("enabled", False)),
+        "mode": compile_cfg.get("mode", DEFAULT_COMPILE_MODE),
+        "dynamic": bool(compile_cfg.get("dynamic", False)),
+        "fullgraph": bool(compile_cfg.get("fullgraph", False)),
+    }
     effective_config["data"] = {**config.get("data", {}), "window_transitions": 64, "max_windows": len(indices), "num_workers": 0,
                                   "cache_info": cache_info}
     effective_config["training"] = {**cfg, **contract, stage_name: {**cfg.get(stage_name, {}), "max_optimizer_steps": maximum}}
@@ -686,7 +752,9 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "source_hashes": current_provenance["source_hashes"],
             "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
             "optimizer_step": step, "source_step": source_step, "cumulative_step": source_step + step, "stage": code,
-            "training_contract": contract, "runtime_contract": runtime_contract, "cache_info": cache_info,
+            "training_contract": contract,
+            "runtime_contract": {**runtime_contract, "compile_observations": compile_infos},
+            "cache_info": cache_info,
             "compile_info": compile_infos, "dataset_identity": identity, "sampler": sampler.state_dict(), "rng_state": capture_rng(),
             "source_checkpoint": source, "best_metrics": best, "best_optimizer_step": best_step,
             "best_heldout_metrics": best_heldout, "best_heldout_step": best_heldout_step,
@@ -890,7 +958,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             restore_rng(checkpoint["rng_state"])
         if start == 0 and not resumed:
             save()
-            full_eval()
+            if not options["skip_initial_eval"]:
+                full_eval()
         elif best is None or not eval_rows or (start == maximum and eval_rows[-1]["optimizer_step"] != maximum):
             full_eval()
         progress()
@@ -946,12 +1015,22 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 else:
                     result = train_callable(batch, state_mask, action_mask, beta_tensor)
                 _update_compile_counts(train_compile_info, dynamo_before)
+                if _compile_limit_reached(train_compile_info):
+                    _mark_compile_failed(train_compile_info, "recompile_limit_reached", "training")
+                    install_route_hooks()
+                    train_callable = eager_train_callable
+                    # The current result was produced by the compiled route;
+                    # account for its static encoder path before switching.
+                    encoder_calls.update(expected_calls)
             except Exception as error:
                 _update_compile_counts(train_compile_info, dynamo_before)
                 if not train_compile_info["succeeded"]:
                     raise
-                train_compile_info["succeeded"] = False
-                train_compile_info["fallback_reason"] = f"compile_runtime:{type(error).__name__}: {error}"
+                _mark_compile_failed(
+                    train_compile_info,
+                    f"compile_runtime:{type(error).__name__}: {error}",
+                    "training",
+                )
                 install_route_hooks()
                 train_callable = eager_train_callable
                 encoder_calls.update(posterior=0, condition=0)
@@ -962,8 +1041,11 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 encoder_calls.update(expected_calls)
             if encoder_calls != expected_calls:
                 if train_compile_info["succeeded"]:
-                    train_compile_info["succeeded"] = False
-                    train_compile_info["fallback_reason"] = f"route_hook_mismatch:{encoder_calls}!={expected_calls}"
+                    _mark_compile_failed(
+                        train_compile_info,
+                        f"route_hook_mismatch:{encoder_calls}!={expected_calls}",
+                        "route_isolation",
+                    )
                     install_route_hooks()
                     train_callable = eager_train_callable
                     encoder_calls.update(posterior=0, condition=0)
@@ -1043,7 +1125,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "architecture_version": model.ARCHITECTURE_VERSION, "stage": code, "execution_pass": True, "quality_pass": None,
             "smoke": options["smoke"], "completed_optimizer_steps": last_step, "cumulative_step": source_step + last_step,
             "source_checkpoint": source, "training_contract": contract, "dataset_identity": identity,
-            "runtime_contract": runtime_contract, "cache_info": cache_info, "compile_info": compile_infos,
+            "runtime_contract": {**runtime_contract, "compile_observations": compile_infos},
+            "cache_info": cache_info, "compile_info": compile_infos,
             "data_transfer": {"pin_memory": pin_memory, "non_blocking": non_blocking_transfer},
             "model_contract": {**model.config, "actual_parameter_count": sum(p.numel() for p in model.parameters())},
             "stage_parameter_counts": counts, "best_step": best_step, "best_metrics": best,
@@ -1061,9 +1144,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         return summary
     except BaseException as error:
         # Never overwrite last.pt after an incomplete/failed optimizer update.
-        progress("failed", error=f"{type(error).__name__}: {error}", safe_checkpoint_preserved=True)
+        observed_runtime_contract = {**runtime_contract, "compile_observations": compile_infos}
+        progress("failed", error=f"{type(error).__name__}: {error}", safe_checkpoint_preserved=True,
+                 compile_info=compile_infos, runtime_contract=observed_runtime_contract)
         atomic_write_json(run / "manifests/failure.json", {"error": repr(error), "last_complete_step": last_step,
-            "update_boundary_complete": committed, "durable_checkpoint": str(run / "checkpoints/last.pt")})
+            "update_boundary_complete": committed, "durable_checkpoint": str(run / "checkpoints/last.pt"),
+            "compile_info": compile_infos, "runtime_contract": observed_runtime_contract})
         raise
     finally:
         for hook in route_hooks:
