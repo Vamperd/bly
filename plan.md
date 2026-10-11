@@ -576,3 +576,11 @@ standard-normal 三条评测路径，尤其比较十七组 latent 统计和 stan
 写成 KL×2 的质量结果。Windows 已为每次 compiled train/eval callable 调用增加
 `torch.compiler.cudagraph_mark_step_begin()` 边界。修复同步后必须使用新目录重跑 smoke，再决定
 是否启动 360k 正式 KL×2 训练。
+
+同步提交 `18306c1` 后的新 run
+`/home/helloworld/bly/runs/cvae_kl2_smoke_fixed_YDFjPMkr` 仍在 step 0 重现同一错误，说明该 marker
+对当前 `max-autotune` 调用结构不足。关闭 compile、cache 和 pinned transfer 的新 smoke
+`/home/helloworld/bly/runs/cvae_kl2_smoke_eager_poHm7ke5` 已完成 2 steps；这只证明 KL×2 的工程
+执行路径可运行，不代表 standard-normal 部署质量改善。正式实验可先使用 eager 配置从随机初始化
+运行 360k steps；若要保留编译加速，必须先用 `max-autotune-no-cudagraphs` 完成新的 2-step smoke，
+再用同一配置建立正式 run，禁止从任何失败目录 resume。

@@ -79,10 +79,15 @@ def evaluate_checkpoint(args):
             compiled_routes[route] = compiled
             compile_infos.append(info)
         reports = {}
+        held_out = bool(getattr(args, "held_out", False))
+        reference_mask_seed = int(getattr(args, "reference_mask_seed", args.mask_seed))
+        partition = "heldout" if held_out else "fixed"
         for route in routes:
             print(f"RUN_DIR={run} route={route} checkpoint={source_path}", flush=True)
+            report_dir = run / "evaluations" / route if not held_out else run / "evaluations" / partition / route
             reports[route], _ = evaluate(model, loader, device, normalization, route=route, seed=args.mask_seed,
-                samples=args.samples, output_dir=run / "evaluations" / route, export_all=args.export_all,
+                held_out=held_out, reference_mask_seed=reference_mask_seed,
+                samples=args.samples, output_dir=report_dir, export_all=args.export_all,
                 heartbeat=lambda n: print(f"[{route}] evaluation batch {n}/{len(loader)}", flush=True) if n % 10 == 0 else None,
                 route_callable=compiled_routes[route], non_blocking=non_blocking,
                 precision=precision, compile_info=compile_infos[routes.index(route)])
@@ -91,6 +96,8 @@ def evaluate_checkpoint(args):
             "historical_reassessment_not_original_fixture_replay": checkpoint.get("format_version") != CHECKPOINT and args.route != "A",
             "dataset_identity": identity, "reports": reports, "runtime_contract": runtime_contract,
             "cache_info": cache_info, "compile_info": compile_infos,
+            "mask_partition": partition, "mask_seed": args.mask_seed,
+            "reference_mask_seed": reference_mask_seed if held_out else None,
             "data_transfer": {"pin_memory": pin_memory, "non_blocking": non_blocking},
             "unique_next_step": "REVIEW_TAIL_COORDINATES_AND_TRACES"}
         atomic_write_json(run / "manifests/diagnostic_summary.json", summary)
@@ -175,6 +182,8 @@ def main(argv=None):
     ev.add_argument("--mask-seed", type=int, default=20260920)
     ev.add_argument("--samples", type=int, default=8)
     ev.add_argument("--export-all", action="store_true")
+    ev.add_argument("--held-out", action="store_true", help="evaluate the held-out dynamic-mask bank")
+    ev.add_argument("--reference-mask-seed", type=int, default=20260920)
     mon = sub.add_parser("monitor")
     mon.add_argument("--run", type=Path, required=True)
     mon.add_argument("--interval", type=float, default=10.)

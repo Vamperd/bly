@@ -480,3 +480,15 @@ Windows 已在 `cvae_training.py::_compile_callable` 的 compiled wrapper 前调
 同时覆盖 C 的 train callable 和四条 evaluation callable；eager 路径不改变。旧失败目录保留为
 工程失败证据，不补 marker、不复用；修复后必须建立新的 smoke run，并检查 `failure.json`、
 `progress.json`、`compile_info` 和最终 execution marker。
+
+随后在同步提交 `18306c1` 的 Ubuntu 上建立新 run
+`/home/helloworld/bly/runs/cvae_kl2_smoke_fixed_YDFjPMkr`，确认 marker API 存在且源码已同步，
+但 compiled C forward 仍在 optimizer step 0 抛出同一 CUDAGraph 覆盖错误。因此 marker 不能作为
+当前 `max-autotune` 路径的充分修复；它只标记迭代边界，不能阻止该路径在外部仍持有输出和梯度时
+复用 graph buffer。将 compile 关闭、同时关闭 cache/pin-memory/non-blocking 的新 smoke
+`/home/helloworld/bly/runs/cvae_kl2_smoke_eager_poHm7ke5` 已成功完成 2 steps，证明数据、模型、
+BF16 和 `kl_beta=0.002` 训练逻辑均可运行，但不构成质量结论。
+
+正式 KL×2 训练的即时稳定方案是沿用 eager 配置，从全新 run 随机初始化训练 360k steps。若需
+保留 TorchInductor 加速，应先把 compile mode 改为 `max-autotune-no-cudagraphs`，用 2-step
+新 smoke 验证后再启动正式 run；不得继续使用 `max-autotune`，也不得从上述失败目录恢复。

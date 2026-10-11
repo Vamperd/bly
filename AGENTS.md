@@ -32,6 +32,10 @@ B-dynamic显著改善held-out，同时fixed bank回退并触发质量告警。C�
 恢复/延长/初始化、mask身份、分域尾部与C部署评测以 `model.md` 的v2合同为唯一活动定义。
 2026-10-05 的 KL×2 smoke 在 compiled C forward 的 CUDA Graph 输出复用处失败；Windows 已加入
 `cudagraph_mark_step_begin()` 边界，旧失败 run 仅作工程证据，修复后必须新建 run 重试。
+同步提交后新 run 仍重现该错误；已确认 marker 不能修复当前 `max-autotune` 外部持有输出的调用
+结构。关闭 compile/cache 的 KL×2 eager smoke 已通过 2 steps，正式 KL×2 可从全新 run 使用 eager
+配置启动。任何编译加速方案必须先改为 `max-autotune-no-cudagraphs` 并通过新的 smoke，不能从
+失败 run 恢复。
 
 2026-09-23 小规模B已完成并审核；新增独立 `python -m cvae_sa.replay65`
 prepare/simulate/render/report 回放入口（合同见model.md第7节）。当前仅Windows工程核验，
