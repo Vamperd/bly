@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import html
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ from torch.utils.data import default_collate
 
 from .action_masks import relative_to_raw_action
 from .cvae_diagnostics import epsilon_for, read_normalization, route_output, stats
-from .cvae_protocol import CHECKPOINT, Fixtures, digest, isolated_rng, run_lock
+from .cvae_protocol import CHECKPOINT, Fixtures, digest, isolated_rng, run_lock, sample_identity
 from .cvae_training import check_source_identity, data_identity, make_dataset, provenance, source_info
 from .models import HierarchicalStandardCVAETransformer, build_model
 from .posterior_direct_output import assert_output_isolated
@@ -30,14 +31,20 @@ from .posterior_hierarchical_standard_cvae import load_checkpoint
 from .posterior_h50_action_replay import _write_npz, _write_trajectory
 from .posterior_h50_action_replay_exact_init import (
     _first_threshold_crossings, _load_replay, _per_frame_errors,
-    _raw_from_processed, _trajectory_metrics, _write_error_svg,
+    _raw_from_processed, _trajectory_metrics, _trajectory_region, _write_error_svg,
     _write_exact_initialization, rotate_body_to_world,
 )
 from .posterior_t64_protocol import PHYSICAL_MASK_NAMES, make_physical_masks
 from .state_mask_eval import reconstruct_root_trajectory
 from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
 
-VERSION = "65-token-replay-v1"
+VERSION = "65-token-replay-v2"
+CHUNK = 64
+DEFAULT_HORIZON = 192
+# Closed-loop capture vs open-loop replay of the captured raw Actions.  Anything
+# above float32 noise means the simulator itself is not reproducible.
+DETERMINISM_LIMITS = {"joint_pos": 1e-4, "root_pos": 1e-4, "body_pos": 1e-4}
+DETERMINISM_FIELDS = ("joint_pos", "joint_vel", "root_pos", "root_quat", "body_pos", "raw_action")
 THRESHOLDS = {"joint_position_rmse_rad": .02, "root_position_rmse_m": .05,
               "root_orientation_max_deg": 5., "body_mpjpe_m": .05, "foot_contact_accuracy": .95}
 # These are deliberately relative to the same-window original Action baseline;
@@ -73,11 +80,14 @@ def raw_to_target(raw, scale, offset, clip, wrapper):
 def execution_actions(original_raw, original_canonical, predicted, mask, nominal, scale, offset,
                       clip=None, wrapper=None, *, full_prediction=False):
     """Preserve recorded raw bits outside the requested mask, including clipping aliases."""
+    shape = np.shape(original_raw)
+    if len(shape) != 2 or shape[1] != 29 or shape[0] < CHUNK or shape[0] % CHUNK:
+        raise ValueError(f"Action windows must be whole [64k,29] chunks, found {shape}")
     for name, value in (("raw", original_raw), ("truth", original_canonical), ("prediction", predicted)):
-        finite(name, value, (64, 29))
+        finite(name, value, shape)
     mask = np.asarray(mask, dtype=bool)
-    if mask.shape != (64, 29):
-        raise ValueError("Action mask must be [64,29]")
+    if mask.shape != shape:
+        raise ValueError(f"Action mask must be {list(shape)}")
     baseline = raw_to_target(original_raw, scale, offset, clip, wrapper) - nominal
     if not np.allclose(baseline, original_canonical, atol=2e-6, rtol=1e-5):
         raise ValueError("recorded raw/processed/canonical Action mapping mismatch")
@@ -160,16 +170,43 @@ def physical_groups(truth, pred):
         ("gravity_unitless", 64, 67), ("height_m", 67, 68))}
 
 
-def load_source(dataset, index):
-    """Only one T64 slice plus its preceding Action; never copy an entire HDF5."""
+def resolve_window_start(requested, steps, horizon):
+    """Keep the requested chunk start unless the horizon would run past the episode."""
+    if horizon < CHUNK or horizon % CHUNK:
+        raise ValueError("horizon must be a positive multiple of 64 transitions")
+    requested, steps = int(requested), int(steps)
+    if requested + horizon <= steps:
+        return requested, None
+    start = (steps - horizon) // CHUNK * CHUNK
+    if start < 0:
+        raise ValueError(f"episode has {steps} transitions; horizon {horizon} does not fit")
+    return start, f"requested start {requested} + {horizon} exceeds episode steps {steps}; shifted to {start}"
+
+
+def chunk_indices(dataset, index, start, chunks):
+    """Dataset windows that tile [start, start+64*chunks) on the same episode."""
+    episode = dataset.refs[index].episode_index
+    lookup = {int(ref.fixed_start): i for i, ref in enumerate(dataset.refs)
+              if ref.episode_index == episode and ref.fixed_start is not None}
+    wanted = [int(start) + CHUNK * k for k in range(chunks)]
+    missing = [value for value in wanted if value not in lookup]
+    if missing:
+        raise ValueError(f"no fixed T64 dataset window at episode starts {missing}; stride must divide 64")
+    return [lookup[value] for value in wanted]
+
+
+def load_source(dataset, index, horizon=CHUNK, start=None):
+    """Only the requested slice plus its preceding Action; never copy an entire HDF5."""
     import h5py
     from .physics_schema import load_physics_schema, read_physics_states, resolve_parameter
     from .action_mask_eval import _resolve_motion_file
     ref = dataset.refs[index]
     record = dataset.episodes[ref.episode_index]
-    start = int(ref.fixed_start)
-    if start + 64 > int(record["steps"]):
-        raise ValueError("replay requires a complete 64-transition window")
+    start = int(ref.fixed_start if start is None else start)
+    horizon = int(horizon)
+    if start < 0 or horizon < 1 or start + horizon > int(record["steps"]):
+        raise ValueError(f"replay requires {horizon} complete transitions from frame {start}")
+    stop = start + horizon
     schema = load_physics_schema(Path(record["schema_path"]))
     sim = schema["simulation"]
     terrain = schema.get("terrain") or {}
@@ -196,24 +233,24 @@ def load_source(dataset, index):
         ep = stream[f"data/{record['episode']}"]
         context = stream[f"contexts/{record['context_id']}"]
         ctx = {name: np.asarray(context[name], dtype=np.float32) for name in CONTEXT_FIELDS}
-        states = read_physics_states(ep["states"], start, start + 65)
-        canonical = np.asarray(ep["actions/action_target_canonical"][start:start+64], dtype=np.float32)
-        processed = np.asarray(ep["actions/processed_joint_target_abs"][start:start+64], dtype=np.float32)
+        states = read_physics_states(ep["states"], start, stop + 1)
+        canonical = np.asarray(ep["actions/action_target_canonical"][start:stop], dtype=np.float32)
+        processed = np.asarray(ep["actions/processed_joint_target_abs"][start:stop], dtype=np.float32)
         if "raw_policy_action" in ep["actions"]:
-            raw = np.asarray(ep["actions/raw_policy_action"][start:start+64], dtype=np.float32)
+            raw = np.asarray(ep["actions/raw_policy_action"][start:stop], dtype=np.float32)
             raw_source = "recorded_raw_policy_action"
         else:
             raw, achieved, _ = relative_to_raw_action(canonical, nominal, scale, ctx["action_offset"], clip, wrapper)
             if not np.allclose(achieved, canonical, atol=2e-6, rtol=1e-5):
                 raise ValueError("recorded processed targets are not invertible")
             raw_source = "verified_inverse_mapping_raw_missing"
-        pos = np.asarray(ep["replay/root_pos_w"][start:start+65], dtype=np.float32)
-        quat = np.asarray(ep["replay/root_quat_w"][start:start+65], dtype=np.float32)
-        body = np.asarray(ep["replay/body_pos_w"][start:start+65], dtype=np.float32)
+        pos = np.asarray(ep["replay/root_pos_w"][start:stop+1], dtype=np.float32)
+        quat = np.asarray(ep["replay/root_quat_w"][start:stop+1], dtype=np.float32)
+        body = np.asarray(ep["replay/body_pos_w"][start:stop+1], dtype=np.float32)
         previous = np.asarray(ep["actions/processed_joint_target_abs"][start-1], dtype=np.float32) if start else np.asarray(ep["actions/initial_processed_target_canonical"], dtype=np.float32) + nominal
         previous_raw = np.asarray(ep["actions/raw_policy_action"][start-1], dtype=np.float32) if start and "raw_policy_action" in ep["actions"] else _raw_from_processed(previous, scale, ctx["action_offset"], clip, wrapper)
-    for name, value, shape in (("State", states, (65,70)), ("Action", canonical, (64,29)),
-                               ("raw", raw, (64,29)), ("root", pos, (65,3)), ("quaternion", quat, (65,4))):
+    for name, value, shape in (("State", states, (horizon+1,70)), ("Action", canonical, (horizon,29)),
+                               ("raw", raw, (horizon,29)), ("root", pos, (horizon+1,3)), ("quaternion", quat, (horizon+1,4))):
         finite(name, value, shape)
     if not np.allclose(processed, canonical + nominal, atol=2e-6, rtol=1e-5):
         raise ValueError("recorded absolute/canonical targets disagree")
@@ -239,7 +276,7 @@ def load_source(dataset, index):
                 "friction_combine_mode": terrain["friction_combine_mode"],
                 "restitution_combine_mode": terrain["restitution_combine_mode"],
             },
-            "window_start": start, "hidden_simulator_state": "not_recorded"})))
+            "window_start": start, "horizon_steps": horizon, "hidden_simulator_state": "not_recorded"})))
     motion, motion_info = _resolve_motion_file(record)
     return source, init, schema, {"record": record, "raw_source": raw_source, "motion_file": str(motion),
         "motion_file_sha256": motion_info["sha256"], "removed_world_xy": translation.tolist()}
@@ -252,54 +289,168 @@ def progress(run, status, **kwargs):
     print(json.dumps({"run": str(run), **row}, ensure_ascii=False), flush=True)
 
 
-def prepare_window(args, dataset, fixtures, model, index, run, norm):
-    row = next(r for r in fixtures.manifest() if r["window_index"] == index)
-    source, init, schema, source_meta = load_source(dataset, index)
+def stitch_states(parts):
+    """Chunk k>0 drops its first State: the shared boundary belongs to chunk k-1."""
+    return np.concatenate([parts[0], *[part[1:] for part in parts[1:]]], axis=0)
+
+
+def mapping_args(init):
+    return (init["nominal_default_joint_pos"], init["action_scale"], init["action_offset"],
+            init["action_clip"] if init["action_clip"].size else None,
+            None if np.isnan(init["wrapper_action_clip"]) else float(init["wrapper_action_clip"]))
+
+
+def load_capture(capture_run):
+    """Sealed closed-loop source: frame 0 .. window_start + horizon."""
+    capture_run = Path(capture_run).resolve()
+    complete = verify_capture(capture_run)
+    meta = load_json(capture_run / "manifests/capture.json")
+    path = capture_run / "data/source/000000.replay.npz"
+    full = _load_replay(path)
+    with np.load(path, allow_pickle=False) as archive:
+        processed = np.asarray(archive["processed_action"], dtype=np.float32)
+    with np.load(capture_run / "data/exact_initialization.npz", allow_pickle=False) as archive:
+        init = {name: archive[name].copy() for name in archive.files}
+    return {"run": capture_run, "meta": meta, "complete": complete, "full": full,
+            "canonical": processed - init["nominal_default_joint_pos"][None], "init": init}
+
+
+def verify_capture(capture_run):
+    capture_run = Path(capture_run).resolve()
+    path = capture_run / "manifests/capture_complete.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"capture is incomplete (no {path}); rerun replay65 capture")
+    complete = load_json(path)
+    for relative, expected in complete["hashes"].items():
+        target = (capture_run / relative).resolve()
+        if not target.is_relative_to(capture_run) or file_sha256(target) != expected:
+            raise ValueError(f"capture artifact changed: {relative}")
+    return complete
+
+
+def prepare_window(args, dataset, fixtures, model, index, run, norm, rows, capture=None):
+    row = next(r for r in rows if r["window_index"] == index)
+    by_index = {r["window_index"]: r for r in rows}
+    horizon = int(args.horizon_steps)
+    chunks = horizon // CHUNK
     for folder in ("manifests", "data", "plots", "videos", "logs", "markers"):
         (run / folder).mkdir(parents=True, exist_ok=True)
-    _write_npz(run / "data/recorded_hdf.replay.npz", **source)
-    _write_trajectory(run / "data/recorded_hdf.trajectory.pkl", joint_pos=source["joint_pos"],
-        root_pos=source["root_pos"], root_quat=source["root_quat"], fps=50.)
-    _, init_manifest = _write_exact_initialization(run / "data/exact_initialization.npz", init)
+    if capture is None:
+        steps = int(dataset.episodes[dataset.refs[index].episode_index]["steps"])
+        start, shift = resolve_window_start(row["window_start"], steps, horizon)
+        full, init, schema, source_meta = load_source(dataset, index, horizon, start)
+        offset, seed = 0, args.simulation_seed
+        truth_a, prefix = full["action_target_canonical"], np.zeros((0, 29), np.float32)
+        _write_npz(run / "data/source.replay.npz", **full)
+        _write_trajectory(run / "data/source.trajectory.pkl", joint_pos=full["joint_pos"],
+            root_pos=full["root_pos"], root_quat=full["root_quat"], fps=50.)
+        _, init_manifest = _write_exact_initialization(run / "data/exact_initialization.npz", init)
+        atomic_write_json(run / "manifests/source_schema.json", schema)
+        source_meta.update(mode="dataset", training_seen=True, deterministic=None)
+        before = None
+    else:
+        meta = capture["meta"]
+        if meta["window"]["stable_window_id"] != row["stable_window_id"]:
+            raise ValueError("capture run was recorded for a different dataset window")
+        if int(meta["horizon_steps"]) != horizon:
+            raise ValueError("--horizon-steps must equal the capture horizon")
+        start, shift = int(meta["window_start"]), meta.get("window_start_shift")
+        offset, seed, init = start, int(meta["simulation_seed"]), capture["init"]
+        full = capture["full"]
+        truth_a = capture["canonical"][start:start + horizon]
+        prefix = full["raw_action"][:start]
+        source_dir = capture["run"] / "data/source"
+        shutil.copy2(source_dir / "000000.replay.npz", run / "data/source.replay.npz")
+        shutil.copy2(source_dir / "000000.trajectory.pkl", run / "data/source.trajectory.pkl")
+        shutil.copy2(capture["run"] / "data/exact_initialization.npz", run / "data/exact_initialization.npz")
+        shutil.copy2(capture["run"] / "manifests/source_schema.json", run / "manifests/source_schema.json")
+        init_manifest = dict(meta["initialization"], path=str(run / "data/exact_initialization.npz"))
+        # The capture's original-Action determinism replay is the baseline; reuse it bit for bit.
+        shutil.copytree(capture["run"] / "simulations/baseline", run / "simulations/baseline",
+                        symlinks=True, ignore=shutil.ignore_patterns("checkpoints", "replay_motion"))
+        nominal = init["nominal_default_joint_pos"]
+        before = [capture["canonical"][start + CHUNK * k - 1] if start + CHUNK * k > 0
+                  else init["previous_processed_action"] - nominal for k in range(chunks)]
+        source_meta = {"mode": "recapture", "capture_run": str(capture["run"]),
+            "capture_complete_sha256": file_sha256(capture["run"] / "manifests/capture_complete.json"),
+            "motion_file": meta["motion_file"], "motion_file_sha256": meta["motion_file_sha256"],
+            "deterministic": bool(capture["complete"]["deterministic"]), "training_seen": False,
+            "raw_source": "closed_loop_capture"}
     atomic_write_json(run / "manifests/exact_initialization.json", init_manifest)
-    atomic_write_json(run / "manifests/source_schema.json", schema)
-    truth_s, truth_a = source["physical_state"], source["action_target_canonical"]
+    nominal = init["nominal_default_joint_pos"]
+    truth_s = full["physical_state"][offset:offset + horizon + 1]
+    finite("source State window", truth_s, (horizon + 1, 70))
+    finite("source Action window", truth_a, (horizon, 29))
+    s_mean, s_std = norm["state"]
+    a_mean, a_std = norm["action"]
+    chunk_ids = chunk_indices(dataset, index, start, chunks)
     entries = []
     for slot, name in enumerate(PHYSICAL_MASK_NAMES):
-        sample = dict(dataset[index], stable_window_id=row["stable_window_id"], window_index=index,
-                      fixture_index=fixtures.indices.index(index)*8+slot, mask_slot=slot)
-        cpu = default_collate([sample])
-        ps, pa, sm, am, actual_name, eps = predict(model, cpu, args.route, args.mask_seed, args.sample_seed, args.sample_index)
-        assert actual_name == name
-        state = ps * norm["state"][1] + norm["state"][0]
-        state[:,68:] = ps[:,68:]
-        action = pa * norm["action"][1] + norm["action"][0]
-        # Compare HDF targets with the normalized dataset before interpreting predictions.
-        if not np.allclose(cpu["physical_state"][0].numpy()[:,:68], ((truth_s-norm["state"][0])/norm["state"][1])[:,:68], atol=2e-5, rtol=1e-5):
-            raise ValueError("dataset/HDF State window mismatch")
-        if not np.allclose(cpu["action"][0].numpy(), (truth_a-norm["action"][0])/norm["action"][1], atol=2e-5, rtol=1e-5):
-            raise ValueError("dataset/HDF Action window mismatch")
+        parts = {key: [] for key in ("ps", "pa", "sm", "am", "truth_n", "truth_an", "eps_g", "eps_l")}
+        chunk_rows = []
+        for k, ci in enumerate(chunk_ids):
+            sample = dict(dataset[ci])
+            chunk_row = by_index.get(ci) or {**sample_identity(sample), "window_index": ci,
+                                             "stable_window_id": digest(sample_identity(sample))}
+            sample.update(stable_window_id=chunk_row["stable_window_id"], window_index=ci, mask_slot=slot,
+                          fixture_index=fixtures.indices.index(ci) * 8 + slot if ci in fixtures.indices else -1)
+            lo = CHUNK * k
+            truth_n = ((truth_s[lo:lo + CHUNK + 1] - s_mean) / s_std).astype(np.float32)
+            truth_an = ((truth_a[lo:lo + CHUNK] - a_mean) / a_std).astype(np.float32)
+            if capture is None:
+                # Compare HDF targets with the normalized dataset before interpreting predictions.
+                if not np.allclose(sample["physical_state"].numpy()[:, :68], truth_n[:, :68], atol=2e-5, rtol=1e-5):
+                    raise ValueError(f"dataset/HDF State window mismatch at chunk {k}")
+                if not np.allclose(sample["action"].numpy(), truth_an, atol=2e-5, rtol=1e-5):
+                    raise ValueError(f"dataset/HDF Action window mismatch at chunk {k}")
+            else:
+                # Identity stays the dataset window's (masks/epsilon); tensors come from the capture.
+                sample["physical_state"] = torch.from_numpy(truth_n)
+                sample["action"] = torch.from_numpy(truth_an)
+                sample["action_before_window"] = torch.from_numpy(((before[k] - a_mean) / a_std).astype(np.float32))
+            cpu = default_collate([sample])
+            ps, pa, sm, am, actual_name, eps = predict(model, cpu, args.route, args.mask_seed, args.sample_seed, args.sample_index)
+            assert actual_name == name
+            for key, value in (("ps", ps), ("pa", pa), ("sm", sm), ("am", am),
+                               ("truth_n", cpu["physical_state"][0].numpy()), ("truth_an", cpu["action"][0].numpy())):
+                parts[key].append(value)
+            if eps is not None:
+                parts["eps_g"].append(eps[0][0].cpu().numpy()); parts["eps_l"].append(eps[1][0].cpu().numpy())
+            chunk_rows.append({"chunk": k, "window_index": ci, "stable_window_id": chunk_row["stable_window_id"],
+                               "episode_start": start + lo})
+        ps, sm, truth_n = (stitch_states(parts[key]) for key in ("ps", "sm", "truth_n"))
+        pa, am, truth_an = (np.concatenate(parts[key], axis=0) for key in ("pa", "am", "truth_an"))
+        # Adjacent chunks both predict the shared boundary State; report their disagreement.
+        boundary = [float(np.abs((parts["ps"][k][-1, :68] - parts["ps"][k + 1][0, :68]) * s_std[:68]).max())
+                    for k in range(chunks - 1)]
+        state = ps * s_std + s_mean
+        state[:, 68:] = ps[:, 68:]
+        action = pa * a_std + a_mean
         completed_s = state if args.route == "A" else np.where(sm, state, truth_s)
         completed_a = action if args.route == "A" else np.where(am, action, truth_a)
-        raw, achieved, mapping = execution_actions(source["raw_action"], truth_a, action, am,
-            init["nominal_default_joint_pos"], init["action_scale"], init["action_offset"],
-            init["action_clip"] if init["action_clip"].size else None,
-            None if np.isnan(init["wrapper_action_clip"]) else float(init["wrapper_action_clip"]),
+        raw_window, achieved, mapping = execution_actions(full["raw_action"][offset:offset + horizon], truth_a,
+            action, am, *mapping_args(init),
             full_prediction=args.route == "A" or args.action_mode == "full-prediction")
-        metrics = offline_metrics(cpu["physical_state"][0].numpy(), cpu["action"][0].numpy(), ps, pa, sm, am)
+        executed_raw = np.concatenate([prefix, raw_window], axis=0).astype(np.float32)
+        metrics = offline_metrics(truth_n, truth_an, ps, pa, sm, am)
+        chunk_metrics = [offline_metrics(parts["truth_n"][k], parts["truth_an"][k], parts["ps"][k],
+                                         parts["pa"][k], parts["sm"][k], parts["am"][k]) for k in range(chunks)]
         directory = run / "data" / name
         directory.mkdir()
         arrays = dict(truth_state=truth_s, truth_action=truth_a, predicted_state=state, predicted_action=action,
             predicted_state_normalized=ps, predicted_action_normalized=pa, completed_state=completed_s,
-            completed_action=completed_a, state_mask=sm, action_mask=am, executed_raw=raw,
-            achieved_action=achieved, valid_state=np.ones(65,bool), valid_action=np.ones(64,bool))
-        if eps is not None:
-            arrays.update(epsilon_global=eps[0][0].cpu().numpy(), epsilon_local=eps[1][0].cpu().numpy())
+            completed_action=completed_a, state_mask=sm, action_mask=am, executed_raw=executed_raw,
+            window_executed_raw=raw_window, achieved_action=achieved,
+            valid_state=np.ones(horizon + 1, bool), valid_action=np.ones(horizon, bool))
+        if parts["eps_g"]:
+            arrays.update(epsilon_global=np.stack(parts["eps_g"]), epsilon_local=np.stack(parts["eps_l"]))
         _write_npz(directory / "prediction.npz", **arrays)
-        truth_pos, truth_quat = reconstruct_root_trajectory(truth_s, source["root_pos"], source["root_quat"], 0, .02)
-        pred_pos, pred_quat = reconstruct_root_trajectory(completed_s, source["root_pos"], source["root_quat"], 0, .02)
+        root_pos = full["root_pos"][offset:offset + horizon + 1]
+        root_quat = full["root_quat"][offset:offset + horizon + 1]
+        truth_pos, truth_quat = reconstruct_root_trajectory(truth_s, root_pos, root_quat, 0, .02)
+        pred_pos, pred_quat = reconstruct_root_trajectory(completed_s, root_pos, root_quat, 0, .02)
         for tag, st, pos, quat in (("truth_integrated",truth_s,truth_pos,truth_quat), ("predicted_integrated",completed_s,pred_pos,pred_quat)):
-            _write_trajectory(directory / f"{tag}.trajectory.pkl", joint_pos=st[:,:29]+init["nominal_default_joint_pos"], root_pos=pos, root_quat=quat, fps=50.)
+            _write_trajectory(directory / f"{tag}.trajectory.pkl", joint_pos=st[:,:29]+nominal, root_pos=pos, root_quat=quat, fps=50.)
         # Render every requested representative State view for every route.
         # A is full prediction, so its Action trajectory is identical for all
         # Mask labels; keep one physical Action replay there and avoid four
@@ -309,18 +460,24 @@ def prepare_window(args, dataset, fixtures, model, index, run, norm):
             and (args.route != "A" or name == args.masks[0])
         entries.append({"mask": name, "fixture_id": digest([row["stable_window_id"], slot, args.mask_seed]),
             "offline": metrics, "physical_groups": physical_groups(truth_s,state), "mapping": mapping,
-            "state_top100":tail_coordinates(truth_s,state,*norm["state"],row["window_start"],state=True),
-            "action_top100":tail_coordinates(truth_a,action,*norm["action"],row["window_start"]),
+            "chunks": [dict(c, offline=m) for c, m in zip(chunk_rows, chunk_metrics)],
+            "chunk_boundary_state_max_abs": boundary,
+            "state_top100":tail_coordinates(truth_s,state,s_mean,s_std,start,state=True),
+            "action_top100":tail_coordinates(truth_a,action,a_mean,a_std,start),
             "representative": representative, "action_model_replay": action_model_replay,
             "hidden_initial_state": bool(sm[0].any()), "simulation_initial_state": "recorded_truth_not_model_input",
             "visualization": {"gravity_normalized": True, "contact_not_used_as_pose_constraint": True,
-                "truth_integration_root_rmse_m": float(np.sqrt(np.mean((truth_pos-source["root_pos"])**2))),
+                "truth_integration_root_rmse_m": float(np.sqrt(np.mean((truth_pos-root_pos)**2))),
                 "predicted_gravity_norm_min": float(np.linalg.norm(completed_s[:,64:67],axis=-1).min()),
-                "predicted_height_anchor_offset_m": float(source["root_pos"][0,2]-completed_s[0,67]),
+                "predicted_height_anchor_offset_m": float(root_pos[0,2]-completed_s[0,67]),
                 "anchor": "shared_recorded_root_pose_frame_zero_only"}})
     manifest = {"version": VERSION, "window": row, "route": args.route, "action_mode": args.action_mode,
         "mask_seed": args.mask_seed, "sample_seed": args.sample_seed, "sample_index": args.sample_index,
-        "simulation_seed": args.simulation_seed, "source": source_meta, "entries": entries,
+        "simulation_seed": seed, "source": source_meta, "source_mode": source_meta["mode"],
+        "training_seen": source_meta["training_seen"], "horizon_steps": horizon, "chunk_count": chunks,
+        "chunk_windows": chunk_rows, "window_start": start, "requested_window_start": int(row["window_start"]),
+        "window_start_shift": shift, "score_offset": offset, "replay_steps": offset + horizon,
+        "entries": entries,
         "initialization": init_manifest, "baseline_thresholds": THRESHOLDS,
         "model_quality": {"ratio_threshold": MODEL_QUALITY_RATIO, "metrics": MODEL_QUALITY_METRICS},
         "quality_pass": None,
@@ -351,6 +508,27 @@ def prepare(args):
         raise ValueError("A replay requires a Stage-A checkpoint")
     if args.route == "A":
         args.action_mode = "full-prediction"
+    capture_run = getattr(args, "capture_run", None)
+    args.source = getattr(args, "source", None) or ("recapture" if capture_run else "dataset")
+    capture = None
+    if args.source == "recapture":
+        if capture_run is None:
+            raise ValueError("--source recapture requires --capture-run")
+        capture = load_capture(capture_run)
+        captured = int(capture["meta"]["window"]["window_index"])
+        if args.window_index is not None and args.window_index != captured:
+            raise ValueError(f"--window-index {args.window_index} differs from the captured window {captured}")
+        args.window_index = captured
+        if getattr(args, "horizon_steps", None) is None:
+            args.horizon_steps = int(capture["meta"]["horizon_steps"])
+    elif capture_run is not None:
+        raise ValueError("--capture-run is only valid with --source recapture")
+    if getattr(args, "horizon_steps", None) is None:
+        args.horizon_steps = DEFAULT_HORIZON
+    if args.horizon_steps < CHUNK or args.horizon_steps % CHUNK:
+        raise ValueError("--horizon-steps must be a positive multiple of 64")
+    if args.window_index is None and getattr(args, "selection", None) is None:
+        raise ValueError("specify --window-index, --selection first-suite or --capture-run")
     model = build_model(config["model"])
     load_checkpoint(model, checkpoint_path)
     model.to(args.device or ("cuda" if torch.cuda.is_available() else "cpu")).eval()
@@ -400,7 +578,7 @@ def prepare(args):
         paths = []
         for index in selected:
             child = run / "windows" / f"w{index:06d}"
-            prepare_window(args,dataset,fixtures,model,index,child,norm)
+            prepare_window(args,dataset,fixtures,model,index,child,norm,rows,capture)
             paths.append(str(child.relative_to(run)))
         if file_sha256(checkpoint_path) != checkpoint_hash:
             raise RuntimeError("source checkpoint changed during preparation; use a completed fixed checkpoint and a new run")
@@ -410,11 +588,17 @@ def prepare(args):
         replay_sources = [Path(__file__), *[Path(__file__).with_name(n) for n in (
             "action_masks.py","physics_schema.py","state_mask_eval.py","posterior_h50_action_replay.py","posterior_h50_action_replay_exact_init.py")],
             *[KIT/n for n in ("exact_replay_initializer.py","replay65_runtime.py","replay65_recorder.py",
-                "render_replay65.py","render_mujoco_trajectory.py","render_h50a_exact_action_replays.py","sonic_repro.sh")]]
+                "render_replay65.py","render_replay65_compare.py","render_mujoco_trajectory.py",
+                "render_h50a_exact_action_replays.py","sonic_repro.sh")]]
         for p in replay_sources:
             prov["source_hashes"][str(p.relative_to(ROOT))] = file_sha256(p)
+        if capture is not None:
+            prov["capture"] = {"run": str(capture["run"]),
+                "capture_complete_sha256": file_sha256(capture["run"] / "manifests/capture_complete.json")}
         atomic_write_json(run / "manifests/provenance.json",prov)
         atomic_write_json(run / "manifests/replay65.json",{"version":VERSION,"windows":paths,
+            "source_mode":args.source,"horizon_steps":int(args.horizon_steps),
+            "capture_run":None if capture is None else str(capture["run"]),
             "selection":selection,"identity_check":identity_check,"source_checkpoint":source_info(checkpoint_path,checkpoint),
             "training_mask_seed":training_mask_seed,"replay_mask_seed":args.mask_seed,
             "exact_training_fixture": args.route == "B" and args.mask_seed == training_mask_seed and checkpoint.get("training_contract",{}).get("mask_mode")=="fixed",
@@ -492,7 +676,16 @@ def launch(command, log, env=None):
         raise RuntimeError(f"worker exit {code}; see {log}")
 
 
-def simulate_group(parent, window, tag, names, raws):
+def window_context(window):
+    manifest = load_json(window / "manifests/replay65.json")
+    return {"motion_file": manifest["source"]["motion_file"],
+            "motion_file_sha256": manifest["source"]["motion_file_sha256"],
+            "motion_key": manifest["window"]["motion_key"], "seed": int(manifest["simulation_seed"]),
+            "init_path": window / "data/exact_initialization.npz", "initialization": manifest["initialization"],
+            "steps": int(manifest.get("replay_steps", CHUNK))}
+
+
+def simulate_group(window, tag, names, raws, context):
     child = window / "simulations" / tag
     if child.exists():
         completion = child / "manifests/replay65_worker_complete.json"
@@ -500,25 +693,27 @@ def simulate_group(parent, window, tag, names, raws):
             verify_worker(child)
             return
         raise FileExistsError(f"incomplete/changed simulation is not overwritten: {child}; prepare a new run")
-    manifest = load_json(window / "manifests/replay65.json")
+    steps = int(context["steps"])
+    for raw in raws:
+        finite("planned raw Action", raw, (steps, 29))
     # The shell worker writes exit codes and completion markers after Isaac
     # exits. Create the complete child layout before launching it; creating
     # only data leaves mark_stage unable to write action_mask_replay.ok.
     for folder in ("data", "manifests", "logs", "markers"):
         (child / folder).mkdir(parents=True, exist_ok=True)
-    shutil.copy2(window / "data/exact_initialization.npz", child / "data/exact_initialization.npz")
-    init = manifest["initialization"]
+    shutil.copy2(context["init_path"], child / "data/exact_initialization.npz")
+    init = context["initialization"]
     actions = child / "data/raw_actions.npz"
     _write_npz(actions,raw_actions=np.stack(raws,axis=1),scenario_names=np.asarray(names))
     request = {"schema_version":VERSION,"representation":"physics_v4","replay65_guard":True,
-        "motion_file":manifest["source"]["motion_file"],"motion_file_sha256":manifest["source"]["motion_file_sha256"],
-        "motion_key":manifest["window"]["motion_key"],"raw_actions_file":str(actions),"raw_actions_sha256":file_sha256(actions),
-        "steps":64,"num_envs":len(names),"scenario_names":names,"control_dt":.02,
+        "motion_file":context["motion_file"],"motion_file_sha256":context["motion_file_sha256"],
+        "motion_key":context["motion_key"],"raw_actions_file":str(actions),"raw_actions_sha256":file_sha256(actions),
+        "steps":steps,"num_envs":len(names),"scenario_names":names,"control_dt":.02,
         "exact_initialization_file":str(child / "data/exact_initialization.npz"),
         "exact_initialization_file_sha256":init["file_sha256"],"exact_initialization_payload_sha256":init["payload_sha256"],
         "exact_initialization_report_paths":[str(child / f"manifests/exact_initialization_readback_{i:06d}.json") for i in range(len(names))]}
     atomic_write_json(child / "manifests/action_replay_request.json",request)
-    atomic_write_json(child / "manifests/action_mask_request.json",{"seed":manifest["simulation_seed"]})
+    atomic_write_json(child / "manifests/action_mask_request.json",{"seed":context["seed"]})
     env = dict(os.environ,ACTION_MASK_RUN_DIR=str(child),PYTHONUNBUFFERED="1")
     launch(["bash",str(KIT / "sonic_repro.sh"),"replay-action-mask"],child / "logs/worker.log",env)
     hashes = {p:file_sha256(child/p) for p in ("data/raw_actions.npz","data/exact_initialization.npz",
@@ -535,9 +730,14 @@ def simulate(args):
     for relative in load_json(run / "manifests/replay65.json")["windows"]:
         window = run / relative
         meta = load_json(window / "manifests/replay65.json")
-        source = _load_replay(window / "data/recorded_hdf.replay.npz")
+        context = window_context(window)
         progress(run,"simulating",window=relative,phase="original_repeat_baseline")
-        simulate_group(run,window,"baseline",["original_1","original_2"],[source["raw_action"]]*2)
+        if meta.get("source_mode", "dataset") == "recapture":
+            # Copied from the capture's determinism gate and sealed at prepare.
+            verify_worker(window / "simulations/baseline")
+        else:
+            source = _load_replay(window / "data/source.replay.npz")
+            simulate_group(window,"baseline",["original_1","original_2"],[source["raw_action"]]*2,context)
         report_window(window)
         if args.baseline_only:
             continue
@@ -546,7 +746,7 @@ def simulate(args):
                 progress(run,"simulating",window=relative,phase=entry["mask"])
                 with np.load(window / "data" / entry["mask"] / "prediction.npz",allow_pickle=False) as data:
                     raw = data["executed_raw"].copy()
-                simulate_group(run,window,entry["mask"],[entry["mask"]],[raw])
+                simulate_group(window,entry["mask"],[entry["mask"]],[raw],context)
         report_window(window)
     report(args)
     progress(run,"baseline_complete" if args.baseline_only else "simulation_complete")
@@ -574,6 +774,11 @@ def model_quality_against_baseline(baseline, model):
             "model_metrics": {key: float(model[key]) for key in MODEL_QUALITY_METRICS}}
 
 
+def absolute_model_quality(model):
+    return {"pass": passes(model), "mode": "absolute_thresholds",
+            "model_metrics": {key: float(model[key]) for key in THRESHOLDS}}
+
+
 def initialization_checks(readback, expected, runtime):
     errors = readback.get("errors",{})
     limits = {"joint_pos_max_abs_rad":1e-5,"joint_vel_max_abs_rad_s":1e-5,
@@ -590,9 +795,24 @@ def initialization_checks(readback, expected, runtime):
         "no_midrun_reset":runtime.get("midrun_reset") is False}
 
 
+def prefix_errors(reference, value, stop):
+    """Max deviation on the shared closed-loop prefix (identical raw Actions)."""
+    return {key: float(np.abs(value[key][:stop + 1] - reference[key][:stop + 1]).max())
+            for key in ("joint_pos", "root_pos", "body_pos")}
+
+
 def report_window(window):
     meta = load_json(window / "manifests/replay65.json")
-    source = _load_replay(window / "data/recorded_hdf.replay.npz")
+    horizon = int(meta.get("horizon_steps", CHUNK))
+    offset = int(meta.get("score_offset", 0))
+    steps = int(meta.get("replay_steps", offset + horizon))
+    episode_start = int(meta.get("window_start", meta["window"]["window_start"]))
+    recapture = meta.get("source_mode", "dataset") == "recapture"
+    deterministic = meta.get("source", {}).get("deterministic")
+    source_full = _load_replay(window / "data/source.replay.npz")
+    if source_full["joint_pos"].shape[0] != steps + 1:
+        raise ValueError(f"source trajectory must contain {steps + 1} States")
+    source = _trajectory_region(source_full, offset, offset + horizon)
     with np.load(window / "data/exact_initialization.npz",allow_pickle=False) as archive:
         mapping = {k:archive[k].copy() for k in ("action_scale","action_offset","action_clip","wrapper_action_clip")}
     trajectories, init_ok, execution = {}, {}, {}
@@ -604,15 +824,16 @@ def report_window(window):
         verify_worker(child)
         for i in range(2 if tag=="baseline" else 1):
             name = f"original_{i+1}" if tag=="baseline" else tag
-            replay = _load_replay(child / f"data/replay/{i:06d}.replay.npz")
-            if replay["joint_pos"].shape != (65,29) or replay["raw_action"].shape != (64,29):
-                raise ValueError("partial/reset replay cannot be scored as a complete T64 window")
+            full_replay = _load_replay(child / f"data/replay/{i:06d}.replay.npz")
+            if full_replay["joint_pos"].shape != (steps+1,29) or full_replay["raw_action"].shape != (steps,29):
+                raise ValueError(f"partial/reset replay cannot be scored as a complete {steps}-step replay")
             with np.load(child / "data/raw_actions.npz",allow_pickle=False) as planned:
-                if not np.allclose(replay["raw_action"],planned["raw_actions"][:,i],atol=1e-6,rtol=0):
+                if not np.allclose(full_replay["raw_action"],planned["raw_actions"][:,i],atol=1e-6,rtol=0):
                     raise ValueError("planned/executed raw Action mismatch")
+            replay = _trajectory_region(full_replay, offset, offset + horizon)
             with np.load(child / f"data/replay/{i:06d}.replay.npz",allow_pickle=False) as archive:
-                processed = finite("executed processed targets",archive["processed_action"],(64,29))
-                planned_processed = raw_to_target(replay["raw_action"],mapping["action_scale"],mapping["action_offset"],
+                processed = finite("executed processed targets",archive["processed_action"],(steps,29))
+                planned_processed = raw_to_target(full_replay["raw_action"],mapping["action_scale"],mapping["action_offset"],
                     mapping["action_clip"] if mapping["action_clip"].size else None,
                     None if np.isnan(mapping["wrapper_action_clip"]) else float(mapping["wrapper_action_clip"]))
                 processed_error = float(np.abs(processed-planned_processed).max())
@@ -625,19 +846,29 @@ def report_window(window):
                 "processed_target_max_abs_rad":processed_error,
                 "initial_contact_sensor_max_abs":rb["errors"].get("physics_state_v3_max_abs")}
             trajectories[name] = replay
-            comparisons[f"recorded_to_{name}"] = _trajectory_metrics(source,replay)
+            key = f"source_to_{name}"
+            comparisons[key] = _trajectory_metrics(source,replay)
+            comparisons[key]["chunks"] = [_trajectory_metrics(_trajectory_region(source, CHUNK*k, CHUNK*(k+1)),
+                _trajectory_region(replay, CHUNK*k, CHUNK*(k+1))) for k in range(horizon // CHUNK)]
+            if offset:
+                comparisons[key]["prefix_max_abs"] = prefix_errors(source_full, full_replay, offset)
             errors = _per_frame_errors(source,replay)
             plot_errors = dict(errors)
             errors["joint_velocity_rmse_rad_s"] = np.sqrt(np.mean((replay["joint_vel"]-source["joint_vel"])**2,axis=-1))
-            _write_npz(window / "data" / f"recorded_to_{name}_errors.npz",**errors)
+            _write_npz(window / "data" / f"{key}_errors.npz",**errors)
             (window / "plots").mkdir(exist_ok=True)
-            _write_error_svg(window / "plots" / f"recorded_to_{name}.svg",plot_errors,50.)
-            comparisons[f"recorded_to_{name}"]["first_crossing_relative_frame"] = _first_threshold_crossings(errors)
-            comparisons[f"recorded_to_{name}"]["first_crossing_episode_frame"] = {k:None if t is None else t+meta["window"]["window_start"] for k,t in _first_threshold_crossings(errors).items()}
+            _write_error_svg(window / "plots" / f"{key}.svg",plot_errors,50.,
+                title=f"{'Closed-loop capture' if recapture else 'Recorded HDF'} vs {name} (episode frames "
+                      f"{episode_start}-{episode_start + horizon})")
+            crossings = _first_threshold_crossings(errors)
+            comparisons[key]["first_crossing_relative_frame"] = crossings
+            comparisons[key]["first_crossing_episode_frame"] = {k:None if t is None else t+episode_start for k,t in crossings.items()}
     baseline_valid = None
     if "original_2" in trajectories:
         comparisons["original_repeatability"] = _trajectory_metrics(trajectories["original_1"],trajectories["original_2"])
-        baseline_valid = all(all(init_ok[n].values()) for n in ("original_1","original_2")) and all(passes(comparisons[k]) for k in ("recorded_to_original_1","recorded_to_original_2","original_repeatability"))
+        baseline_valid = (all(all(init_ok[n].values()) for n in ("original_1","original_2"))
+            and all(passes(comparisons[k]) for k in ("source_to_original_1","source_to_original_2","original_repeatability"))
+            and deterministic is not False)
     for name,replay in trajectories.items():
         if name.startswith("original_"):
             continue
@@ -652,11 +883,12 @@ def report_window(window):
     model_names = [name for name in trajectories if not name.startswith("original_")]
     model_quality_results = {}
     if baseline_valid and model_names:
-        baseline_metrics = comparisons["recorded_to_original_1"]
+        baseline_metrics = comparisons["source_to_original_1"]
         for name in model_names:
-            result = model_quality_against_baseline(
-                baseline_metrics, comparisons[f"recorded_to_{name}"]
-            ) if init_ok.get(name) and all(init_ok[name].values()) else None
+            # A deterministic capture makes the baseline ~0, so a ratio is meaningless there.
+            result = None if not (init_ok.get(name) and all(init_ok[name].values())) else (
+                absolute_model_quality(comparisons[f"source_to_{name}"]) if recapture else
+                model_quality_against_baseline(baseline_metrics, comparisons[f"source_to_{name}"]))
             model_quality_results[name] = result
             execution[name]["model_quality"] = result or {
                 "pass": None, "reason": "initialization_or_runtime_contract_invalid"
@@ -678,13 +910,16 @@ def report_window(window):
         "model_quality": model_quality_results,
         "model_physical_quality": (
             "PASS" if model_quality_pass is True else
-            "FAIL_RELATIVE_TO_BASELINE" if model_quality_pass is False else
+            ("FAIL_ABSOLUTE_THRESHOLDS" if recapture else "FAIL_RELATIVE_TO_BASELINE") if model_quality_pass is False else
             "UNASSESSED_NO_MODEL_ACTION_REPLAY" if baseline_valid else
             "MODEL_QUALITY_UNDETERMINED"
         ),
-        "banner":banner,
-        "threshold_version":"legacy-window-baseline-v1+model-relative-v1","thresholds":THRESHOLDS,
-        "model_quality_thresholds":{"ratio_threshold":MODEL_QUALITY_RATIO,"metrics":MODEL_QUALITY_METRICS},
+        "banner":banner,"source_mode":"recapture" if recapture else "dataset","deterministic_source":deterministic,
+        "horizon_steps":horizon,"score_offset":offset,"replay_steps":steps,"window_start":episode_start,
+        "threshold_version":"window-baseline-v2+" + ("model-absolute-v1" if recapture else "model-relative-v1"),
+        "thresholds":THRESHOLDS,
+        "model_quality_thresholds":({"mode":"absolute_thresholds","thresholds":THRESHOLDS} if recapture else
+            {"mode":"relative_to_baseline","ratio_threshold":MODEL_QUALITY_RATIO,"metrics":MODEL_QUALITY_METRICS}),
         "checks":execution,"comparisons":comparisons,"missing_scenarios":sorted(expected_names-set(trajectories))}
     atomic_write_json(window / "manifests/replay65_report.json",report)
     return report
@@ -743,6 +978,277 @@ def render(args):
     progress(run,"render_complete")
 
 
+def mapping_error(path, init, steps):
+    with np.load(path, allow_pickle=False) as archive:
+        raw = finite("captured raw Action", archive["raw_action"], (steps, 29))
+        processed = finite("captured processed target", archive["processed_action"], (steps, 29))
+    _, scale, offset, clip, wrapper = mapping_args(init)
+    planned = raw_to_target(raw, scale, offset, clip, wrapper)
+    if not np.allclose(processed, planned, atol=2e-6, rtol=1e-5):
+        raise ValueError("captured raw/processed Action mapping mismatch")
+    return float(np.abs(processed - planned).max())
+
+
+def capture_source(args, run):
+    """Frame 0 .. window_start + horizon of the HDF episode; only frame 0 seeds the capture."""
+    checkpoint = torch.load(args.checkpoint.resolve(), map_location="cpu", weights_only=False)
+    config = checkpoint_config(checkpoint)
+    dataset, indices = make_dataset(args.dataset_run.resolve(), config)
+    try:
+        if args.window_index not in indices:
+            raise ValueError("window index is not in checkpoint's selected training windows")
+        rows = Fixtures(dataset, indices, expand=True).manifest()
+        row = next(r for r in rows if r["window_index"] == args.window_index)
+        steps = int(dataset.episodes[dataset.refs[args.window_index].episode_index]["steps"])
+        start, shift = resolve_window_start(row["window_start"], steps, args.horizon_steps)
+        chunk_indices(dataset, args.window_index, start, args.horizon_steps // CHUNK)
+        source, init, schema, source_meta = load_source(dataset, args.window_index, start + args.horizon_steps, start=0)
+    finally:
+        dataset.close()
+    _write_npz(run / "data/dataset_source.replay.npz", **source)
+    _write_trajectory(run / "data/dataset_source.trajectory.pkl", joint_pos=source["joint_pos"],
+        root_pos=source["root_pos"], root_quat=source["root_quat"], fps=50.)
+    _, init_manifest = _write_exact_initialization(run / "data/exact_initialization.npz", init)
+    atomic_write_json(run / "manifests/source_schema.json", schema)
+    shutil.copy2(args.dataset_run.resolve() / "data/normalization.npz", run / "data/normalization.npz")
+    meta = {"version": VERSION, "window": row, "window_start": start, "requested_window_start": int(row["window_start"]),
+        "window_start_shift": shift, "horizon_steps": int(args.horizon_steps), "episode_steps": steps,
+        "simulation_seed": int(args.simulation_seed), "motion_file": source_meta["motion_file"],
+        "motion_file_sha256": source_meta["motion_file_sha256"], "raw_source": source_meta["raw_source"],
+        "initialization": init_manifest, "checkpoint": str(args.checkpoint.resolve()),
+        "dataset_run": str(args.dataset_run.resolve())}
+    atomic_write_json(run / "manifests/capture.json", meta)
+    return meta
+
+
+def determinism_metrics(a, b, start, stop):
+    return {"max_abs": {key: float(np.abs(a[key] - b[key]).max()) for key in DETERMINISM_FIELDS},
+            "full": _trajectory_metrics(a, b),
+            "scored": _trajectory_metrics(_trajectory_region(a, start, stop), _trajectory_region(b, start, stop))}
+
+
+def capture_context(run, meta):
+    return {"motion_file": meta["motion_file"], "motion_file_sha256": meta["motion_file_sha256"],
+            "motion_key": meta["window"]["motion_key"], "seed": int(meta["simulation_seed"]),
+            "init_path": run / "data/exact_initialization.npz", "initialization": meta["initialization"],
+            "steps": int(meta["window_start"]) + int(meta["horizon_steps"])}
+
+
+def capture(args):
+    """Closed-loop rollout from HDF frame 0, then two open-loop replays of its raw Actions."""
+    run = args.output_run.resolve()
+    assert_output_isolated(run, [args.dataset_run.resolve(), args.checkpoint.resolve().parent.parent,
+                                 ROOT / "state-action-cvae", KIT])
+    horizon = int(args.horizon_steps)
+    if horizon < CHUNK or horizon % CHUNK:
+        raise ValueError("--horizon-steps must be a positive multiple of 64")
+    if (run / "manifests/capture_complete.json").is_file():
+        complete = verify_capture(run)
+        print(f"CAPTURE={run} deterministic={complete['deterministic']} (already sealed)", flush=True)
+        return complete
+    meta_path = run / "manifests/capture.json"
+    if meta_path.is_file():
+        meta = load_json(meta_path)
+        expected = (int(meta["window"]["window_index"]), int(meta["horizon_steps"]), int(meta["simulation_seed"]))
+        if expected != (args.window_index, horizon, args.simulation_seed):
+            raise ValueError(f"capture run was started with window/horizon/seed {expected}; use a new --output-run")
+    else:
+        if run.exists() and any(run.iterdir()):
+            raise FileExistsError("capture requires a new empty output run")
+        for folder in ("manifests", "data", "plots", "logs", "markers"):
+            (run / folder).mkdir(parents=True, exist_ok=True)
+        meta = capture_source(args, run)
+    progress(run, "capturing", window_index=args.window_index, horizon_steps=horizon)
+    context = capture_context(run, meta)
+    start, steps = int(meta["window_start"]), context["steps"]
+    readback = run / "manifests/exact_initialization_readback_capture.json"
+    request = {"schema_version": VERSION, "motion_file": meta["motion_file"],
+        "motion_file_sha256": meta["motion_file_sha256"], "motion_key": context["motion_key"],
+        "seed": context["seed"], "steps": steps, "exact_initialization_file": str(context["init_path"]),
+        "exact_initialization_file_sha256": meta["initialization"]["file_sha256"],
+        "exact_initialization_report_path": str(readback)}
+    atomic_write_json(run / "manifests/replay65_capture_request.json", request)
+    source_dir = run / "data/source"
+    if not (run / "markers/replay65_capture.ok").is_file():
+        if source_dir.exists() and any(source_dir.iterdir()):
+            raise FileExistsError(f"partial closed-loop capture is not overwritten: {source_dir}; use a new --output-run")
+        env = dict(os.environ, ACTION_MASK_RUN_DIR=str(run), PYTHONUNBUFFERED="1")
+        launch(["bash", str(KIT / "sonic_repro.sh"), "capture-replay65-source"], run / "logs/capture_worker.log", env)
+    captured = _load_replay(source_dir / "000000.replay.npz")
+    if captured["joint_pos"].shape != (steps + 1, 29) or captured["raw_action"].shape != (steps, 29):
+        raise ValueError(f"closed-loop capture must contain {steps} Actions and {steps + 1} States (reset or early stop?)")
+    runtime = load_json(source_dir / "000000.runtime.json")
+    if runtime.get("control_steps") not in (None, steps):
+        raise ValueError(f"capture recorded {runtime.get('control_steps')} control steps, expected {steps}")
+    capture_checks = initialization_checks(load_json(readback), meta["initialization"], runtime)
+    with np.load(context["init_path"], allow_pickle=False) as archive:
+        init = {name: archive[name].copy() for name in archive.files}
+    mapping = mapping_error(source_dir / "000000.replay.npz", init, steps)
+    progress(run, "capture_determinism_gate", steps=steps)
+    simulate_group(run, "baseline", ["original_1", "original_2"], [captured["raw_action"]] * 2, context)
+    baseline = run / "simulations/baseline"
+    replays, replay_checks = [], {}
+    for i in range(2):
+        replays.append(_load_replay(baseline / f"data/replay/{i:06d}.replay.npz"))
+        replay_checks[f"original_{i + 1}"] = initialization_checks(
+            load_json(baseline / f"manifests/exact_initialization_readback_{i:06d}.json"), meta["initialization"],
+            load_json(baseline / f"data/replay/{i:06d}.runtime.json"))
+    stop = start + horizon
+    pairs = {"capture_to_original_1": determinism_metrics(captured, replays[0], start, stop),
+             "capture_to_original_2": determinism_metrics(captured, replays[1], start, stop),
+             "original_1_to_original_2": determinism_metrics(replays[0], replays[1], start, stop)}
+    within = {name: {key: pair["max_abs"][key] <= limit for key, limit in DETERMINISM_LIMITS.items()}
+              for name, pair in pairs.items()}
+    init_valid = all(capture_checks.values()) and all(all(c.values()) for c in replay_checks.values())
+    deterministic = init_valid and all(all(v.values()) for v in within.values())
+    # Informational only: how far the closed-loop policy drifts from the recorded HDF episode.
+    dataset = _load_replay(run / "data/dataset_source.replay.npz")
+    scored_dataset, scored_capture = _trajectory_region(dataset, start, stop), _trajectory_region(captured, start, stop)
+    _write_error_svg(run / "plots/dataset_to_capture.svg", _per_frame_errors(scored_dataset, scored_capture), 50.,
+                     title=f"Recorded HDF vs closed-loop capture (episode frames {start}-{stop})")
+    determinism = {"version": VERSION, "deterministic": deterministic, "limits": DETERMINISM_LIMITS,
+        "scored_region": [start, stop], "pairs": pairs, "within_limits": within,
+        "initialization": {"capture": capture_checks, **replay_checks}, "capture_runtime": runtime,
+        "capture_processed_target_max_abs_rad": mapping,
+        "dataset_to_capture": {"full": _trajectory_metrics(dataset, captured),
+                               "scored": _trajectory_metrics(scored_dataset, scored_capture)}}
+    atomic_write_json(run / "manifests/capture_determinism.json", determinism)
+    sealed = [*sorted(str(p.relative_to(run)) for p in source_dir.iterdir() if p.is_file() and not p.is_symlink()),
+              "data/exact_initialization.npz", "data/dataset_source.replay.npz", "data/normalization.npz",
+              "manifests/capture.json", "manifests/source_schema.json", "manifests/replay65_capture_request.json",
+              str(readback.relative_to(run)), "simulations/baseline/manifests/replay65_worker_complete.json",
+              "manifests/capture_determinism.json"]
+    atomic_write_json(run / "manifests/capture_complete.json", {"version": VERSION, "deterministic": deterministic,
+        "hashes": {relative: file_sha256(run / relative) for relative in sealed}})
+    atomic_write_text(run / "markers/replay65_capture.status", ("DETERMINISTIC" if deterministic else "NON_DETERMINISTIC") + "\n")
+    progress(run, "capture_complete", deterministic=deterministic)
+    print(f"CAPTURE={run} deterministic={deterministic}", flush=True)
+    for name, pair in pairs.items():
+        print(f"  {name}: " + " ".join(f"{k}={pair['max_abs'][k]:.3g}" for k in DETERMINISM_LIMITS), flush=True)
+    return load_json(run / "manifests/capture_complete.json")
+
+
+COMPARE_COLORS = ((66, 135, 245), (60, 200, 90), (255, 150, 40), (200, 80, 200))
+FALL_TILT_DEG = 60.
+FALL_ROOT_HEIGHT_M = .35
+
+
+def first_fall_frame(trajectory):
+    quat = np.asarray(trajectory["root_quat"], np.float64)  # wxyz
+    up_z = 1. - 2. * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    fallen = (up_z < np.cos(np.deg2rad(FALL_TILT_DEG))) | (np.asarray(trajectory["root_pos"])[:, 2] < FALL_ROOT_HEIGHT_M)
+    hits = np.flatnonzero(fallen)
+    return None if hits.size == 0 else int(hits[0])
+
+
+def compare_entry(meta, mask):
+    replays = [entry for entry in meta["entries"] if entry["action_model_replay"]]
+    if meta["route"] == "A":
+        # A is full prediction: its single Action replay is mask independent.
+        if len(replays) != 1:
+            raise ValueError("route A run must contain exactly one Action replay")
+        return replays[0]
+    entry = next((entry for entry in replays if entry["mask"] == mask), None)
+    if entry is None:
+        raise ValueError(f"route {meta['route']} run has no Action replay for {mask}; prepare it with --masks {mask}")
+    return entry
+
+
+def write_compare_svg(path, routes, title, fps=50.):
+    keys = ("joint_position_rmse_rad", "root_position_error_m", "root_orientation_error_deg", "body_mpjpe_m")
+    width, height, left, right, top, bottom = 1100, 700, 100, 150, 45, 50
+    panel = (height - top - bottom) / len(keys)
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+             '<rect width="100%" height="100%" fill="white"/>',
+             f'<text x="{width // 2}" y="25" text-anchor="middle" font-family="sans-serif" font-size="18">{html.escape(title)}</text>']
+    frames = max(len(route["per_frame"][keys[0]]) for route in routes)
+    for row, key in enumerate(keys):
+        y0, y1 = top + row * panel, top + (row + 1) * panel - 18
+        peak = max(max(max(route["per_frame"][key]), 1e-12) for route in routes) * 1.1
+        parts.append(f'<rect x="{left}" y="{y0:.1f}" width="{width - left - right}" height="{y1 - y0:.1f}" fill="none" stroke="#999"/>')
+        parts.append(f'<text x="{left - 8}" y="{(y0 + y1) / 2:.1f}" text-anchor="end" font-family="sans-serif" font-size="11">{key}</text>')
+        parts.append(f'<text x="{left - 8}" y="{y0 + 10:.1f}" text-anchor="end" font-family="sans-serif" font-size="10">{peak:.3g}</text>')
+        for route in routes:
+            color = "#%02x%02x%02x" % tuple(route["color"])
+            points = " ".join(f"{left + t * (width - left - right) / max(frames - 1, 1):.1f},{y1 - v / peak * (y1 - y0):.1f}"
+                              for t, v in enumerate(route["per_frame"][key]))
+            parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="1.6" points="{points}"/>')
+            if route["fall_frame"] is not None:
+                x = left + route["fall_frame"] * (width - left - right) / max(frames - 1, 1)
+                parts.append(f'<line x1="{x:.1f}" y1="{y0:.1f}" x2="{x:.1f}" y2="{y1:.1f}" stroke="{color}" stroke-dasharray="4 3"/>')
+    for i, route in enumerate(routes):
+        color = "#%02x%02x%02x" % tuple(route["color"])
+        parts.append(f'<rect x="{width - right + 15}" y="{top + 20 * i}" width="14" height="10" fill="{color}"/>')
+        parts.append(f'<text x="{width - right + 35}" y="{top + 20 * i + 10}" font-family="sans-serif" font-size="12">'
+                     f'{html.escape(route["label"])}</text>')
+    parts.append(f'<text x="{width // 2}" y="{height - 15}" text-anchor="middle" font-family="sans-serif" font-size="12">'
+                 f'frame (50 Hz, {frames / fps:.2f} s); dashed line = first fall frame</text></svg>')
+    atomic_write_text(path, "\n".join(parts) + "\n")
+
+
+def compare(args):
+    """Same window, same source, one Action replay per route; renders ghost overlay and/or 2x2 grid."""
+    output = args.output_run.resolve()
+    if len(args.labels) != len(args.runs) or not 1 <= len(args.runs) <= len(COMPARE_COLORS):
+        raise ValueError(f"--labels must match --runs (1-{len(COMPARE_COLORS)} runs)")
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError("compare requires a new empty output run")
+    reference, routes, source_window = None, [], None
+    for run_path, label, color in zip(args.runs, args.labels, COMPARE_COLORS):
+        run = run_path.resolve()
+        verify_prepared(run)
+        window = run / load_json(run / "manifests/replay65.json")["windows"][0]
+        meta = load_json(window / "manifests/replay65.json")
+        entry = compare_entry(meta, args.mask)
+        child = window / "simulations" / entry["mask"]
+        if not (child / "manifests/replay65_worker_complete.json").is_file():
+            raise FileNotFoundError(f"route {label} has not simulated {entry['mask']}; run replay65 simulate --run {run}")
+        verify_worker(child)
+        key = {"stable_window_id": meta["window"]["stable_window_id"], "horizon_steps": int(meta.get("horizon_steps", CHUNK)),
+               "score_offset": int(meta.get("score_offset", 0)), "simulation_seed": int(meta["simulation_seed"]),
+               "source_sha256": file_sha256(window / "data/source.replay.npz")}
+        if reference is None:
+            reference, source_window = key, window
+        elif key != reference:
+            diff = {k: (reference[k], key[k]) for k in key if key[k] != reference[k]}
+            raise ValueError(f"route {label} does not replay the same window/source as {args.labels[0]}: {diff}")
+        horizon, offset = key["horizon_steps"], key["score_offset"]
+        source = _trajectory_region(_load_replay(window / "data/source.replay.npz"), offset, offset + horizon)
+        replay = _trajectory_region(_load_replay(child / "data/replay/000000.replay.npz"), offset, offset + horizon)
+        errors = _per_frame_errors(source, replay)
+        routes.append({"label": label, "route": meta["route"], "mask": entry["mask"], "color": list(color),
+            "run": str(run), "window": str(window), "trajectory": str(child / "data/replay/000000.trajectory.pkl"),
+            "trajectory_sha256": file_sha256(child / "data/replay/000000.trajectory.pkl"),
+            "metrics": _trajectory_metrics(source, replay), "quality_pass": passes(_trajectory_metrics(source, replay)),
+            "fall_frame": first_fall_frame(replay),
+            "per_frame": {k: [float(v) for v in values] for k, values in errors.items()}})
+    for folder in ("manifests", "plots", "videos", "logs"):
+        (output / folder).mkdir(parents=True, exist_ok=True)
+    meta = load_json(source_window / "manifests/replay65.json")
+    start = int(meta.get("window_start", meta["window"]["window_start"]))
+    source_full = _load_replay(source_window / "data/source.replay.npz")
+    manifest = {"version": VERSION, "mask": args.mask, "window": meta["window"], "source_mode": meta.get("source_mode", "dataset"),
+        "horizon_steps": reference["horizon_steps"], "score_offset": reference["score_offset"], "window_start": start,
+        "source_trajectory": str(source_window / "data/source.trajectory.pkl"),
+        "source_trajectory_sha256": file_sha256(source_window / "data/source.trajectory.pkl"),
+        "source_fall_frame": first_fall_frame(_trajectory_region(source_full, reference["score_offset"],
+                                                                 reference["score_offset"] + reference["horizon_steps"])),
+        "fall_rule": {"tilt_deg": FALL_TILT_DEG, "root_height_m": FALL_ROOT_HEIGHT_M}, "routes": routes}
+    atomic_write_json(output / "manifests/compare.json", manifest)
+    write_compare_svg(output / "plots/compare_errors.svg", routes,
+                      f"Source vs routes {'/'.join(args.labels)} ({args.mask}, episode frames {start}-{start + reference['horizon_steps']})")
+    for route in routes:
+        fall = "none" if route["fall_frame"] is None else f"frame {route['fall_frame']}"
+        m = route["metrics"]
+        print(f"{route['label']}: route={route['route']} mask={route['mask']} joint_rmse={m['joint_position_rmse_rad']:.4f} "
+              f"root_rmse={m['root_position_rmse_m']:.4f} mpjpe={m['body_mpjpe_m']:.4f} fall={fall}", flush=True)
+    if args.skip_render:
+        return manifest
+    launch([sys.executable, str(KIT / "render_replay65_compare.py"), "--manifest", str(output / "manifests/compare.json"),
+            "--model", str(args.model.resolve()), "--gl", args.gl, "--layout", args.layout], output / "logs/render_compare.log")
+    return manifest
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest="command",required=True)
@@ -750,9 +1256,13 @@ def main(argv=None):
     for flag in ("checkpoint","dataset-run","output-run"):
         p.add_argument("--"+flag,type=Path,required=True)
     p.add_argument("--route",choices=("A","B","C"),required=True)
-    select=p.add_mutually_exclusive_group(required=True)
+    select=p.add_mutually_exclusive_group()
     select.add_argument("--window-index",type=int)
     select.add_argument("--selection",choices=("first-suite",))
+    p.add_argument("--source",choices=("dataset","recapture"),
+                   help="default: recapture when --capture-run is given, else dataset")
+    p.add_argument("--capture-run",type=Path,help="sealed run from 'replay65 capture'")
+    p.add_argument("--horizon-steps",type=int,help=f"multiple of {CHUNK}; default: capture horizon or {DEFAULT_HORIZON}")
     p.add_argument("--masks",nargs="+",choices=PHYSICAL_MASK_NAMES,default=list(REPRESENTATIVES))
     p.add_argument("--mask-seed",type=int,help="default: checkpoint training fixture seed (A legacy: 20260920)")
     p.add_argument("--sample-seed",type=int,default=20260923)
@@ -779,9 +1289,32 @@ def main(argv=None):
     s=sub.add_parser("simulate"); s.add_argument("--run",type=Path,required=True); s.add_argument("--baseline-only",action="store_true")
     r=sub.add_parser("render"); r.add_argument("--run",type=Path,required=True); r.add_argument("--model",type=Path,required=True); r.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
     r=sub.add_parser("report"); r.add_argument("--run",type=Path,required=True); r.add_argument("--export",action="store_true"); r.add_argument("--output",type=Path)
+    c=sub.add_parser("capture",help="closed-loop source capture + determinism gate")
+    for flag in ("checkpoint","dataset-run","output-run"):
+        c.add_argument("--"+flag,type=Path,required=True)
+    c.add_argument("--window-index",type=int,required=True)
+    c.add_argument("--horizon-steps",type=int,default=DEFAULT_HORIZON)
+    c.add_argument("--simulation-seed",type=int,default=20260923)
+    m=sub.add_parser("compare",help="ghost overlay / 2x2 grid of several routes on one window")
+    m.add_argument("--runs",type=Path,nargs="+",required=True)
+    m.add_argument("--labels",nargs="+",help="default: A B C (one per run)")
+    m.add_argument("--mask",choices=PHYSICAL_MASK_NAMES,default="full_action",help="B/C mask; A uses its single replay")
+    m.add_argument("--layout",choices=("ghost","grid","both"),default="both")
+    m.add_argument("--output-run",type=Path,required=True)
+    m.add_argument("--model",type=Path)
+    m.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
+    m.add_argument("--skip-render",action="store_true")
     args=parser.parse_args(argv)
     if args.command == "prepare" and (args.sample_index < 0 or (args.window_index is not None and args.window_index < 0)):
         parser.error("sample-index and window-index must be non-negative")
+    if args.command == "capture" and args.window_index < 0:
+        parser.error("window-index must be non-negative")
+    if args.command == "compare":
+        args.labels = args.labels or ["A", "B", "C", "D"][:len(args.runs)]
+        if len(args.labels) != len(args.runs):
+            parser.error("--labels must match --runs")
+        if not args.skip_render and args.model is None:
+            parser.error("compare requires --model unless --skip-render")
     if sys.platform == "linux":
         run_path = getattr(args,"output_run",getattr(args,"run",None)).resolve()
         runs_root = Path("/home/helloworld/bly/runs").resolve()
@@ -797,7 +1330,8 @@ def main(argv=None):
     except (Exception,KeyboardInterrupt) as error:
         run=getattr(args,"run",getattr(args,"output_run",None))
         # Never overwrite unrelated or source paths on a failed preparation.
-        if args.command != "prepare" and run and (run/"manifests/replay65.json").is_file():
+        marker = "manifests/capture.json" if args.command == "capture" else "manifests/replay65.json"
+        if args.command not in ("prepare", "compare") and run and (run/marker).is_file():
             progress(run,"interrupted" if isinstance(error,KeyboardInterrupt) else "failed",error=str(error))
         raise
     return 0

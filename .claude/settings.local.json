@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_replay65.py -q -x)",
+      "Bash(PYTHONPATH=\"src;tests\" python -m pytest tests/test_replay65.py -q -x)",
+      "Read(//c/c/Users/86136/Desktop/code/RL/bly/sonic-repro-kit/**)",
+      "Bash(python *)",
+      "Bash(PYTHONPATH=\"src;tests\" python -m pytest tests/test_replay65.py -q)",
+      "Bash(PYTHONPATH=\"src;tests\" python -m pytest tests -q -x -p no:cacheprovider)",
+      "Bash(PYTHONPATH=\"src;tests\" python -m pytest tests -q -p no:cacheprovider)",
+      "Bash(PYTHONPATH=\"src;tests\" python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_action_finetune.py --ignore=tests/test_action_mask_eval.py --ignore=tests/test_indexer_dataset.py)",
+      "Bash(bash -n sonic_repro.sh)",
+      "Bash(PYTHONPATH=src python -m cvae_sa.replay65 capture --help)",
+      "Bash(PYTHONPATH=src python -m cvae_sa.replay65 compare --help)",
+      "Bash(git -C /c/Users/86136/Desktop/code/RL/bly status --short)",
+      "Bash(git -C /c/Users/86136/Desktop/code/RL/bly diff --stat)",
+      "Read(//c/Users/86136/.claude/**)",
+      "Bash(node *)"
+    ]
+  }
+}

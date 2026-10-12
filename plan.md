@@ -597,3 +597,27 @@ fallback 计为 compiled pass。默认配置已改为 `max-autotune-no-cudagraph
 顺序执行。compiled uncached 必须先完成 2-step、checkpoint/sampler readback 和无 fallback 门禁，
 之后才允许启动 cached smoke 或 20-step warm-up/200-step 稳态吞吐测试。当前修复的 Windows
 compileall 与 v2 protocol/model 测试已通过；Ubuntu CUDA smoke、数值 parity 和吞吐仍待新 run。
+
+## 19. replay65 v2：3 s 回放、闭环重采集源与 A/B/C 对比（Windows 已实现，待 Ubuntu 执行）
+
+回放窗口改为整块 64 帧的倍数，默认 `--horizon-steps 192`（3 chunk，3.84 s@50 Hz）。每个 chunk
+仍用训练时的 65-token 形状 [65,70]/[64,29] 单独推理，Mask 与 C 的 epsilon 沿用该 chunk 的
+`stable_window_id`；相邻 chunk 共享边界 State，拼接时丢弃后一块首帧，并在
+`chunk_boundary_state_max_abs` 报告两块预测的分歧。请求起点越过 episode 末尾时按 64 对齐前移，
+写入 `window_start_shift`。
+
+原始回放误差的修复路线是把“源”换成可复现的闭环采集：`replay65 capture` 从 HDF 第 0 帧
+exact-init，跑跟踪策略 `window_start+H` 步，记录 raw Action 与完整状态；随后用相同 seed 开环
+重放两次 raw Action，形成确定性门禁（joint/root/body max-abs ≤1e-4）。通过后写
+`capture_complete.json` 与 `markers/replay65_capture.status=DETERMINISTIC`。`prepare --capture-run`
+以该采集为真值源：模型输入张量来自采集归一化切片，身份仍是数据集窗口；模型 Action 在前缀
+[0,start) 执行原 raw Action，评分只在 [start,start+H]，前缀偏差另报 `prefix_max_abs`。
+确定性源使基线误差≈0，此时模型质量改用绝对阈值（`FAIL_ABSOLUTE_THRESHOLDS`），不再用比值。
+数据集模式保留，仍对 HDF 计分并沿用相对基线判定。采集源不是训练样本（`training_seen=false`）。
+
+`replay65 compare --runs RA RB RC` 要求三条路线同窗口、同 horizon、同 seed、同源 SHA；B/C 默认
+`full_action`，A 使用其唯一的全预测回放。输出 `compare.json`（逐帧误差、首次摔倒帧：倾角>60°
+或 root z<0.35 m）、多线误差 SVG，以及 `compare_ghost.mp4`（源不透明，A 蓝/B 绿/C 橙半透明
+叠加，2D 合成不做深度排序）和 `compare_grid.mp4`（Source/A/B/C 2×2，带实时误差与 FALLEN 标记）。
+视频仍是运动学回放，不代替物理指标。Windows 上 `test_replay65.py` 22 项、kit 相关 26 项通过；
+Isaac 采集、确定性门禁结果和 MuJoCo 渲染待 Ubuntu 验证。

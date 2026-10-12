@@ -504,3 +504,13 @@ physical State、Action 和 contact logits。compiled route 发生输出 clone/�
 recompile limit 时切换到 eager，并写入 `compile_fallback_reason/phase`；该路径不计为 compiled
 性能通过。新的 run 必须检查 `runtime_contract.compile_mode`、`compile_observations`、
 `compile_info`、`failure.json/progress.json` 和 execution marker，再决定是否进入吞吐基准。
+
+## 17. 原始 Action 回放漂移的处理方式（2026-10-12）
+
+第 7 节的漂移来源不变：HDF 只保存可写状态和参数，不含执行器延迟队列、PhysX 接触缓存等内部
+历史；从窗口中段 exact-init 后开环执行记录 Action，必然与当初闭环采集的内部状态不一致。
+本轮不再试图补全这些不可观测状态，而是让“源”本身来自同一仿真器：从第 0 帧 exact-init 闭环
+采集，再以相同 seed 开环重放其 raw Action。若两次重放与采集逐位接近（≤1e-4），则基线误差来自
+模型而非仿真器；若不满足，`capture_determinism.json` 会标记 `NON_DETERMINISTIC`，该窗口的
+模型质量仍不可判定。这把根因问题转化成可检验的门禁，但并未证明 HDF 采集当时的内部状态，
+采集轨迹与 HDF 的偏差只作为信息量写入 `dataset_to_capture`，不参与判定。

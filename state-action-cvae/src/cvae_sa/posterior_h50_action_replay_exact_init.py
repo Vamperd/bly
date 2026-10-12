@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -1068,7 +1069,12 @@ def _first_threshold_crossings(errors: dict[str, np.ndarray]) -> dict[str, int |
     return result
 
 
-def _write_error_svg(path: Path, errors: dict[str, np.ndarray], fps: float) -> None:
+def _write_error_svg(
+    path: Path,
+    errors: dict[str, np.ndarray],
+    fps: float,
+    title: str = "Recorded HDF vs exact-init original Action replay",
+) -> None:
     width, height = 1100, 650
     margin_left, margin_right, margin_top, margin_bottom = 100, 30, 45, 65
     plot_width = width - margin_left - margin_right
@@ -1085,7 +1091,7 @@ def _write_error_svg(path: Path, errors: dict[str, np.ndarray], fps: float) -> N
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="white"/>',
-        '<text x="550" y="25" text-anchor="middle" font-family="sans-serif" font-size="18">Recorded HDF vs exact-init original Action replay</text>',
+        f'<text x="550" y="25" text-anchor="middle" font-family="sans-serif" font-size="18">{html.escape(title)}</text>',
     ]
     frame_count = max(len(value) for value in errors.values())
     for index, ((_, values), color, threshold, label) in enumerate(

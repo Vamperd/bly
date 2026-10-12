@@ -1098,6 +1098,98 @@ prepare_action_mask_motion_dir() {
   printf '%s\n' "$motion_dir"
 }
 
+# Closed-loop policy rollout from the recorded frame-0 state. Its raw Actions
+# become the replay65 source, so original-Action replays are bit-comparable.
+phase_capture_replay65_source() {
+  activate_env
+  require_run_gpu_capacity
+  [[ -n "$ACTION_MASK_RUN_DIR" ]] \
+    || die "Set ACTION_MASK_RUN_DIR to the replay65 capture run"
+  local run_dir request motion_dir checkpoint_path seed steps output_dir
+  local exact_init_file exact_init_hash exact_init_report
+  run_dir="$(validated_run_dir "$ACTION_MASK_RUN_DIR")"
+  ensure_run_layout "$run_dir"
+  request="$run_dir/manifests/replay65_capture_request.json"
+  [[ -s "$request" ]] || die "replay65 capture request is missing: $request"
+  motion_dir="$(prepare_action_mask_motion_dir "$run_dir" "$request")"
+  checkpoint_path="$(prepare_eval_checkpoint "$run_dir")"
+  seed="$(json_manifest_value "$request" seed)"
+  steps="$(json_manifest_value "$request" steps)"
+  [[ "$steps" =~ ^[1-9][0-9]*$ ]] || die "Invalid replay65 capture step count: $steps"
+  exact_init_file="$(json_manifest_value "$request" exact_initialization_file)"
+  exact_init_hash="$(json_manifest_value "$request" exact_initialization_file_sha256)"
+  exact_init_report="$(json_manifest_value "$request" exact_initialization_report_path)"
+  [[ -s "$exact_init_file" && "$(realpath -m -- "$exact_init_file")" == "$run_dir/"* ]] \
+    || die "replay65 capture initialization must exist inside the run: $exact_init_file"
+  [[ "$(realpath -m -- "$exact_init_report")" == "$run_dir/"* ]] \
+    || die "replay65 capture readback must be stored inside the run"
+  [[ "$(sha256sum "$exact_init_file" | awk '{print $1}')" == "$exact_init_hash" ]] \
+    || die "replay65 capture initialization SHA256 no longer matches its request"
+  output_dir="$run_dir/data/source"
+  mkdir -p -- "$output_dir"
+
+  # max_render_steps counts States: N control steps record N Actions and N+1 States.
+  if (
+    cd "$SONIC_DIR"
+    PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python gear_sonic/eval_agent_trl.py \
+      "+checkpoint=$checkpoint_path" \
+      +headless=True \
+      "hydra.run.dir=$run_dir/manifests/hydra_replay65_capture" \
+      "++eval_callbacks=[]" \
+      ++run_eval_loop=True \
+      ++run_once=False \
+      "++max_render_steps=$((steps + 1))" \
+      "++external_replay_initialization_path=$exact_init_file" \
+      "++external_replay_initialization_report_path=$exact_init_report" \
+      ++num_envs=1 \
+      "++seed=$seed" \
+      ++use_encoder=g1 \
+      ++manager_env.config.render_results=False \
+      ++manager_env.config.enable_cameras=False \
+      ++manager_env.config.terrain_type=plane \
+      ++manager_env.config.contact_history_length=4 \
+      "~manager_env/recorders=empty" \
+      ++manager_env.recorders.dataset_export_mode=0 \
+      "++manager_env.recorders.trajectory._target_=replay65_recorder.Replay65RecorderCfg" \
+      "++manager_env.recorders.trajectory.save_path=$output_dir" \
+      ++manager_env.recorders.trajectory.environment_id_offset=0 \
+      ++manager_env.observations.policy.enable_corruption=False \
+      ++manager_env.observations.tokenizer.enable_corruption=False \
+      "+manager_env/terminations=tracking/eval" \
+      ++manager_env.terminations.anchor_pos=null \
+      ++manager_env.terminations.anchor_ori_full=null \
+      ++manager_env.terminations.ee_body_pos=null \
+      ++manager_env.terminations.foot_pos_xyz=null \
+      ++manager_env.events.physics_material=null \
+      ++manager_env.events.add_joint_default_pos=null \
+      ++manager_env.events.base_com=null \
+      ++manager_env.events.push_robot=null \
+      ++manager_env.events.randomize_rigid_body_mass=null \
+      ++manager_env.commands.motion.use_paired_motions=False \
+      ++manager_env.commands.motion.sample_unique_motions=False \
+      ++manager_env.commands.motion.start_from_first_frame=True \
+      ++manager_env.commands.motion.sample_from_n_initial_frames=null \
+      ++manager_env.commands.motion.eval_motion_repeat=1 \
+      ++manager_env.commands.motion.eval_require_full_batch=True \
+      ++manager_env.commands.motion.randomize_eval_resets=False \
+      ++manager_env.commands.motion.motion_lib_cfg.deterministic_motion_order=True \
+      ++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=1 \
+      "++manager_env.commands.motion.motion_lib_cfg.motion_file=$motion_dir" \
+      ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=zeros
+  ) 2>&1 | tee "$run_dir/logs/replay65_capture.log"; then
+    :
+  else
+    local rc=$?
+    record_exit_code "$run_dir" replay65_capture "$rc"
+    return "$rc"
+  fi
+  [[ -s "$output_dir/000000.replay.npz" && -s "$output_dir/000000.trajectory.pkl" \
+      && -s "$output_dir/000000.runtime.json" && -s "$exact_init_report" ]] \
+    || die "replay65 capture did not produce replay NPZ, trajectory PKL, runtime audit and readback"
+  record_exit_code "$run_dir" replay65_capture 0
+  mark_stage "$run_dir" replay65_capture.ok
+}
+
 phase_capture_action_mask_source() {
   activate_env
   require_run_gpu_capacity
@@ -1224,10 +1316,13 @@ phase_replay_action_mask() {
 
   local scenario_index scenario_id action_slice hydra_dir exact_init_report
   local replay_recorder="action_replay_recorder.ActionReplayTrajectoryRecorderCfg"
+  local -a replay65_args=()
   if [[ "$(json_manifest_optional_value "$request" replay65_guard)" == "True" \
       || "$(json_manifest_optional_value "$request" replay65_guard)" == "true" ]]; then
     [[ -n "$exact_init_file" ]] || die "replay65 requires exact initialization"
     replay_recorder="replay65_recorder.Replay65RecorderCfg"
+    # Match the collection's contact sensor history so contact States are comparable.
+    replay65_args+=(++manager_env.config.contact_history_length=4)
   fi
   for ((scenario_index = 0; scenario_index < num_envs; scenario_index++)); do
     printf -v scenario_id '%06d' "$scenario_index"
@@ -1258,6 +1353,7 @@ phase_replay_action_mask() {
         ++run_once=False \
         "++external_action_replay_path=$action_slice" \
         "${exact_init_args[@]}" \
+        "${replay65_args[@]}" \
         ++num_envs=1 \
         "++seed=$seed" \
         ++use_encoder=g1 \
@@ -1468,6 +1564,8 @@ Phases:
   dump-trajectory Record one headless episode without enabling cameras or RTX.
   render-mujoco   Render the latest trajectory through MuJoCo OSMesa.
   render-offline  Dump a fresh trajectory and render it through MuJoCo OSMesa.
+  capture-replay65-source
+                  Closed-loop exact-init rollout used as the deterministic replay65 source.
   capture-action-mask-source
                   Capture one deterministic SONIC source trajectory for CVAE replay.
   replay-action-mask
@@ -1526,6 +1624,7 @@ main() {
     dump-trajectory) phase_dump_trajectory ;;
     render-mujoco) phase_render_mujoco ;;
     render-offline) phase_render_offline ;;
+    capture-replay65-source) phase_capture_replay65_source ;;
     capture-action-mask-source) phase_capture_action_mask_source ;;
     replay-action-mask) phase_replay_action_mask ;;
     render-action-mask) phase_render_action_mask ;;

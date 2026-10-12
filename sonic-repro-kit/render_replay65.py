@@ -17,23 +17,43 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def scored_frames(values, horizon, offset):
+    """Window-length inputs pass through; full replays (prefix + window) are sliced."""
+    if len(values) == horizon + 1:
+        return values
+    if len(values) == offset + horizon + 1:
+        return values[offset:offset + horizon + 1]
+    raise ValueError(f"trajectory has {len(values)} frames; expected {horizon + 1} or {offset + horizon + 1}")
+
+
+def draw_timeline(cv2, frame, hidden, t, y=457):
+    width = frame.shape[1] - 20
+    count = len(hidden)
+    for j in range(count):
+        x0 = 10 + j * width // count
+        x1 = max(x0, 10 + (j + 1) * width // count - 1)
+        cv2.rectangle(frame, (x0, y), (x1, y + 12), (50, 50, 220) if hidden[j] else (70, 100, 70), -1)
+    x = 10 + t * width // count
+    cv2.line(frame, (x, y - 4), (x, y + 18), (255, 255, 255), 2)
+
+
 def video_jobs(window, meta):
-    truth = window/"data/recorded_hdf.trajectory.pkl"
+    truth = window/"data/source.trajectory.pkl"
     jobs=[]
     baseline=window/"simulations/baseline/data/replay"
     if (baseline/"000001.trajectory.pkl").exists():
         jobs.append(("original_repeatability",[truth,baseline/"000000.trajectory.pkl",baseline/"000001.trajectory.pkl"],
-                     ["Recorded HDF","Original Action repeat 1","Original Action repeat 2"],None))
+                     ["Source","Original Action repeat 1","Original Action repeat 2"],None))
     for entry in meta["entries"]:
         if not entry["representative"]:
             continue
         name=entry["mask"]; data=window/"data"/name
         jobs.append((name+"_state",[truth,data/"truth_integrated.trajectory.pkl",data/"predicted_integrated.trajectory.pkl"],
-            ["Recorded HDF pose","Truth State integration","Model completed State integration"],data/"prediction.npz"))
+            ["Source pose","Truth State integration","Model completed State integration"],data/"prediction.npz"))
         model=window/"simulations"/name/"data/replay/000000.trajectory.pkl"
         if model.exists() and (baseline/"000000.trajectory.pkl").exists():
             jobs.append((name+"_action",[truth,baseline/"000000.trajectory.pkl",model],
-                ["Recorded HDF pose","Original Action replay","Model Action replay"],data/"prediction.npz"))
+                ["Source pose","Original Action replay","Model Action replay"],data/"prediction.npz"))
     return jobs
 
 
@@ -57,7 +77,7 @@ def main(argv=None):
         window=run/relative
         meta=json.loads((window/"manifests/replay65.json").read_text())
         report=json.loads((window/"manifests/replay65_report.json").read_text())
-        with np.load(window/"data/recorded_hdf.replay.npz",allow_pickle=False) as archive:
+        with np.load(window/"data/source.replay.npz",allow_pickle=False) as archive:
             if tuple(archive["joint_names"].tolist())!=G1_ISAACLAB_JOINT_NAMES:
                 raise ValueError("recorded Isaac joint order does not match the renderer permutation")
         xml=window/"manifests/replay65_render.xml"
@@ -70,12 +90,13 @@ def main(argv=None):
         camera.type=mujoco.mjtCamera.mjCAMERA_FREE
         camera.azimuth=135; camera.elevation=-15; camera.distance=3.5
         try:
+            horizon=int(meta.get("horizon_steps",64)); offset=int(meta.get("score_offset",0)); frames_total=horizon+1
             for name,paths,labels,prediction in video_jobs(window,meta):
                 trajectories=[load_trajectory(path) for path in paths]
-                qposes=[build_mujoco_qpos(t) for t in trajectories]
-                if any(q.shape!=(65,36) or not np.isfinite(q).all() for q in qposes) or any(not np.isclose(t["fps"],50) for t in trajectories):
-                    raise ValueError("video requires 65 finite frames, 50Hz; partial replay cannot masquerade as complete")
-                hidden=np.zeros(65,bool)
+                qposes=[scored_frames(build_mujoco_qpos(t),horizon,offset) for t in trajectories]
+                if any(q.shape!=(frames_total,36) or not np.isfinite(q).all() for q in qposes) or any(not np.isclose(t["fps"],50) for t in trajectories):
+                    raise ValueError(f"video requires {frames_total} finite frames, 50Hz; partial replay cannot masquerade as complete")
+                hidden=np.zeros(frames_total,bool)
                 if prediction:
                     with np.load(prediction,allow_pickle=False) as values:
                         hidden=values["state_mask"].any(axis=-1) if name.endswith("_state") else np.r_[values["action_mask"].any(axis=-1),False]
@@ -90,7 +111,7 @@ def main(argv=None):
                     raise FileExistsError(f"unverified/changed video is not overwritten: {output}")
                 writer=_writer(imageio,output,50.)
                 try:
-                    for t in range(65):
+                    for t in range(frames_total):
                         panels=[]
                         for qpos,label in zip(qposes,labels):
                             data.qpos[:]=qpos[t]; data.qvel[:]=0
@@ -108,16 +129,15 @@ def main(argv=None):
                                     banner="MODEL_INITIALIZATION_INVALID / UNDETERMINED"
                             cv2.putText(frame,label,(10,24),cv2.FONT_HERSHEY_SIMPLEX,.52,(245,245,245),1)
                             cv2.putText(frame,banner,(10,47),cv2.FONT_HERSHEY_SIMPLEX,.40,(80,190,255),1)
-                            cv2.putText(frame,f"{meta['route']} | {name} | frame {t}/64 | 50 Hz",(10,71),cv2.FONT_HERSHEY_SIMPLEX,.43,(230,230,230),1)
-                            for j in range(65):
-                                cv2.rectangle(frame,(10+j*9,457),(18+j*9,469),(50,50,220) if hidden[j] else (70,100,70),-1)
-                            cv2.line(frame,(10+t*9,453),(10+t*9,475),(255,255,255),2)
+                            episode_frame=int(meta.get("window_start",meta["window"]["window_start"]))+t
+                            cv2.putText(frame,f"{meta['route']} | {name} | frame {t}/{horizon} (ep {episode_frame}) | 50 Hz",(10,71),cv2.FONT_HERSHEY_SIMPLEX,.43,(230,230,230),1)
+                            draw_timeline(cv2,frame,hidden,t)
                             panels.append(frame)
                         writer.append_data(np.concatenate(panels,axis=1))
                 finally:
                     writer.close()
                 frames,seconds=count_frames_and_secs(str(output))
-                if frames!=65 or output.stat().st_size<=0:
+                if frames!=frames_total or output.stat().st_size<=0:
                     raise RuntimeError("encoded frame count mismatch")
                 outputs.append({"path":str(output.relative_to(run)),"sha256":sha(output),"frames":frames,"seconds":seconds,
                     "input_hashes":input_hashes,"baseline_banner":report["banner"],"xml":xml_details})

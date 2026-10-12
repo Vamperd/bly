@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -24,13 +25,38 @@ def fixture(slot=7):
     return default_collate([sample])
 
 
-def trajectory(offset=0.):
-    states=np.zeros((65,70),np.float32); states[:,66]=-1; states[:,67]=1
-    quat=np.zeros((65,4),np.float32); quat[:,0]=1
-    return dict(physics_state_v3=states,physical_state=states,joint_pos=np.zeros((65,29),np.float32)+offset,
-        joint_vel=np.zeros((65,29),np.float32),root_pos=np.tile([0.,0.,1.],(65,1)).astype(np.float32),root_quat=quat,
-        root_lin_vel=np.zeros((65,3),np.float32),root_ang_vel=np.zeros((65,3),np.float32),
-        body_pos=np.zeros((65,3,3),np.float32),raw_action=np.zeros((64,29),np.float32))
+def trajectory(offset=0.,n=64):
+    states=np.zeros((n+1,70),np.float32); states[:,66]=-1; states[:,67]=1
+    quat=np.zeros((n+1,4),np.float32); quat[:,0]=1
+    return dict(physics_state_v3=states,physical_state=states,joint_pos=np.zeros((n+1,29),np.float32)+offset,
+        joint_vel=np.zeros((n+1,29),np.float32),root_pos=np.tile([0.,0.,1.],(n+1,1)).astype(np.float32),root_quat=quat,
+        root_lin_vel=np.zeros((n+1,3),np.float32),root_ang_vel=np.zeros((n+1,3),np.float32),
+        body_pos=np.zeros((n+1,3,3),np.float32),raw_action=np.zeros((n,29),np.float32))
+
+
+VALID_READBACK={"payload_sha256":"p","initialization_file_sha256":"f","application_complete":True,"errors":{
+    k:0. for k in ("joint_pos_max_abs_rad","joint_vel_max_abs_rad_s","root_pos_max_abs_m","root_orientation_error_deg",
+    "root_lin_vel_max_abs_m_s","root_ang_vel_max_abs_rad_s","body_pos_max_abs_m","runtime_context_max_abs",
+    "previous_raw_action_max_abs","current_raw_action_max_abs","previous_processed_action_max_abs","initial_joint_target_max_abs")}}
+VALID_RUNTIME={"contract_verified":True,"midrun_reset":False}
+MAPPING=dict(nominal_default_joint_pos=np.zeros(29,np.float32),action_scale=np.ones(29,np.float32),
+    action_offset=np.zeros(29,np.float32),action_clip=np.empty(0,np.float32),wrapper_action_clip=np.float32(np.nan))
+
+
+def write_worker(child,trajectories,valid=True):
+    """Fake replay-action-mask worker output, sealed like simulate_group."""
+    (child/"manifests").mkdir(parents=True); (child/"data/replay").mkdir(parents=True)
+    steps=trajectories[0]["raw_action"].shape[0]
+    replay._write_npz(child/"data/raw_actions.npz",raw_actions=np.stack([t["raw_action"] for t in trajectories],axis=1))
+    for i,value in enumerate(trajectories):
+        replay._write_npz(child/f"data/replay/{i:06d}.replay.npz",**value,processed_action=value["raw_action"],
+                          joint_names=np.asarray([f"joint_{j}" for j in range(29)]))
+        replay._write_trajectory(child/f"data/replay/{i:06d}.trajectory.pkl",joint_pos=value["joint_pos"],
+                                 root_pos=value["root_pos"],root_quat=value["root_quat"],fps=50.)
+        (child/f"manifests/exact_initialization_readback_{i:06d}.json").write_text(json.dumps(VALID_READBACK if valid else {"errors":{}}))
+        (child/f"data/replay/{i:06d}.runtime.json").write_text(json.dumps({**VALID_RUNTIME,"control_steps":steps} if valid else {}))
+    hashes={str(p.relative_to(child)).replace("\\","/"):replay.file_sha256(p) for p in child.rglob("*") if p.is_file()}
+    (child/"manifests/replay65_worker_complete.json").write_text(json.dumps({"hashes":hashes}))
 
 
 class Replay65Test(unittest.TestCase):
@@ -102,17 +128,10 @@ class Replay65Test(unittest.TestCase):
             meta={"window":{"window_start":100},"initialization":{"payload_sha256":"p","file_sha256":"f"},
                 "entries":[{"mask":"full_action","action_model_replay":True,"representative":True}]}
             (root/"manifests/replay65.json").write_text(json.dumps(meta))
-            replay._write_npz(root/"data/recorded_hdf.replay.npz",**trajectory())
+            replay._write_npz(root/"data/source.replay.npz",**trajectory())
             replay._write_npz(root/"data/exact_initialization.npz",action_scale=np.ones(29),action_offset=np.zeros(29),action_clip=np.empty(0),wrapper_action_clip=np.float32(np.nan))
             for tag,n in (("baseline",2),("full_action",1)):
-                child=root/"simulations"/tag; (child/"manifests").mkdir(parents=True); (child/"data/replay").mkdir(parents=True)
-                replay._write_npz(child/"data/raw_actions.npz",raw_actions=np.zeros((64,n,29)))
-                for i in range(n):
-                    replay._write_npz(child/f"data/replay/{i:06d}.replay.npz",**trajectory(.3),processed_action=np.zeros((64,29)))
-                    (child/f"manifests/exact_initialization_readback_{i:06d}.json").write_text(json.dumps({"errors":{}}))
-                    (child/f"data/replay/{i:06d}.runtime.json").write_text("{}")
-                hashes={str(p.relative_to(child)):replay.file_sha256(p) for p in child.rglob("*") if p.is_file()}
-                (child/"manifests/replay65_worker_complete.json").write_text(json.dumps({"hashes":hashes}))
+                write_worker(root/"simulations"/tag,[trajectory(.3)]*n,valid=False)
             (root/"data/full_action").mkdir()
             replay._write_npz(root/"data/full_action/prediction.npz",predicted_state=trajectory()["physical_state"],completed_state=trajectory()["physical_state"])
             report=replay.report_window(root)
@@ -121,6 +140,61 @@ class Replay65Test(unittest.TestCase):
             self.assertTrue(report["execution_complete"])
             self.assertIn("BASELINE_INVALID",report["banner"])
             self.assertEqual(report["comparisons"]["original_repeatability"]["joint_position_rmse_rad"],0)
+
+    def test_horizon_chunk_helpers(self):
+        self.assertEqual(replay.resolve_window_start(64,300,192),(64,None))
+        start,shift=replay.resolve_window_start(200,300,192)
+        self.assertEqual(start,64); self.assertIn("shifted",shift)
+        with self.assertRaises(ValueError):
+            replay.resolve_window_start(0,100,192)
+        with self.assertRaises(ValueError):
+            replay.resolve_window_start(0,300,100)
+        ds=SimpleNamespace(refs=[SimpleNamespace(episode_index=e,fixed_start=s) for e,s in
+                                 ((0,0),(0,64),(0,128),(0,192),(1,64))])
+        self.assertEqual(replay.chunk_indices(ds,1,64,3),[1,2,3])
+        with self.assertRaisesRegex(ValueError,"no fixed T64"):
+            replay.chunk_indices(ds,4,64,2)
+        parts=[np.full((65,2),k,np.float32) for k in range(3)]
+        stitched=replay.stitch_states(parts)
+        self.assertEqual(stitched.shape,(193,2))
+        self.assertEqual(stitched[64,0],0); self.assertEqual(stitched[65,0],1); self.assertEqual(stitched[-1,0],2)
+
+    def test_execution_actions_whole_chunks(self):
+        raw=np.zeros((192,29),np.float32); one=np.ones(29,np.float32); zero=np.zeros(29,np.float32)
+        mask=np.zeros_like(raw,bool); mask[130:140]=True
+        executed,_,info=replay.execution_actions(raw,raw,raw+.5,mask,zero,one,zero)
+        self.assertEqual(executed.shape,(192,29)); self.assertEqual(info["replaced_elements"],290)
+        np.testing.assert_array_equal(executed[~mask],0)
+        with self.assertRaisesRegex(ValueError,"whole"):
+            replay.execution_actions(raw[:100],raw[:100],raw[:100],mask[:100],zero,one,zero)
+
+    def test_recapture_report_scores_window_after_prefix_with_absolute_thresholds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); (root/"manifests").mkdir(); (root/"data/full_action").mkdir(parents=True)
+            meta={"window":{"window_start":64},"window_start":64,"horizon_steps":64,"score_offset":64,"replay_steps":128,
+                "source_mode":"recapture","source":{"deterministic":True},
+                "initialization":{"payload_sha256":"p","file_sha256":"f"},
+                "entries":[{"mask":"full_action","action_model_replay":True,"representative":True}]}
+            (root/"manifests/replay65.json").write_text(json.dumps(meta))
+            replay._write_npz(root/"data/source.replay.npz",**trajectory(n=128))
+            replay._write_npz(root/"data/exact_initialization.npz",**MAPPING)
+            write_worker(root/"simulations/baseline",[trajectory(n=128)]*2)
+            drift=trajectory(n=128); drift["joint_pos"][70:]+=.3
+            write_worker(root/"simulations/full_action",[drift])
+            states=trajectory()["physical_state"]
+            replay._write_npz(root/"data/full_action/prediction.npz",predicted_state=states,completed_state=states)
+            report=replay.report_window(root)
+            self.assertTrue(report["baseline_valid"])
+            self.assertIs(report["quality_pass"],False)
+            self.assertEqual(report["model_physical_quality"],"FAIL_ABSOLUTE_THRESHOLDS")
+            self.assertEqual(report["model_quality"]["full_action"]["mode"],"absolute_thresholds")
+            comparison=report["comparisons"]["source_to_full_action"]
+            self.assertEqual(comparison["aligned_state_count"],65)
+            self.assertEqual(comparison["prefix_max_abs"]["joint_pos"],0)
+            self.assertEqual(comparison["first_crossing_episode_frame"]["joint_position_rmse_rad"],70)
+            meta["source"]["deterministic"]=False
+            (root/"manifests/replay65.json").write_text(json.dumps(meta))
+            self.assertFalse(replay.report_window(root)["baseline_valid"])
 
     def test_baseline_thresholds(self):
         metrics={k:0. for k in replay.THRESHOLDS}; metrics["foot_contact_accuracy"]=1.
@@ -163,6 +237,8 @@ class Replay65Test(unittest.TestCase):
             value["action"]=torch.zeros(1,64,29)
             sample={k:v[0] for k,v in value.items()}
             class Dataset:
+                refs=[SimpleNamespace(episode_index=0,fixed_start=0)]
+                episodes=[{"steps":64}]
                 def __getitem__(self,index): return sample
                 def close(self): pass
             ds=Dataset(); fixtures=Fixtures(ds,[0],expand=True)
@@ -177,7 +253,8 @@ class Replay65Test(unittest.TestCase):
             truth["action_target_canonical"]=np.zeros((64,29),np.float32)
             truth["joint_names"]=init["joint_names"]
             args=argparse.Namespace(output_run=root/"output",checkpoint=path,dataset_run=dataset_run,route="B",window_index=0,selection=None,
-                masks=list(replay.REPRESENTATIVES),mask_seed=None,sample_seed=3,sample_index=0,simulation_seed=7,action_mode="masked-completion",device="cpu",command="prepare")
+                masks=list(replay.REPRESENTATIVES),mask_seed=None,sample_seed=3,sample_index=0,simulation_seed=7,action_mode="masked-completion",device="cpu",command="prepare",
+                horizon_steps=64)
             with patch.object(replay,"make_dataset",return_value=(ds,[0])),patch.object(replay,"load_source",return_value=(truth,init,{}, {"motion_file":"unused","motion_file_sha256":"unused"})):
                 replay.prepare(args)
             replay.verify_prepared(args.output_run)
@@ -193,6 +270,138 @@ class Replay65Test(unittest.TestCase):
                 np.testing.assert_array_equal(data["completed_state"],truth["physical_state"])
             with self.assertRaises(FileExistsError):
                 replay.prepare(args)
+
+
+def fake_capture_run(run,replays,start=64,horizon=64):
+    """Capture run after the Isaac worker; the baseline child is pre-sealed so no simulator is launched."""
+    for folder in ("manifests","data/source","markers","plots","logs"):
+        (run/folder).mkdir(parents=True,exist_ok=True)
+    steps=start+horizon
+    source=trajectory(n=steps)
+    replay._write_npz(run/"data/source/000000.replay.npz",**source,processed_action=source["raw_action"])
+    replay._write_trajectory(run/"data/source/000000.trajectory.pkl",joint_pos=source["joint_pos"],
+                             root_pos=source["root_pos"],root_quat=source["root_quat"],fps=50.)
+    (run/"data/source/000000.runtime.json").write_text(json.dumps({**VALID_RUNTIME,"control_steps":steps}))
+    (run/"manifests/exact_initialization_readback_capture.json").write_text(json.dumps(VALID_READBACK))
+    replay._write_npz(run/"data/exact_initialization.npz",**MAPPING)
+    replay._write_npz(run/"data/dataset_source.replay.npz",**trajectory(.01,n=steps))
+    replay._write_npz(run/"data/normalization.npz",unused=np.zeros(1))
+    (run/"manifests/source_schema.json").write_text("{}")
+    (run/"markers/replay65_capture.ok").write_text("ok\n")
+    meta={"window":{"window_index":3,"stable_window_id":"w3","motion_key":"m","window_start":start},"window_start":start,
+          "horizon_steps":horizon,"simulation_seed":7,"motion_file":"motion.pkl","motion_file_sha256":"x",
+          "initialization":{"payload_sha256":"p","file_sha256":"f"}}
+    (run/"manifests/capture.json").write_text(json.dumps(meta))
+    write_worker(run/"simulations/baseline",replays)
+    return SimpleNamespace(output_run=run,checkpoint=run.parent/"ckpt/checkpoints/x.pt",dataset_run=run.parent/"dataset",
+                           window_index=3,horizon_steps=horizon,simulation_seed=7)
+
+
+class Replay65CaptureCompareTest(unittest.TestCase):
+    def test_capture_determinism_gate_and_seal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run=Path(tmp)/"capture"
+            args=fake_capture_run(run,[trajectory(n=128)]*2)
+            complete=replay.capture(args)
+            self.assertTrue(complete["deterministic"])
+            self.assertEqual((run/"markers/replay65_capture.status").read_text().strip(),"DETERMINISTIC")
+            gate=json.loads((run/"manifests/capture_determinism.json").read_text())
+            self.assertEqual(gate["scored_region"],[64,128])
+            self.assertGreater(gate["dataset_to_capture"]["scored"]["joint_position_rmse_rad"],0)
+            request=json.loads((run/"manifests/replay65_capture_request.json").read_text())
+            self.assertEqual(request["steps"],128)
+            loaded=replay.load_capture(run)
+            self.assertEqual(loaded["canonical"].shape,(128,29))
+            self.assertEqual(replay.capture(args)["hashes"],complete["hashes"])
+            (run/"manifests/capture.json").write_text("{}")
+            with self.assertRaisesRegex(ValueError,"capture artifact changed"):
+                replay.verify_capture(run)
+
+    def test_capture_non_deterministic_simulator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run=Path(tmp)/"capture"
+            drift=trajectory(n=128); drift["root_pos"][100:,0]+=1e-3
+            complete=replay.capture(fake_capture_run(run,[trajectory(n=128),drift]))
+            self.assertFalse(complete["deterministic"])
+            gate=json.loads((run/"manifests/capture_determinism.json").read_text())
+            self.assertFalse(gate["within_limits"]["capture_to_original_2"]["root_pos"])
+            self.assertTrue(gate["within_limits"]["capture_to_original_1"]["root_pos"])
+
+    def test_capture_rejects_different_arguments_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args=fake_capture_run(Path(tmp)/"capture",[trajectory(n=128)]*2)
+            args.window_index=4
+            with self.assertRaisesRegex(ValueError,"different|started with"):
+                replay.capture(args)
+
+    def test_first_fall_frame(self):
+        value=trajectory(n=64)
+        self.assertIsNone(replay.first_fall_frame(value))
+        value["root_pos"][40:,2]=.2
+        self.assertEqual(replay.first_fall_frame(value),40)
+        tilted=trajectory(n=64); angle=np.deg2rad(70)
+        tilted["root_quat"][20:]=[np.cos(angle/2),np.sin(angle/2),0,0]
+        self.assertEqual(replay.first_fall_frame(tilted),20)
+
+    @staticmethod
+    def prepared_run(root,route,mask,model,source=None,window_id="w3"):
+        window=root/"windows/w000003"
+        (window/"manifests").mkdir(parents=True); (window/"data").mkdir()
+        (root/"manifests").mkdir(exist_ok=True)
+        (root/"manifests/replay65.json").write_text(json.dumps({"windows":["windows/w000003"]}))
+        (root/"manifests/prepared_hashes.json").write_text("{}")
+        source=source or trajectory(n=128)
+        replay._write_npz(window/"data/source.replay.npz",**source)
+        replay._write_trajectory(window/"data/source.trajectory.pkl",joint_pos=source["joint_pos"],
+                                 root_pos=source["root_pos"],root_quat=source["root_quat"],fps=50.)
+        masks=[mask] if route=="A" else list(dict.fromkeys([mask,"state_gap_16"]))
+        meta={"route":route,"window":{"stable_window_id":window_id,"window_start":64},"window_start":64,
+              "horizon_steps":64,"score_offset":64,"simulation_seed":7,"source_mode":"recapture",
+              "entries":[{"mask":m,"action_model_replay":True} for m in masks]}
+        (window/"manifests/replay65.json").write_text(json.dumps(meta))
+        for m in masks:
+            write_worker(window/"simulations"/m,[model])
+        return root
+
+    def test_compare_routes_on_shared_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp=Path(tmp); fallen=trajectory(n=128); fallen["root_pos"][100:,2]=.2
+            runs=[self.prepared_run(tmp/"a","A","state_gap_16",trajectory(.01,n=128)),
+                  self.prepared_run(tmp/"b","B","full_action",trajectory(.02,n=128)),
+                  self.prepared_run(tmp/"c","C","full_action",fallen)]
+            args=SimpleNamespace(runs=runs,labels=["A","B","C"],mask="full_action",layout="both",
+                                 output_run=tmp/"compare",skip_render=True,model=None,gl="egl")
+            manifest=replay.compare(args)
+            self.assertEqual([r["mask"] for r in manifest["routes"]],["state_gap_16","full_action","full_action"])
+            self.assertEqual([r["fall_frame"] for r in manifest["routes"]],[None,None,36])
+            self.assertEqual(len(manifest["routes"][0]["per_frame"]["joint_position_rmse_rad"]),65)
+            self.assertAlmostEqual(manifest["routes"][1]["metrics"]["joint_position_rmse_rad"],.02,places=6)
+            self.assertTrue((tmp/"compare/plots/compare_errors.svg").is_file())
+            with self.assertRaises(FileExistsError):
+                replay.compare(args)
+
+    def test_compare_rejects_different_window_or_missing_mask(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp=Path(tmp)
+            a=self.prepared_run(tmp/"a","A","full_action",trajectory(n=128))
+            b=self.prepared_run(tmp/"b","B","full_action",trajectory(n=128),window_id="other")
+            args=SimpleNamespace(runs=[a,b],labels=["A","B"],mask="full_action",layout="both",
+                                 output_run=tmp/"out1",skip_render=True,model=None,gl="egl")
+            with self.assertRaisesRegex(ValueError,"same window"):
+                replay.compare(args)
+            c=self.prepared_run(tmp/"c","C","state_gap_16",trajectory(n=128))
+            args.runs, args.output_run=[a,c], tmp/"out2"
+            with self.assertRaisesRegex(ValueError,"no Action replay for full_action"):
+                replay.compare(args)
+
+    def test_cli_parses_capture_and_compare(self):
+        with patch.object(replay,"capture") as capture, patch.object(replay,"compare") as compare, \
+                patch.object(replay.sys,"platform","win32"):
+            replay.main(["capture","--checkpoint","c.pt","--dataset-run","d","--output-run","o","--window-index","844"])
+            replay.main(["compare","--runs","a","b","c","--output-run","o","--skip-render"])
+        self.assertEqual(capture.call_args[0][0].horizon_steps,192)
+        self.assertEqual(compare.call_args[0][0].labels,["A","B","C"])
+        self.assertEqual(compare.call_args[0][0].layout,"both")
 
 
 if __name__=="__main__":

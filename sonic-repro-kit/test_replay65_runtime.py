@@ -5,7 +5,8 @@ from types import SimpleNamespace as NS
 import unittest
 import numpy as np
 from replay65_runtime import audit_and_freeze, compare_runtime, suppress_interval_event
-from render_replay65 import video_jobs
+from render_replay65 import scored_frames, video_jobs
+from render_replay65_compare import blend, robot_mask
 
 
 class Events:
@@ -60,6 +61,23 @@ class ReplayRuntimeTest(unittest.TestCase):
         jobs=video_jobs(Path("missing"),{"entries":[{"mask":"state_gap_16","representative":True}]})
         self.assertEqual(len(jobs),1)
         self.assertEqual(jobs[0][0],"state_gap_16_state")
+
+    def test_scored_frames_slices_prefix(self):
+        values=np.arange(257)
+        np.testing.assert_array_equal(scored_frames(values,192,64),np.arange(64,257))
+        self.assertEqual(len(scored_frames(np.arange(193),192,64)),193)
+        with self.assertRaises(ValueError):
+            scored_frames(np.arange(100),192,64)
+
+    def test_ghost_mask_excludes_floor_and_skybox(self):
+        # geom 0 = floor plane, geom 1 = robot mesh; objtype 5 = geom
+        segmentation=np.array([[[0,5],[1,5]],[[-1,-1],[1,7]]],np.int32)
+        mask=robot_mask(segmentation,np.array([0,7]),0,5)
+        np.testing.assert_array_equal(mask,[[False,True],[False,False]])
+        base=np.zeros((2,2,3),np.uint8); layer=np.full((2,2,3),100,np.uint8)
+        out=blend(base,layer,mask,(255,0,0),alpha=1.)
+        self.assertEqual(out[0,0].tolist(),[0,0,0])
+        self.assertGreater(out[0,1,0],out[0,1,1])
 
 
 if __name__=="__main__":
