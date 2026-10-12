@@ -159,6 +159,13 @@ class Replay65Test(unittest.TestCase):
         self.assertEqual(stitched.shape,(193,2))
         self.assertEqual(stitched[64,0],0); self.assertEqual(stitched[65,0],1); self.assertEqual(stitched[-1,0],2)
 
+    def test_state_only_continuation_starts_after_selected_window(self):
+        enabled = SimpleNamespace(state_only_continuation=True)
+        disabled = SimpleNamespace(state_only_continuation=False)
+        self.assertFalse(replay.state_only_continuation(enabled, 0))
+        self.assertTrue(replay.state_only_continuation(enabled, 1))
+        self.assertFalse(replay.state_only_continuation(disabled, 1))
+
     def test_execution_actions_whole_chunks(self):
         raw=np.zeros((192,29),np.float32); one=np.ones(29,np.float32); zero=np.zeros(29,np.float32)
         mask=np.zeros_like(raw,bool); mask[130:140]=True

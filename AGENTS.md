@@ -1053,6 +1053,11 @@ held-out masked State/Action显著改善至0.022965/0.013237，但fixed primary�
 工程执行通过；posterior mean/sample可重建，但standard-normal部署质量未通过，具体数值和证据边界见plan.md第11节与process.md第10节。
 当前不自动启动新的训练，不继续旧B或追加A，不扩大模型或改loss。下一步仅做C末步只读尾部补诊；
 A尾部补诊不设为B推进的任意max硬门禁。
+2026-10-12 新增 KL3 eager 200k 参考 run：`cvae_posterior_hierarchical_standard_cvae_65_kl3_eager_200k_eval50k_noeval0_zlqw641k`。
+该 run 为 fixed Mask、`kl_beta=0.003`、BF16 eager、compile/cache关闭、随机初始化；工程执行通过但
+standard-normal 质量仍未通过。fixed standard-normal masked RMSE 为 0.025908，held-out 为 0.059997，
+最大 State 归一化误差为 12.272463；latent KL 仍集中于 `local_15`。不得把该结果写成质量 PASS，
+不得从该 run 续训；详细证据和唯一下一步见 plan.md 第20节、process.md 第19节。
 v2源码入口为 `cvae_protocol.py`、`cvae_diagnostics.py`、`cvae_training.py`、`cvae_tools.py`；
 旧训练模块的公开入口路由到v2，不再保留旧训练循环。维护AGENTS/model/plan/process四份根文档，不恢复Next.md。
 
@@ -1100,6 +1105,7 @@ df -h /home/helloworld/bly/runs
 | 最简 posterior capacity | `posterior_capacity.py`、`posterior_capacity_plot.py`、`posterior_capacity_tail.py`、`models.py`、`configs/posterior_capacity_{minimal,reference_25m}.json` |
 | T64 direct-output与层级posterior | `posterior_direct_output.py`、`posterior_direct_output_oracle.py`、`posterior_hierarchical_t64.py`、`posterior_t64_protocol.py`、`configs/posterior_{direct_output,hierarchical}_t64*.json` |
 | H50-SCVAE标准条件生成 | `posterior_hierarchical_standard_cvae.py`、`posterior_complete_token_protocol.py`、`models.py`、`configs/posterior_hierarchical_standard_cvae_h50.json`、`cvae_repro.sh` |
+| 65-token latent 分组/逐维正态性诊断 | `latent_distribution65.py`、`latent_normality65.py`、`tests/test_latent_distribution65.py`、`tests/test_latent_normality65.py` |
 | H50-A已见窗口Action重放 | `posterior_h50_action_replay.py`、`posterior_h50_action_replay_exact_init.py`、`render_h50a_seen_window_action_replay.py`、`render_h50a_exact_action_replays.py`、`exact_replay_initializer.py`、`cvae_repro.sh` |
 | Action completion/replay | `action_mask_eval.py`、`action_masks.py`、SONIC kit replay/render 脚本 |
 | State completion/video | `state_mask_eval.py`、`state_masks.py`、`render_state_mask_comparison.py` |

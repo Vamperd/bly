@@ -563,6 +563,12 @@ window 送入 Posterior Encoder，不调用 Condition Encoder、不解码、不�
 `manifests/group_stats.json` 保留可复核数值。重建数据集只能使用显式 recovered 开关，报告
 必须保留 `exact_identity_verified=false`，不能把该诊断写成训练质量通过。
 
+新增只读后处理入口 `cvae_sa.latent_normality65`。它读取上述 `latent_arrays.npz`，对 global 256
+维和每个 local 128 维分别计算 raw sample 对 `N(0,1)` 的 KS 距离、均值/标准差偏差、偏度、
+超额峰度和 1%/99% 尾部偏差，并输出逐维 heatmap 与最大异常维度直方图。该入口同时报告
+posterior-mean 的形状正态性，但不把 posterior mean 的分布强行解释为标准正态；阈值标签只是
+诊断提示，不是 quality gate。
+
 KL 放大二倍的受控 C 对照只改变 `kl_beta: 0.001 -> 0.002`，不改变模型、Mask、初始化、
 optimizer、学习率、warmup 或部署合同。使用现有
 `CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA=0.002` 覆盖入口，产生新的随机初始化 run；不能从旧 C
@@ -621,3 +627,66 @@ exact-init，跑跟踪策略 `window_start+H` 步，记录 raw Action 与完整�
 叠加，2D 合成不做深度排序）和 `compare_grid.mp4`（Source/A/B/C 2×2，带实时误差与 FALLEN 标记）。
 视频仍是运动学回放，不代替物理指标。Windows 上 `test_replay65.py` 22 项、kit 相关 26 项通过；
 Isaac 采集、确定性门禁结果和 MuJoCo 渲染待 Ubuntu 验证。
+
+## 20. KL3 C 200k eager 结果（2026-10-12）
+
+独立随机初始化 C run 为
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl3_eager_200k_eval50k_noeval0_zlqw641k`。
+合同为 `stage=C`、`mask_mode=fixed`、32 motion、1504 个 T64 窗口、12032 fixture、200000 步，
+`kl_beta=0.003`、BF16 eager、compile/cache 均关闭、跳过 step 0 评测。数据身份为
+`cvae_overfit_subset_rebuilt_20260928_193357`，初始化 seed/mask seed 为 20260921/20260920，
+`source_checkpoint=null`。四次评测和最终 checkpoint 严格读回通过，三份 checkpoint 的 SHA256
+均为 `bc080d48a07e5861a2b8c2e0171cce980d35ee58eef7e921282c7597e3408a63`；`best_step=last_step=200000`。
+
+末步结果均为归一化连续特征空间，`masked_mse` 是所有 masked State/Action 连续元素的聚合：
+
+| 路径 | fixed masked MSE / RMSE | fixed full State / Action RMSE | fixed energy | held-out energy |
+|---|---:|---:|---:|---:|
+| posterior mean | 1.69711e-4 / 0.013027 | 0.009673 / 0.007744 | — | — |
+| posterior sample | 1.75595e-4 / 0.013251 | 0.009854 / 0.007899 | — | — |
+| standard normal | 6.71202e-4 / 0.025908 | 0.020599 / 0.013384 | 0.013854 | 0.036871 |
+| zero latent | 5.11567e-4 / 0.022618 | 0.018052 / 0.011364 | 0.016420 | — |
+
+标准正态 fixed 路径相对 posterior mean 的 masked MSE 约为 3.95 倍；held-out standard-normal
+masked MSE 为 `0.00359963`，RMSE `0.059997`。held-out 与 fixed 使用同一批窗口，只有 Mask
+坐标不同；其中 10400 个坐标为新坐标，energy `0.040645`，而 1632 个与 fixed 重合坐标的
+energy 为 `0.012823`。这属于 Mask 坐标迁移证据，不是新 motion 泛化。
+
+末步 standard-normal 的主要尾部是 State `joint_vel`：fixed 最大归一化误差 `12.272463`，
+位于 `crawl_ff_start_225_003__A133` 的 `state_rollout`；held-out 最大 State 误差 `11.898151`
+和最大 Action 误差 `4.096210` 集中在 `crawl_ff_stop_225_R_003__A233` 与
+`dance_latino_kick_kick_padeburee_doubled_R_002__A314` 的 `joint_gap_8`。Contact 仍接近完全正确，
+当前质量问题主要是连续 State/Action 尾部。
+
+训练曲线从 50k 到 200k 持续改善：fixed standard-normal energy 为
+`0.091515 -> 0.041255 -> 0.018204 -> 0.013854`，held-out energy 为
+`0.101093 -> 0.058030 -> 0.040080 -> 0.036871`；但 held-out 改善已明显慢于 fixed。
+
+latent 分组报告与 best/last 完全一致：global 平均 KL `8.7081e-6`，local 组平均 KL `0.002032`，
+其中 `local_15` 为 `0.016562`，占 local 组 KL 均值总和约 50.9%；`local_15` 只有少数维度承担
+主要偏离，且对应最后 60–64 token chunk。该结果支持 global 利用率偏低和 local_15 稀疏承载，
+但不能单独证明这是 standard-normal 误差的唯一根因。
+
+本 run 的结论为：**工程执行通过；posterior mean/sample 已见窗口重建较好；standard-normal
+部署质量未通过；`quality_pass` 保持 null。** 当前不从该 run 续训，也不同时修改 loss、latent
+维度、pooling 和网络宽度；下一步先保持结果封存，基于上述尾部和 latent 集中证据选择一个单变量
+校准实验。
+
+### 20.1 与原 `kl_beta=0.001` C 的对照边界
+
+原 C run 为 dynamic Mask、360000 步、FP32 eager；KL3 run 为 fixed Mask、200000 步、BF16 eager。
+因此下表是观测对照，不是 KL 单变量因果实验；目前没有完成的 `kl_beta=0.002` 正式质量 run，只有
+2-step eager smoke。
+
+| 指标 | 原 `0.001` C | KL3 `0.003` | 表面变化 |
+|---|---:|---:|---:|
+| fixed standard-normal masked State RMSE | 0.081051 | 0.045421 | 降低 44.0% |
+| fixed standard-normal masked Action RMSE | 0.040847 | 0.022076 | 降低 46.0% |
+| fixed standard-normal energy | 0.027423 | 0.013854 | 降低 49.5% |
+| held-out standard-normal energy | 0.026876 | 0.036871 | 上升 37.2% |
+| posterior mean fixed masked State / Action | 0.016604 / 0.007912 | 0.015256 / 0.009119 | State略好、Action变差 |
+
+训练末步的 global KL 都约为 `1e-5`，但 local KL 从原 C 的约 `1.7e-2` 降到 KL3 的约 `0.0020`；
+latent 分组仍显示 `local_15` 承担约半数 local KL，global 没有明显重新激活。当前最稳妥的解释是：
+增大 KL 确实压低了 local posterior 偏离，并改善了 fixed standard-normal 指标，但没有解决 latent
+结构集中或 held-out Mask 坐标迁移；fixed 指标的改善还可能来自 fixed Mask 训练协议本身。

@@ -294,6 +294,21 @@ def stitch_states(parts):
     return np.concatenate([parts[0], *[part[1:] for part in parts[1:]]], axis=0)
 
 
+def state_only_continuation(args, chunk):
+    """Return whether a chunk must be inferred from State inputs only.
+
+    The first 64-transition chunk is the selected checkpoint window and keeps
+    the historical replay contract.  With ``--state-only-continuation``, every
+    later chunk reuses that one dataset window as a model-input template while
+    its source State is supplied from the captured/recorded trajectory.  The
+    target Action is retained only for scoring and physical replay; it is
+    replaced by zeros before the model call, as is the preceding Action
+    context.  This keeps the single-window comparison explicit and prevents a
+    missing stride-64 HDF5 window from becoming an implicit input.
+    """
+    return bool(getattr(args, "state_only_continuation", False)) and int(chunk) > 0
+
+
 def mapping_args(init):
     return (init["nominal_default_joint_pos"], init["action_scale"], init["action_offset"],
             init["action_clip"] if init["action_clip"].size else None,
@@ -383,7 +398,12 @@ def prepare_window(args, dataset, fixtures, model, index, run, norm, rows, captu
     finite("source Action window", truth_a, (horizon, 29))
     s_mean, s_std = norm["state"]
     a_mean, a_std = norm["action"]
-    chunk_ids = chunk_indices(dataset, index, start, chunks)
+    single_window = bool(getattr(args, "state_only_continuation", False))
+    # In single-window continuation mode all chunks use the selected window's
+    # mask/fixture identity.  The later source States come from the recorded
+    # trajectory, so no consecutive T64 dataset windows are required.
+    chunk_ids = ([index] * chunks if single_window else
+                 chunk_indices(dataset, index, start, chunks))
     entries = []
     for slot, name in enumerate(PHYSICAL_MASK_NAMES):
         parts = {key: [] for key in ("ps", "pa", "sm", "am", "truth_n", "truth_an", "eps_g", "eps_l")}
@@ -397,27 +417,38 @@ def prepare_window(args, dataset, fixtures, model, index, run, norm, rows, captu
             lo = CHUNK * k
             truth_n = ((truth_s[lo:lo + CHUNK + 1] - s_mean) / s_std).astype(np.float32)
             truth_an = ((truth_a[lo:lo + CHUNK] - a_mean) / a_std).astype(np.float32)
-            if capture is None:
+            continuation_state_only = state_only_continuation(args, k)
+            if capture is None and not single_window:
                 # Compare HDF targets with the normalized dataset before interpreting predictions.
                 if not np.allclose(sample["physical_state"].numpy()[:, :68], truth_n[:, :68], atol=2e-5, rtol=1e-5):
                     raise ValueError(f"dataset/HDF State window mismatch at chunk {k}")
                 if not np.allclose(sample["action"].numpy(), truth_an, atol=2e-5, rtol=1e-5):
                     raise ValueError(f"dataset/HDF Action window mismatch at chunk {k}")
-            else:
+            elif capture is not None or single_window:
                 # Identity stays the dataset window's (masks/epsilon); tensors come from the capture.
                 sample["physical_state"] = torch.from_numpy(truth_n)
-                sample["action"] = torch.from_numpy(truth_an)
-                sample["action_before_window"] = torch.from_numpy(((before[k] - a_mean) / a_std).astype(np.float32))
+                sample["action"] = torch.from_numpy(
+                    np.zeros_like(truth_an) if continuation_state_only else truth_an
+                )
+                if capture is not None:
+                    previous = before[k]
+                    sample["action_before_window"] = torch.from_numpy(
+                        np.zeros_like(previous) if continuation_state_only else
+                        ((previous - a_mean) / a_std).astype(np.float32)
+                    )
+                elif continuation_state_only:
+                    sample["action_before_window"] = torch.zeros_like(sample["action_before_window"])
             cpu = default_collate([sample])
             ps, pa, sm, am, actual_name, eps = predict(model, cpu, args.route, args.mask_seed, args.sample_seed, args.sample_index)
             assert actual_name == name
             for key, value in (("ps", ps), ("pa", pa), ("sm", sm), ("am", am),
-                               ("truth_n", cpu["physical_state"][0].numpy()), ("truth_an", cpu["action"][0].numpy())):
+                               ("truth_n", truth_n.copy()), ("truth_an", truth_an.copy())):
                 parts[key].append(value)
             if eps is not None:
                 parts["eps_g"].append(eps[0][0].cpu().numpy()); parts["eps_l"].append(eps[1][0].cpu().numpy())
             chunk_rows.append({"chunk": k, "window_index": ci, "stable_window_id": chunk_row["stable_window_id"],
-                               "episode_start": start + lo})
+                               "episode_start": start + lo,
+                               "input_contract": "state_only" if continuation_state_only else "selected_window"})
         ps, sm, truth_n = (stitch_states(parts[key]) for key in ("ps", "sm", "truth_n"))
         pa, am, truth_an = (np.concatenate(parts[key], axis=0) for key in ("pa", "am", "truth_an"))
         # Adjacent chunks both predict the shared boundary State; report their disagreement.
@@ -477,6 +508,8 @@ def prepare_window(args, dataset, fixtures, model, index, run, norm, rows, captu
         "training_seen": source_meta["training_seen"], "horizon_steps": horizon, "chunk_count": chunks,
         "chunk_windows": chunk_rows, "window_start": start, "requested_window_start": int(row["window_start"]),
         "window_start_shift": shift, "score_offset": offset, "replay_steps": offset + horizon,
+        "single_window_continuation": single_window,
+        "continuation_input_contract": "state_only_after_first_chunk" if single_window else "dataset_window_each_chunk",
         "entries": entries,
         "initialization": init_manifest, "baseline_thresholds": THRESHOLDS,
         "model_quality": {"ratio_threshold": MODEL_QUALITY_RATIO, "metrics": MODEL_QUALITY_METRICS},
@@ -598,6 +631,7 @@ def prepare(args):
         atomic_write_json(run / "manifests/provenance.json",prov)
         atomic_write_json(run / "manifests/replay65.json",{"version":VERSION,"windows":paths,
             "source_mode":args.source,"horizon_steps":int(args.horizon_steps),
+            "single_window_continuation": bool(getattr(args, "state_only_continuation", False)),
             "capture_run":None if capture is None else str(capture["run"]),
             "selection":selection,"identity_check":identity_check,"source_checkpoint":source_info(checkpoint_path,checkpoint),
             "training_mask_seed":training_mask_seed,"replay_mask_seed":args.mask_seed,
@@ -1001,7 +1035,8 @@ def capture_source(args, run):
         row = next(r for r in rows if r["window_index"] == args.window_index)
         steps = int(dataset.episodes[dataset.refs[args.window_index].episode_index]["steps"])
         start, shift = resolve_window_start(row["window_start"], steps, args.horizon_steps)
-        chunk_indices(dataset, args.window_index, start, args.horizon_steps // CHUNK)
+        if not bool(getattr(args, "state_only_continuation", False)):
+            chunk_indices(dataset, args.window_index, start, args.horizon_steps // CHUNK)
         source, init, schema, source_meta = load_source(dataset, args.window_index, start + args.horizon_steps, start=0)
     finally:
         dataset.close()
@@ -1016,6 +1051,7 @@ def capture_source(args, run):
         "simulation_seed": int(args.simulation_seed), "motion_file": source_meta["motion_file"],
         "motion_file_sha256": source_meta["motion_file_sha256"], "raw_source": source_meta["raw_source"],
         "initialization": init_manifest, "checkpoint": str(args.checkpoint.resolve()),
+        "single_window_continuation": bool(getattr(args, "state_only_continuation", False)),
         "dataset_run": str(args.dataset_run.resolve())}
     atomic_write_json(run / "manifests/capture.json", meta)
     return meta
@@ -1049,9 +1085,12 @@ def capture(args):
     meta_path = run / "manifests/capture.json"
     if meta_path.is_file():
         meta = load_json(meta_path)
-        expected = (int(meta["window"]["window_index"]), int(meta["horizon_steps"]), int(meta["simulation_seed"]))
-        if expected != (args.window_index, horizon, args.simulation_seed):
-            raise ValueError(f"capture run was started with window/horizon/seed {expected}; use a new --output-run")
+        expected = (int(meta["window"]["window_index"]), int(meta["horizon_steps"]),
+                    int(meta["simulation_seed"]), bool(meta.get("single_window_continuation", False)))
+        actual = (args.window_index, horizon, args.simulation_seed,
+                  bool(getattr(args, "state_only_continuation", False)))
+        if expected != actual:
+            raise ValueError(f"capture run was started with window/horizon/seed/mode {expected}; use a new --output-run")
     else:
         if run.exists() and any(run.iterdir()):
             raise FileExistsError("capture requires a new empty output run")
@@ -1263,6 +1302,14 @@ def main(argv=None):
                    help="default: recapture when --capture-run is given, else dataset")
     p.add_argument("--capture-run",type=Path,help="sealed run from 'replay65 capture'")
     p.add_argument("--horizon-steps",type=int,help=f"multiple of {CHUNK}; default: capture horizon or {DEFAULT_HORIZON}")
+    p.add_argument(
+        "--state-only-continuation",
+        action="store_true",
+        help=(
+            "use the selected T64 window as the only dataset template; for chunks "
+            "after the first, provide State only and zero Action/previous-Action inputs"
+        ),
+    )
     p.add_argument("--masks",nargs="+",choices=PHYSICAL_MASK_NAMES,default=list(REPRESENTATIVES))
     p.add_argument("--mask-seed",type=int,help="default: checkpoint training fixture seed (A legacy: 20260920)")
     p.add_argument("--sample-seed",type=int,default=20260923)
@@ -1294,6 +1341,11 @@ def main(argv=None):
         c.add_argument("--"+flag,type=Path,required=True)
     c.add_argument("--window-index",type=int,required=True)
     c.add_argument("--horizon-steps",type=int,default=DEFAULT_HORIZON)
+    c.add_argument(
+        "--state-only-continuation",
+        action="store_true",
+        help="capture a longer source trajectory without requiring consecutive T64 dataset windows",
+    )
     c.add_argument("--simulation-seed",type=int,default=20260923)
     m=sub.add_parser("compare",help="ghost overlay / 2x2 grid of several routes on one window")
     m.add_argument("--runs",type=Path,nargs="+",required=True)

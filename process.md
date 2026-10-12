@@ -452,6 +452,10 @@ C 当前已知现象是 posterior mean/sample 重建较好，而部署 standard-
 坍缩”或“local 只有一部分有效”；这些是待验证的机制假设。诊断只读旧 checkpoint 和重建数据集，
 不改变 replay、训练和质量门禁。
 
+逐维正态性使用 `cvae_sa.latent_normality65` 对 `latent_distribution65` 的 NPZ 只读后处理：
+KS 距离用于比较经验分布与标准正态，偏度/超额峰度和尾部分位数用于识别非高斯尾部；
+`near_standard_normal` 只是固定启发式标签，不能替代 standard-normal 路径的重建质量评测。
+
 KL×2 运行是单变量对照：仍从随机初始化开始，保留原 beta warmup 10000 steps、BF16/compile
 配置和 360k C 步数，只把 effective `kl_beta` 改为 0.002。若该 run 的 standard-normal
 误差下降，同时 local/global 的 KL 分布没有出现单组过度收缩，才支持“KL 权重不足”这一候选
@@ -530,3 +534,66 @@ Windows 已修正 `cvae_training.py`：compiled preflight 先安装 hooks、完�
 `tests.test_posterior_hierarchical_standard_cvae`（9 tests）均通过。上述 Ubuntu compiled 失败
 目录保留只读，不 resume；同步此修复后必须用新的 run 目录重做两个 compiled smoke，再进入性能
 基准。
+
+## 19. KL3 C 200k：工程通过，standard-normal 尾部仍未通过（2026-10-12）
+
+本节证据来自回传目录
+`C:/Users/86136/Desktop/replay/1012_KL3测评zip/`，对应 Ubuntu run
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl3_eager_200k_eval50k_noeval0_zlqw641k`。
+训练为独立随机初始化、fixed Mask、`kl_beta=0.003`、BF16 eager、200000 步；compile、cache、
+pin-memory 和 non-blocking transfer 均关闭。四次评测、有限值、Posterior/Condition 调用、
+checkpoint/optimizer/scheduler 读回均通过，`execution_pass=true`；`quality_pass=null`。
+
+末步 fixed 路径的 masked State/Action RMSE 为 posterior mean `0.013027`、posterior sample
+`0.013251`、standard normal `0.025908`、zero latent `0.022618`。standard-normal full
+State/Action RMSE 为 `0.020599/0.013384`，energy `0.013854`；held-out standard-normal 为
+`0.028694/0.017950`，masked RMSE `0.059997`，energy `0.036871`。因此 standard-normal 的
+单样本连续误差高于 zero latent，energy 虽略优于 zero latent，仍明显差于 posterior 路径。
+
+held-out 不是新 motion：它与 fixed 使用相同 1504 个窗口，只改变 Mask 坐标。新坐标 10400 个
+fixture 的 State/Action masked RMSE 为 `0.066908/0.042441`，重合坐标 1632 个 fixture 为
+`0.050919/0.024446`；energy 分别为 `0.040645/0.012823`。这证明当前部署路径对 Mask 坐标
+迁移仍敏感，不能写成 motion 泛化结果。
+
+尾部定位为连续速度和动作误差，而不是主要 contact 故障。fixed standard-normal 最大 State
+归一化误差 `12.272463` 为 `joint_vel_26`，位于 `crawl_ff_start_225_003__A133` 的
+`state_rollout`；held-out 最大 State `11.898151` 与最大 Action `4.096210` 出现在
+`joint_gap_8` 的速度/Action 坐标。Posterior latent 分组报告显示 global KL `8.7081e-6`、
+local 平均 KL `0.002032`，`local_15` 为 `0.016562`，占 local 组 KL 均值总和约 50.9%；
+这一组对应最后 60–64 token。证据支持 latent 使用集中与 standard-normal 校准不足同时存在，
+但尚未区分 KL 权重、latent 融合/尺度、Mask 覆盖和速度尾部优化的相对贡献。
+
+已排除的解释包括：训练中途崩溃、NaN、checkpoint 损坏、数据身份不一致、Posterior/Condition
+路由未执行和 BF16 不可用。不得把 `cvae_posterior_standard_cvae_execution.ok` 写成质量通过，
+也不得从这次结果同时修改多个模型变量。当前唯一下一步是基于现有固定证据选择一个单变量校准
+对照，或先停止训练并保留该 run 作为 KL3 eager 参考。
+
+### 19.1 与 `kl_beta=0.001` 的观测对照
+
+原 C 使用 dynamic Mask、360000 步、FP32 eager；KL3 使用 fixed Mask、200000 步、BF16 eager，
+所以 fixed standard-normal 的改善不能归因于 KL 三倍这一项。原 fixed standard-normal masked
+State/Action RMSE 为 `0.081051/0.040847`、energy `0.027423`；KL3 为
+`0.045421/0.022076`、energy `0.013854`。相反，原 held-out energy `0.026876`，KL3 为
+`0.036871`，表现变差。Posterior mean 的 fixed State/Action 从 `0.016604/0.007912` 变为
+`0.015256/0.009119`，只改善 State，Action 变差。
+
+KL3 还把训练末步 local KL 从约 `1.7e-2` 压到 `0.0020`，global 仍约 `1e-5`，但
+`local_15` 仍占 local KL 均值总和约 50.9%。因此证据支持“KL 增大改变了 local posterior 的
+尺度并改善部分 fixed 部署误差”，不支持“KL 增大已经解决 standard-normal 校准”或“global
+latent 已恢复有效利用”。
+
+## 20. 单窗口 A/B/C State-only 延伸回放（2026-10-12）
+
+为三条 A/B/C 路线提供了显式 `--state-only-continuation` 模式。它只把选定的一个 T64
+checkpoint window 用作 mask、epsilon 和 fixture identity 模板；后续每个 64-transition
+块直接取同一 source capture 的 State，不再调用 `chunk_indices()` 寻找连续 HDF5 窗口。
+后续块的 Action target 仍写入 prediction artifact 用于 normalized/physical error、raw
+Action 映射和仿真评分，但在模型调用前置零；`action_before_window` 也置为零，因此 manifest
+会明确写出 `input_contract=state_only` 和
+`continuation_input_contract=state_only_after_first_chunk`。首块保留原有 checkpoint-window
+输入合同。该模式不改变训练、标准化或 A/B/C 模型语义，只改变回放输入与窗口选取方式。
+
+重建数据集若与 checkpoint 的 manifest、normalization 或 selected-window identity 不完全一致，
+准备命令必须显式使用 `--allow-recovered-identity`。这类 run 的
+`exact_identity_verified` 必须按 false 解读，只能作为同一重建数据上的三路线诊断比较，不能
+声称是原训练 HDF5 的 exact identity replay。

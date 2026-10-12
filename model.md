@@ -276,6 +276,27 @@ process.md 第10节；数据仍是同一32-motion已见序列，不能解释为�
 当前下一步只允许：从 step360000 做只读末步尾部坐标、窗口身份和 latent 统计。
 不得对同一 C run 普通续训，也不得同时修改 loss、latent 维度、pooling 或网络宽度。
 
+### 6.6 KL3 eager 参考 run（2026-10-12）
+
+新增独立参考 run：
+`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl3_eager_200k_eval50k_noeval0_zlqw641k`。
+其合同固定为 `stage=C`、`mask_mode=fixed`、1504 T64 windows、12032 fixtures、200000 steps、
+`kl_beta=0.003`、BF16 eager、compile/cache/pin-memory/non-blocking 全关闭、`skip_initial_eval=true`。
+它从随机初始化开始，不加载 A/B 或其他 C checkpoint；dataset identity 为
+`cvae_overfit_subset_rebuilt_20260928_193357`，checkpoint SHA256 为
+`bc080d48a07e5861a2b8c2e0171cce980d35ee58eef7e921282c7597e3408a63`。
+
+训练执行与严格读回通过，但 `quality_pass` 保持 null。Posterior mean/sample 的 fixed masked RMSE
+约为 `0.013027/0.013251`；standard-normal 为 `0.025908`，held-out standard-normal 为
+`0.059997`。standard-normal fixed 最大 State 误差 `12.272463`，held-out 最大 State/Action
+误差 `11.898151/4.096210`，主要落在 `joint_vel`、`state_rollout` 和 `joint_gap_8` 尾部。
+这组数字属于同一 32-motion 已见窗口上的 Mask 迁移诊断，不是新 motion 泛化门禁。
+
+配套 `latent_distribution65` 报告已验证 best/last 与数据身份一致且逐字节同一 checkpoint。
+global 平均 KL `8.7081e-6`，local 平均 KL `0.002032`，`local_15` 为 `0.016562`；当前模型的
+部署校准问题仍未归因到单一机制。后续实验必须新建 run，不能从该 run 普通续训或同时改动多个
+latent/loss/decoder 变量。
+
 ## 7. 65-token State／Action回放合同（2026-09-23）
 
 独立入口 `python -m cvae_sa.replay65 {prepare,simulate,render,report}`，协议 `65-token-replay-v1`。
@@ -298,6 +319,12 @@ full_action、joint_gap_8。A按full prediction重放，八Mask统计只是同�
 B/C只替换隐藏Action，非Mask raw逐位保留；`--action-mode full-prediction`是显式另一个实验。
 State-only Mask不执行额外模型Action回放。反归一化后用记录nominal/scale/offset/clip转回raw，
 保留未裁剪预测、实际可实现目标、饱和计数及计划/实际raw和processed目标核对。
+
+三路线 A/B/C 的单窗口延伸比较可显式加 `--state-only-continuation`。该模式只选择一个
+checkpoint中的T64窗口；后续64步块复用该窗口的Mask/fixture身份，State从同一source capture
+提供，Action target只用于评分和物理回放，模型输入中的Action与`action_before_window`置零。
+manifest中的`single_window_continuation=true`与`input_contract=state_only`是该模式的验收标记，
+它不要求HDF5存在连续stride-64窗口。首块仍按原checkpoint-window输入合同运行。
 
 exact-init使用既有外层patch0009钩子，新payload opt-in开启runtime审计：恢复采集后的物理参数，
 不重新抽取随机化；新interval事件通过公共事件配置API替换为空操作，并保存前后事件列表。
@@ -445,6 +472,10 @@ reference 是完整序列的统计估计，不是可观测物理真值，也不�
 诊断必须同时查看 group-level 分布图、global/local 逐维 KL 热图、posterior-mean 跨窗口方差
 以及 sample 的均值/标准差相对 `N(0,1)` 的差距；单独一个很小的平均 KL 不足以证明十七组均已
 校准。重建数据集回放必须在 manifest 中标记 recovered identity，不能与严格原始数据复现混同。
+
+`cvae_sa.latent_normality65` 对该诊断的 `latent_arrays.npz` 做逐维只读后处理，输出 KS 距离、
+偏度、超额峰度、尾部分位数和 `near_standard_normal` 启发式标签；这些标签用于定位非高斯维度，
+不改变 latent 合同，也不替代四条 C 路径的质量评测。
 
 ## 10. Compiled runtime 修复（2026-10-11）
 
