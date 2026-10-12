@@ -919,6 +919,17 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         if not route_hooks:
             route_hooks.extend((model.posterior_encoder.register_forward_pre_hook(count_call("posterior")),
                                 model.condition_encoder.register_forward_pre_hook(count_call("condition"))))
+    def remove_route_hooks():
+        """Remove Python route-audit hooks before entering a compiled call.
+
+        Forward hooks are useful for eager route isolation, but Dynamo/Inductor
+        must not see their Python side effects.  Keep the lifecycle explicit so
+        a compiled preflight cannot accidentally leave hooks attached and make
+        the subsequent static route look like it made zero encoder calls.
+        """
+        for hook in route_hooks:
+            hook.remove()
+        route_hooks.clear()
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous_handlers[signum] = signal.getsignal(signum)
         signal.signal(signum, lambda number, frame: stop_requested.append(number))
@@ -965,20 +976,25 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         progress()
         expected_calls = {"posterior": int(code in {"A", "C"}), "condition": int(code in {"B", "C"})}
         if train_compile_info["succeeded"]:
-            # Validate route isolation once in eager mode, then remove hooks
-            # before compiling so Python side effects do not force graph breaks.
+            # Validate route isolation once in eager mode.  The hooks must be
+            # attached for this probe, then removed before compiled execution
+            # so Python side effects do not force graph breaks.
             with isolated_rng():
                 was_training = model.training
                 model.eval()
                 encoder_calls.update(posterior=0, condition=0)
                 probe_sm, probe_am, _ = make_physical_masks(probe, mask_seed)
-                with torch.no_grad():
-                    eager_train_callable(
-                        to_device(probe, device, non_blocking=non_blocking_transfer),
-                        probe_sm.to(device), probe_am.to(device),
-                        torch.tensor(0., device=device, dtype=torch.float32),
-                    )
-                model.train(was_training)
+                install_route_hooks()
+                try:
+                    with torch.no_grad():
+                        eager_train_callable(
+                            to_device(probe, device, non_blocking=non_blocking_transfer),
+                            probe_sm.to(device), probe_am.to(device),
+                            torch.tensor(0., device=device, dtype=torch.float32),
+                        )
+                finally:
+                    model.train(was_training)
+                    remove_route_hooks()
             if encoder_calls != expected_calls:
                 raise RuntimeError(f"stage route violation: {encoder_calls} expected {expected_calls}")
         else:

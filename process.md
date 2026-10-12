@@ -514,3 +514,19 @@ recompile limit 时切换到 eager，并写入 `compile_fallback_reason/phase`�
 模型而非仿真器；若不满足，`capture_determinism.json` 会标记 `NON_DETERMINISTIC`，该窗口的
 模型质量仍不可判定。这把根因问题转化成可检验的门禁，但并未证明 HDF 采集当时的内部状态，
 采集轨迹与 HDF 的偏差只作为信息量写入 `dataset_to_capture`，不参与判定。
+
+## 18. 2026-10-11 四配置 runtime smoke 的 route-hook 修复
+
+`/home/helloworld/bly/runs/cvae_v2_runtime_smoke_20261011_fixed` 中 FP32 eager 和 BF16 eager
+均完成 2 steps，step-0/step-2 的 loss 与评测输出有限；BF16 与 FP32 的 step-0 评测数值接近。
+两个 BF16 compiled 配置都能完成 compiled C 的 step-0 evaluation，未再出现 CUDA Graph 输出覆盖，
+但在第一次 optimizer update 前因 route isolation 检查记录
+`{'posterior': 0, 'condition': 0}` 而失败。根因是 eager preflight 没有先安装 encoder
+forward hooks，导致合法的 C route 被误报为零调用；这不是模型 route 或数据合同错误。
+
+Windows 已修正 `cvae_training.py`：compiled preflight 先安装 hooks、完成一次 eager route
+验证，再显式移除 hooks；compiled 训练期间不保留 Python hooks，切换到 eager fallback 时重新
+安装。静态 compileall、`git diff --check`、`tests.test_cvae_protocol_v2`（15 tests）和
+`tests.test_posterior_hierarchical_standard_cvae`（9 tests）均通过。上述 Ubuntu compiled 失败
+目录保留只读，不 resume；同步此修复后必须用新的 run 目录重做两个 compiled smoke，再进入性能
+基准。
