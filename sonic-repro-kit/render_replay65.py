@@ -11,6 +11,7 @@ import numpy as np
 from render_mujoco_trajectory import (G1_ISAACLAB_JOINT_NAMES, build_mujoco_qpos,
     load_trajectory, prepare_runtime_xml, write_json_atomic)
 from render_h50a_exact_action_replays import _validate_joint_order, _writer
+from replay65_render_utils import FRAME_PROVENANCE_VERSION, draw_provenance_timeline, frame_provenance
 
 
 def sha(path):
@@ -91,6 +92,7 @@ def main(argv=None):
         camera.azimuth=135; camera.elevation=-15; camera.distance=3.5
         try:
             horizon=int(meta.get("horizon_steps",64)); offset=int(meta.get("score_offset",0)); frames_total=horizon+1
+            provenance=frame_provenance(meta,horizon)
             for name,paths,labels,prediction in video_jobs(window,meta):
                 trajectories=[load_trajectory(path) for path in paths]
                 qposes=[scored_frames(build_mujoco_qpos(t),horizon,offset) for t in trajectories]
@@ -119,7 +121,7 @@ def main(argv=None):
                             camera.lookat[:]=qposes[0][t,:3]
                             renderer.update_scene(data,camera=camera)
                             frame=renderer.render().copy()
-                            cv2.rectangle(frame,(0,0),(640,84),(25,25,25),-1)
+                            cv2.rectangle(frame,(0,0),(640,108),(25,25,25),-1)
                             banner=report["banner"]
                             if name.endswith("_state"):
                                 banner="KINEMATIC ONLY / NOT DYNAMICS VALIDATION"
@@ -131,7 +133,9 @@ def main(argv=None):
                             cv2.putText(frame,banner,(10,47),cv2.FONT_HERSHEY_SIMPLEX,.40,(80,190,255),1)
                             episode_frame=int(meta.get("window_start",meta["window"]["window_start"]))+t
                             cv2.putText(frame,f"{meta['route']} | {name} | frame {t}/{horizon} (ep {episode_frame}) | 50 Hz",(10,71),cv2.FONT_HERSHEY_SIMPLEX,.43,(230,230,230),1)
-                            draw_timeline(cv2,frame,hidden,t)
+                            cv2.putText(frame,provenance["label"],(10,96),cv2.FONT_HERSHEY_SIMPLEX,.30,(230,230,230),1)
+                            draw_timeline(cv2,frame,hidden,t,y=438)
+                            draw_provenance_timeline(cv2,frame,t,horizon,provenance,457)
                             panels.append(frame)
                         writer.append_data(np.concatenate(panels,axis=1))
                 finally:
@@ -140,11 +144,13 @@ def main(argv=None):
                 if frames!=frames_total or output.stat().st_size<=0:
                     raise RuntimeError("encoded frame count mismatch")
                 outputs.append({"path":str(output.relative_to(run)),"sha256":sha(output),"frames":frames,"seconds":seconds,
-                    "input_hashes":input_hashes,"baseline_banner":report["banner"],"xml":xml_details})
+                    "input_hashes":input_hashes,"baseline_banner":report["banner"],"xml":xml_details,
+                    "frame_provenance":provenance})
                 write_json_atomic(render_manifest,{"version":"65-token-replay-render-v1","videos":list({v["path"]:v for v in [*previous.values(),*outputs]}.values()),"rendering":True,"quality_pass":None})
         finally:
             renderer.close()
     write_json_atomic(run/"manifests/replay65_render.json",{"version":"65-token-replay-render-v1","videos":outputs,
+        "frame_provenance_version":FRAME_PROVENANCE_VERSION,
         "camera":"shared recorded root track; no predicted root correction","quality_pass":None})
     print(f"Rendered {len(outputs)} videos under {run}")
     return 0

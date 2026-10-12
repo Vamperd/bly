@@ -12,6 +12,7 @@ from render_mujoco_trajectory import (G1_ISAACLAB_JOINT_NAMES, build_mujoco_qpos
     load_trajectory, prepare_runtime_xml, write_json_atomic)
 from render_h50a_exact_action_replays import _validate_joint_order, _writer
 from render_replay65 import scored_frames
+from replay65_render_utils import FRAME_PROVENANCE_VERSION, draw_provenance_timeline, frame_provenance
 
 GHOST_SIZE = (1280, 720)
 PANEL_SIZE = (640, 480)
@@ -91,6 +92,12 @@ def main(argv=None):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     output = manifest_path.parent.parent
     routes, horizon = manifest["routes"], int(manifest["horizon_steps"])
+    provenance_meta = dict(manifest)
+    source_trajectory = Path(manifest["source_trajectory"])
+    window_meta_path = source_trajectory.parent.parent / "manifests" / "replay65.json"
+    if window_meta_path.is_file():
+        provenance_meta.update(json.loads(window_meta_path.read_text(encoding="utf-8")))
+    provenance = frame_provenance(provenance_meta, horizon)
     frames_total, start = horizon + 1, int(manifest["window_start"])
     qposes, input_hashes = load_inputs(manifest)
     xml = output / "manifests/compare_render.xml"
@@ -124,7 +131,7 @@ def main(argv=None):
             layer = draw(renderer, qpos[t], lookat)
             mask = robot_mask(draw(renderer, qpos[t], lookat, segment=True), geom_types, plane, geom_obj)
             frame = blend(frame, layer, mask, route["color"])
-        cv2.rectangle(frame, (0, 0), (frame.shape[1], 40 + 24 * len(routes)), (25, 25, 25), -1)
+        cv2.rectangle(frame, (0, 0), (frame.shape[1], 64 + 24 * len(routes)), (25, 25, 25), -1)
         cv2.putText(frame, f"Ghost overlay | source opaque | {manifest['mask']} | frame {t}/{horizon} (ep {start + t}) | 50 Hz",
                     (10, 26), cv2.FONT_HERSHEY_SIMPLEX, .6, (240, 240, 240), 1)
         for i, route in enumerate(routes):
@@ -134,6 +141,9 @@ def main(argv=None):
             cv2.putText(frame, f"{route['label']} (route {route['route']}, {route['mask']})  {error_text(route, t)}"
                         + ("  FALLEN" if fallen else ""), (36, y), cv2.FONT_HERSHEY_SIMPLEX, .5,
                         (255, 90, 90) if fallen else (235, 235, 235), 1)
+        cv2.putText(frame, provenance["label"], (10, 64 + 24 * len(routes) - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, .38, (230, 230, 230), 1)
+        draw_provenance_timeline(cv2, frame, t, horizon, provenance, frame.shape[0] - 20)
         return frame
 
     def grid_frame(renderer, t):
@@ -144,14 +154,16 @@ def main(argv=None):
         for row, qpos in zip(rows, qposes):
             frame = draw(renderer, qpos[t], lookat)
             fallen = row["fall_frame"] is not None and t >= row["fall_frame"]
-            cv2.rectangle(frame, (0, 0), (frame.shape[1], 64), (25, 25, 25), -1)
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], 98), (25, 25, 25), -1)
             cv2.rectangle(frame, (8, 8), (24, 24), tuple(row["color"]), -1)
             cv2.putText(frame, f"{row['label']}  route {row['route']} | {row['mask']} | frame {t}/{horizon}",
                         (32, 22), cv2.FONT_HERSHEY_SIMPLEX, .5, (240, 240, 240), 1)
             if row["per_frame"] is not None:
                 cv2.putText(frame, error_text(row, t), (10, 48), cv2.FONT_HERSHEY_SIMPLEX, .45, (210, 210, 210), 1)
+            cv2.putText(frame, provenance["label"], (10, 78), cv2.FONT_HERSHEY_SIMPLEX, .30, (230, 230, 230), 1)
             if fallen:
                 cv2.putText(frame, "FALLEN", (frame.shape[1] - 130, 110), cv2.FONT_HERSHEY_SIMPLEX, 1., (230, 40, 40), 2)
+            draw_provenance_timeline(cv2, frame, t, horizon, provenance, 440)
             fall_strip(cv2, frame, row["fall_frame"], t, frames_total, frame.shape[0] - 20)
             panels.append(frame)
         while len(panels) < 4:
@@ -184,6 +196,7 @@ def main(argv=None):
         print(f"Rendered {path} ({frames} frames)", flush=True)
     write_json_atomic(output / "manifests/compare_render.json", {"version": "65-token-replay-compare-v1",
         "videos": videos, "input_hashes": input_hashes, "compare_manifest_sha256": sha(manifest_path),
+        "frame_provenance_version": FRAME_PROVENANCE_VERSION, "frame_provenance": provenance,
         "xml": xml_details, "camera": "follows source root; same camera for every route",
         "ghost": {"alpha": GHOST_ALPHA, "note": "2D compositing; occlusion between ghosts is not depth sorted"},
         "kinematic_only": True})

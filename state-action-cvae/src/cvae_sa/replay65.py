@@ -1004,7 +1004,10 @@ def report(args):
 
 
 def render(args):
-    verify_prepared(args.run.resolve(),code=True)
+    # Renderer-only overlays may legitimately evolve after preparation.  The
+    # explicit flag keeps normal render calls tied to the sealed source while
+    # allowing a read-only annotation refresh on an existing prepared run.
+    verify_prepared(args.run.resolve(),code=not getattr(args, "allow_render_code_change", False))
     report(args)
     run=args.run.resolve()
     launch([sys.executable,str(KIT/"render_replay65.py"),"--run",str(run),"--model",str(args.model.resolve()),"--gl",args.gl],run/"logs/render.log")
@@ -1267,6 +1270,8 @@ def compare(args):
     start = int(meta.get("window_start", meta["window"]["window_start"]))
     source_full = _load_replay(source_window / "data/source.replay.npz")
     manifest = {"version": VERSION, "mask": args.mask, "window": meta["window"], "source_mode": meta.get("source_mode", "dataset"),
+        "single_window_continuation": bool(meta.get("single_window_continuation", False)),
+        "continuation_input_contract": meta.get("continuation_input_contract"),
         "horizon_steps": reference["horizon_steps"], "score_offset": reference["score_offset"], "window_start": start,
         "source_trajectory": str(source_window / "data/source.trajectory.pkl"),
         "source_trajectory_sha256": file_sha256(source_window / "data/source.trajectory.pkl"),
@@ -1335,6 +1340,8 @@ def main(argv=None):
     p.add_argument("--device")
     s=sub.add_parser("simulate"); s.add_argument("--run",type=Path,required=True); s.add_argument("--baseline-only",action="store_true")
     r=sub.add_parser("render"); r.add_argument("--run",type=Path,required=True); r.add_argument("--model",type=Path,required=True); r.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
+    r.add_argument("--allow-render-code-change",action="store_true",
+                   help="read-only renderer refresh after a renderer overlay change; preparation inputs remain sealed")
     r=sub.add_parser("report"); r.add_argument("--run",type=Path,required=True); r.add_argument("--export",action="store_true"); r.add_argument("--output",type=Path)
     c=sub.add_parser("capture",help="closed-loop source capture + determinism gate")
     for flag in ("checkpoint","dataset-run","output-run"):
