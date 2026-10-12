@@ -584,3 +584,16 @@ standard-normal 三条评测路径，尤其比较十七组 latent 统计和 stan
 执行路径可运行，不代表 standard-normal 部署质量改善。正式实验可先使用 eager 配置从随机初始化
 运行 360k steps；若要保留编译加速，必须先用 `max-autotune-no-cudagraphs` 完成新的 2-step smoke，
 再用同一配置建立正式 run，禁止从任何失败目录 resume。
+
+## 18. Compiled C 修复后的验证门禁（2026-10-11）
+
+Windows 已将 compiled core 与 BF16 autocast context 解耦，并为评测 route 输出增加
+`clone_before_eager_readback_v1` 所有权边界。CUDAGraph 输出在进入 diagnostics/ensemble 列表前
+立即 clone；运行时异常或 Dynamo recompile limit 会触发记录完整原因的 eager fallback，不能把
+fallback 计为 compiled pass。默认配置已改为 `max-autotune-no-cudagraphs`，effective config
+和 runtime contract 必须报告实际 mode。
+
+新的 Ubuntu 验收仍按 FP32 eager、BF16 eager、BF16 compiled uncached、BF16 compiled cached 的
+顺序执行。compiled uncached 必须先完成 2-step、checkpoint/sampler readback 和无 fallback 门禁，
+之后才允许启动 cached smoke 或 20-step warm-up/200-step 稳态吞吐测试。当前修复的 Windows
+compileall 与 v2 protocol/model 测试已通过；Ubuntu CUDA smoke、数值 parity 和吞吐仍待新 run。

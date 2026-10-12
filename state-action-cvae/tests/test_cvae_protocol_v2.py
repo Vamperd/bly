@@ -17,10 +17,11 @@ from torch.utils.data import DataLoader, default_collate
 from test_posterior_hierarchical_standard_cvae import batch, config
 from cvae_sa.cvae_protocol import (Fixtures, RecoverableSampler, capture_rng, restore_rng, lr_factor,
                                    materialize_normalized_window_cache, quality_warnings)
-from cvae_sa.cvae_diagnostics import Diagnostics, evaluate, ensemble_scores, epsilon_for, route_output, stats, ablations
+from cvae_sa.cvae_diagnostics import (Diagnostics, clone_evaluation_output, evaluate, ensemble_scores,
+                                      epsilon_for, route_output, stats, ablations)
 from cvae_sa.cvae_training import (_autocast_context, _compile_callable, _mark_cudagraph_step_begin,
                                     run_experiment, append, load_rows)
-from cvae_sa.models import build_model
+from cvae_sa.models import HierarchicalStandardCVAEOutput, build_model
 from cvae_sa.posterior_t64_protocol import make_physical_masks
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -98,8 +99,64 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertIs(compiled, fallback)
         self.assertFalse(info["succeeded"])
+        self.assertFalse(info["compile_succeeded"])
+        self.assertEqual(info["compile_fallback_phase"], "preflight")
         self.assertIn("cuda", info["fallback_reason"])
         self.assertEqual(int(compiled(torch.tensor(2))), 3)
+
+    def test_default_runtime_config_disables_cuda_graph_autotune(self):
+        path = ROOT / "state-action-cvae/configs/posterior_hierarchical_standard_cvae_h50.json"
+        configuration = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(configuration["compile"]["mode"], "max-autotune-no-cudagraphs")
+        self.assertFalse(configuration["compile"]["dynamic"])
+        self.assertFalse(configuration["compile"]["fullgraph"])
+
+    def test_compiled_evaluation_output_is_owned_before_next_invocation(self):
+        state = torch.randn(1, 65, 70)
+        action = torch.randn(1, 64, 29)
+        logits = torch.randn(1, 65, 2)
+        output = HierarchicalStandardCVAEOutput(
+            state, action, logits, None, None,
+            torch.randn(1, 256), torch.randn(1, 16, 128), "standard_normal", None,
+        )
+        owned = clone_evaluation_output(output)
+        state_before = owned.physical_state.clone()
+        action_before = owned.action.clone()
+        logits_before = owned.state_contact_logits.clone()
+        output.physical_state.add_(100.)
+        output.action.mul_(0.)
+        output.state_contact_logits.sub_(100.)
+        torch.testing.assert_close(owned.physical_state, state_before)
+        torch.testing.assert_close(owned.action, action_before)
+        torch.testing.assert_close(owned.state_contact_logits, logits_before)
+
+    def test_compiled_evaluation_failure_falls_back_once_and_records_phase(self):
+        fixture = Fixtures(FakeDataset(), [0], expand=True)
+        loader = DataLoader(fixture, batch_size=1)
+        model = build_model(config()).eval()
+        info = {
+            "succeeded": True, "compile_succeeded": True, "recompile_count": 0,
+            "recompile_limit": 8, "graph_break_count": 0, "compiled_graph_count": 0,
+            "fallback_reason": None, "compile_fallback_reason": None,
+            "compile_fallback_phase": None,
+        }
+
+        calls = []
+
+        def failing_route(*args, **kwargs):
+            calls.append(1)
+            raise RuntimeError("synthetic compiled route failure")
+
+        metrics, _ = evaluate(
+            model, loader, torch.device("cpu"), normalization(), route="B", seed=3,
+            samples=1, route_callable=failing_route, compile_info=info,
+        )
+        self.assertTrue(np.isfinite(metrics["state_rmse"]))
+        self.assertFalse(info["succeeded"])
+        self.assertFalse(info["compile_succeeded"])
+        self.assertIn("compile_runtime", info["fallback_reason"])
+        self.assertEqual(info["compile_fallback_phase"], "evaluation_output_or_invocation")
+        self.assertEqual(len(calls), 1)
 
     def test_cudagraph_marker_is_optional_and_safe(self):
         _mark_cudagraph_step_begin()

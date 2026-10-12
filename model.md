@@ -445,3 +445,16 @@ reference 是完整序列的统计估计，不是可观测物理真值，也不�
 诊断必须同时查看 group-level 分布图、global/local 逐维 KL 热图、posterior-mean 跨窗口方差
 以及 sample 的均值/标准差相对 `N(0,1)` 的差距；单独一个很小的平均 KL 不足以证明十七组均已
 校准。重建数据集回放必须在 manifest 中标记 recovered identity，不能与严格原始数据复现混同。
+
+## 10. Compiled runtime 修复（2026-10-11）
+
+旧的 `bf16_compiled_uncached` run 使用 `max-autotune`，在 step 0 的第一次 C 评测中因 CUDA
+Graph 输出 buffer 被后续调用覆盖而失败；该目录只作为工程失败证据，不能 resume。当前修复把
+autocast context 移到 compiled core 外部，并在评测输出进入 `outputs` 前对 physical State、
+Action 和 contact logits 执行 detach/clone，保证 eager diagnostics 拥有自己的 tensor storage。
+
+默认 compile mode 已切换为 `max-autotune-no-cudagraphs`。compiled route 发生运行时异常或达到
+Dynamo recompile limit 时只允许一次显式 eager fallback，并在 `compile_info`、failure/progress
+和 checkpoint runtime contract 中记录 requested/succeeded、fallback reason/phase、graph breaks、
+recompiles、cold start 与 output ownership contract。BF16 参数、AdamW 状态、KL/重建/contact
+loss 和评测指标的 FP32 保留区域不变。

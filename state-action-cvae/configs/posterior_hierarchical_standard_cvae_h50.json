@@ -57,7 +57,7 @@
   },
   "compile": {
     "enabled": true,
-    "mode": "max-autotune",
+    "mode": "max-autotune-no-cudagraphs",
     "dynamic": false,
     "fullgraph": false
   }

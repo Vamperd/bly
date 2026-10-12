@@ -492,3 +492,15 @@ BF16 和 `kl_beta=0.002` 训练逻辑均可运行，但不构成质量结论。
 正式 KL×2 训练的即时稳定方案是沿用 eager 配置，从全新 run 随机初始化训练 360k steps。若需
 保留 TorchInductor 加速，应先把 compile mode 改为 `max-autotune-no-cudagraphs`，用 2-step
 新 smoke 验证后再启动正式 run；不得继续使用 `max-autotune`，也不得从上述失败目录恢复。
+
+## 16. Compiled C 输出生命周期修复（2026-10-11）
+
+当前已定位旧 compiled C smoke 的工程失败边界：`max-autotune` 的 CUDA Graph 输出在第一次
+`full_eval` 中被后续 invocation 覆盖，失败发生在 diagnostics readback 前，step 仍为 0；这不
+改变 BF16 eager 的数值结论，也不是 KL、normalization 或 dataset cache 问题。
+
+修复后的实现把 BF16 autocast context 放到 compiled core 外部，并在评测 route 返回后立即 clone
+physical State、Action 和 contact logits。compiled route 发生输出 clone/调用异常或达到 Dynamo
+recompile limit 时切换到 eager，并写入 `compile_fallback_reason/phase`；该路径不计为 compiled
+性能通过。新的 run 必须检查 `runtime_contract.compile_mode`、`compile_observations`、
+`compile_info`、`failure.json/progress.json` 和 execution marker，再决定是否进入吞吐基准。

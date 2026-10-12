@@ -105,6 +105,26 @@ def route_output(model, batch, sm, am, route, epsilon=None):
     raise ValueError(f"unknown evaluation route {route}")
 
 
+def clone_evaluation_output(output):
+    """Own the tensors returned by a compiled route before the next invocation.
+
+    TorchInductor CUDA-Graph routes may reuse their output storage on the next
+    call.  Diagnostics retain outputs for ensemble scoring and CPU readback, so
+    these three fields must be detached and cloned immediately at the route
+    boundary.  The dataclass metadata and latent fields remain unchanged.
+    """
+    if output is None:
+        return None
+    fields = {}
+    for name in ("physical_state", "action", "state_contact_logits"):
+        value = getattr(output, name, None)
+        fields[name] = None if value is None else value.detach().clone()
+    try:
+        return replace(output, **fields)
+    except TypeError as error:
+        raise TypeError("compiled evaluation output must be a dataclass with replaceable prediction fields") from error
+
+
 class Diagnostics:
     def __init__(self, normalization):
         self.normalization = normalization
@@ -336,7 +356,7 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
                 outputs = []
                 for k in range(count):
                     epsilon = epsilon_for(model, cpu, k, seed, device)
-                    if route_callable is not None:
+                    if route_callable is not None and (compile_info is None or compile_info.get("succeeded", True)):
                         try:
                             dynamo_before = None
                             if compile_info is not None and compile_info.get("succeeded"):
@@ -351,6 +371,10 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
                                     pass
                             compile_started = time.perf_counter() if compile_cold_start else None
                             output = route_callable(batch, sm, am, epsilon[0], epsilon[1])
+                            # Clone before storing the output or invoking the
+                            # next CUDA-Graph route/sample.  This is the
+                            # ownership boundary for eager diagnostics.
+                            output = clone_evaluation_output(output)
                             if dynamo_before is not None:
                                 try:
                                     from torch._dynamo.utils import counters
@@ -361,6 +385,13 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
                                     }
                                     for key in ("graph_break_count", "recompile_count", "compiled_graph_count"):
                                         compile_info[key] += max(0, dynamo_after[key] - dynamo_before[key])
+                                    if compile_info.get("recompile_count", 0) >= compile_info.get("recompile_limit", 8):
+                                        compile_info["succeeded"] = False
+                                        compile_info["compile_succeeded"] = False
+                                        compile_info["fallback_reason"] = "recompile_limit_reached"
+                                        compile_info["compile_fallback_reason"] = "recompile_limit_reached"
+                                        compile_info["compile_fallback_phase"] = "evaluation"
+                                        route_callable = None
                                 except (ImportError, AttributeError, TypeError):
                                     pass
                             if compile_info is not None and compile_cold_start:
@@ -370,7 +401,10 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
                             if compile_info is None or not compile_info.get("succeeded"):
                                 raise
                             compile_info["succeeded"] = False
+                            compile_info["compile_succeeded"] = False
                             compile_info["fallback_reason"] = f"compile_runtime:{type(error).__name__}: {error}"
+                            compile_info["compile_fallback_reason"] = compile_info["fallback_reason"]
+                            compile_info["compile_fallback_phase"] = "evaluation_output_or_invocation"
                             route_callable = None
                             output = None
                         if output is not None:
