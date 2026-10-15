@@ -87,6 +87,7 @@ def build_long_horizon_dataset(
     chunk_transitions: int = CHUNK_TRANSITIONS,
     context_steps: int = CONTEXT_STEPS,
     include_tail: bool = True,
+    allow_precreated_output: bool = False,
 ) -> dict[str, Any]:
     """Create a manifest-only contiguous episode grouping."""
     if target_horizon <= 0 or chunk_transitions <= 0 or target_horizon % chunk_transitions:
@@ -95,9 +96,35 @@ def build_long_horizon_dataset(
         raise ValueError("context_steps must be in [0, chunk_transitions)")
     source_dataset_run = source_dataset_run.expanduser().resolve()
     output_run = output_run.expanduser().resolve()
-    if output_run.exists() and any(output_run.iterdir()):
-        raise FileExistsError(f"output run must be new and empty: {output_run}")
-    for folder in ("data", "manifests", "markers", "logs", "checkpoints", "videos"):
+    output_folders = ("data", "manifests", "markers", "logs", "checkpoints", "videos")
+    if output_run.exists():
+        if not allow_precreated_output:
+            raise FileExistsError(f"output run must be new and empty: {output_run}")
+        # cvae_repro.sh allocates the run directory, captures provenance, and
+        # opens the build log before invoking this builder.  Accept exactly
+        # those known precreated files, while refusing to reuse a run with any
+        # other content.
+        entries = list(output_run.iterdir())
+        if any(entry.name not in output_folders or not entry.is_dir() for entry in entries):
+            raise FileExistsError(f"output run must be new and empty: {output_run}")
+        allowed_files = {
+            "logs/build_long_horizon_dataset.log",
+            "manifests/command.txt",
+            "manifests/source_commit.txt",
+            "manifests/source_status.txt",
+            "manifests/sonic_commit.txt",
+            "manifests/sonic_status.txt",
+            "manifests/isaaclab_commit.txt",
+            "manifests/isaaclab_status.txt",
+            "manifests/environment_freeze.txt",
+            "manifests/nvidia-smi.txt",
+        }
+        for path in output_run.rglob("*"):
+            if path.is_file() and path.relative_to(output_run).as_posix() not in allowed_files:
+                raise FileExistsError(f"output run must be new and empty: {output_run}")
+    else:
+        output_run.mkdir(parents=True, exist_ok=False)
+    for folder in output_folders:
         (output_run / folder).mkdir(parents=True, exist_ok=True)
 
     source_manifest, source_episodes = _validate_source(source_dataset_run)
@@ -293,6 +320,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--chunk-transitions", type=int, default=CHUNK_TRANSITIONS)
     parser.add_argument("--context-steps", type=int, default=CONTEXT_STEPS)
     parser.add_argument("--exclude-tail", action="store_true")
+    parser.add_argument("--allow-precreated-output", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -305,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
         chunk_transitions=args.chunk_transitions,
         context_steps=args.context_steps,
         include_tail=not args.exclude_tail,
+        allow_precreated_output=args.allow_precreated_output,
     )
     print(json.dumps({"output_run": str(args.output_run.resolve()), **manifest}, ensure_ascii=False, indent=2))
     return 0

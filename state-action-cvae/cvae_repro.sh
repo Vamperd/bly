@@ -1129,7 +1129,8 @@ long_horizon_dataset() {
       --output-run "$run_dir" \
       --target-horizon "${CVAE_LONG_HORIZON_STEPS:-192}" \
       --chunk-transitions "${CVAE_LONG_HORIZON_CHUNK:-64}" \
-      --context-steps "${CVAE_LONG_HORIZON_CONTEXT:-32}"
+      --context-steps "${CVAE_LONG_HORIZON_CONTEXT:-32}" \
+      --allow-precreated-output
   [[ -f "$run_dir/markers/cvae_long_horizon_dataset.ok" ]] || die "long-horizon dataset marker is missing"
   update_latest cvae_long_horizon_dataset "$run_dir"
   printf '%s\n' "$run_dir"
