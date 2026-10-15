@@ -1117,6 +1117,111 @@ sample_model() {
   printf '%s\n' "$run_dir"
 }
 
+long_horizon_dataset() {
+  local source_run="${CVAE_DATASET_RUN:-}" run_dir
+  [[ -n "$source_run" ]] || die "CVAE_DATASET_RUN is required"
+  [[ -f "$source_run/markers/cvae_dataset.ok" ]] || die "source dataset marker is missing: $source_run"
+  run_dir="$(new_run_dir cvae_long_horizon_dataset)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" build_long_horizon_dataset.log \
+    "$PYTHON" -m cvae_sa.long_horizon_dataset \
+      --source-dataset-run "$source_run" \
+      --output-run "$run_dir" \
+      --target-horizon "${CVAE_LONG_HORIZON_STEPS:-192}" \
+      --chunk-transitions "${CVAE_LONG_HORIZON_CHUNK:-64}" \
+      --context-steps "${CVAE_LONG_HORIZON_CONTEXT:-32}"
+  [[ -f "$run_dir/markers/cvae_long_horizon_dataset.ok" ]] || die "long-horizon dataset marker is missing"
+  update_latest cvae_long_horizon_dataset "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+long_horizon_dataset_smoke() {
+  local dataset_run="${CVAE_LONG_HORIZON_DATASET_RUN:-${CVAE_DATASET_RUN:-}}" run_dir
+  [[ -n "$dataset_run" ]] || die "CVAE_LONG_HORIZON_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_long_horizon_dataset.ok" ]] || die "long-horizon dataset marker is missing: $dataset_run"
+  run_dir="$(new_run_dir cvae_long_horizon_dataset_smoke)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" long_horizon_dataset_smoke.log \
+    "$PYTHON" -c 'from pathlib import Path; import json; from cvae_sa.long_horizon_dataset import LongHorizonWindowDataset; import sys; d=LongHorizonWindowDataset(Path(sys.argv[1]), "train", include_tail=True); rows=[d[i] for i in range(min(3,len(d)))]; assert rows and all(tuple(x["physical_state"].shape)==(65,70) and tuple(x["action"].shape)==(64,29) for x in rows); print(json.dumps({"windows":len(d),"groups":d.group_count,"sampled":len(rows)})); d.close()' \
+      "$dataset_run"
+  printf 'PASS\n' > "$run_dir/markers/cvae_long_horizon_smoke.ok"
+  update_latest cvae_long_horizon_dataset_smoke "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+long_horizon_train_smoke() {
+  local dataset_run="${CVAE_LONG_HORIZON_DATASET_RUN:-}" config="$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json" run_dir
+  [[ -n "$dataset_run" ]] || die "CVAE_LONG_HORIZON_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_long_horizon_dataset.ok" ]] || die "long-horizon dataset marker is missing: $dataset_run"
+  run_dir="$(new_run_dir cvae_long_horizon_train_smoke)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" long_horizon_train_smoke.log \
+    "$PYTHON" -m cvae_sa.posterior_hierarchical_standard_cvae \
+      --dataset-run "$dataset_run" --output-run "$run_dir" --config "$config" --stage C \
+      --mask-mode fixed --max-steps 2 --validation-interval 2 --checkpoint-interval 2 --log-interval 1 \
+      --micro-batch "${CVAE_POSTERIOR_MICRO_BATCH:-32}" --kl-beta "${CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA:-0.003}" \
+      --beta-warmup-steps 2 --eval-samples 2
+  [[ -f "$run_dir/markers/cvae_posterior_standard_cvae_smoke.ok" ]] || die "long-horizon training smoke marker is missing"
+  update_latest cvae_long_horizon_train_smoke "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+long_horizon_train() {
+  local dataset_run="${CVAE_LONG_HORIZON_DATASET_RUN:-}" config="$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json" run_dir
+  [[ -n "$dataset_run" ]] || die "CVAE_LONG_HORIZON_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_long_horizon_dataset.ok" ]] || die "long-horizon dataset marker is missing: $dataset_run"
+  run_dir="$(new_run_dir cvae_long_horizon_train)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" long_horizon_train.log \
+    "$PYTHON" -m cvae_sa.posterior_hierarchical_standard_cvae \
+      --dataset-run "$dataset_run" --output-run "$run_dir" --config "$config" --stage C \
+      --mask-mode "${CVAE_POSTERIOR_MASK_MODE:-fixed}" \
+      --max-steps "${CVAE_LONG_HORIZON_MAX_STEPS:-200000}" \
+      --validation-interval "${CVAE_LONG_HORIZON_VALIDATION_INTERVAL:-50000}" \
+      --checkpoint-interval "${CVAE_LONG_HORIZON_CHECKPOINT_INTERVAL:-50000}" \
+      --log-interval "${CVAE_LONG_HORIZON_LOG_INTERVAL:-100}" \
+      --micro-batch "${CVAE_POSTERIOR_MICRO_BATCH:-32}" \
+      --kl-beta "${CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA:-0.003}" \
+      --beta-warmup-steps "${CVAE_LONG_HORIZON_BETA_WARMUP_STEPS:-10000}" \
+      --eval-samples "${CVAE_POSTERIOR_EVAL_SAMPLES:-8}"
+  [[ -f "$run_dir/markers/cvae_posterior_standard_cvae_execution.ok" ]] || die "long-horizon training marker is missing"
+  update_latest cvae_long_horizon_train "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+long_horizon_eval() {
+  local dataset_run="${CVAE_LONG_HORIZON_DATASET_RUN:-}" checkpoint="${CVAE_CHECKPOINT:-}" run_dir
+  local extra_args=()
+  [[ -n "$dataset_run" ]] || die "CVAE_LONG_HORIZON_DATASET_RUN is required"
+  [[ -n "$checkpoint" && -f "$checkpoint" ]] || die "CVAE_CHECKPOINT is required"
+  extra_args+=(--split "${CVAE_LONG_HORIZON_SPLIT:-train}")
+  [[ -z "${CVAE_LONG_HORIZON_LIMIT_GROUPS:-}" ]] || extra_args+=(--limit-groups "$CVAE_LONG_HORIZON_LIMIT_GROUPS")
+  [[ -z "${CVAE_LONG_HORIZON_RENDER:-}" ]] || extra_args+=(--render)
+  run_dir="$(new_run_dir cvae_long_horizon_eval)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" long_horizon_eval.log \
+    "$PYTHON" -m cvae_sa.long_horizon_eval \
+      --dataset-run "$dataset_run" --checkpoint "$checkpoint" --output-run "$run_dir" \
+      "${extra_args[@]}"
+  [[ -f "$run_dir/markers/cvae_long_horizon_execution.ok" ]] || die "long-horizon evaluation marker is missing"
+  update_latest cvae_long_horizon_eval "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+long_horizon_render() {
+  local eval_run="${CVAE_LONG_HORIZON_RUN:-}" run_dir
+  [[ -n "$eval_run" ]] || die "CVAE_LONG_HORIZON_RUN is required"
+  [[ -f "$eval_run/markers/cvae_long_horizon_execution.ok" ]] || die "long-horizon evaluation marker is missing: $eval_run"
+  run_dir="$(new_run_dir cvae_long_horizon_render)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" long_horizon_render.log \
+    "$PYTHON" -c 'from pathlib import Path; from cvae_sa.long_horizon_eval import render_action_video; import sys; src=Path(sys.argv[1]).resolve(); dst=Path(sys.argv[2]).resolve(); out=render_action_video(src, output_dir=dst / "videos"); print(out)' \
+      "$eval_run" "$run_dir"
+  printf 'PASS\n' > "$run_dir/markers/cvae_long_horizon_render.ok"
+  update_latest cvae_long_horizon_render "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 posterior_h50_action_replay() {
   local dataset_run="${CVAE_DATASET_RUN:-}"
   local source_run="${CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN:-}"
@@ -1456,7 +1561,13 @@ case "${1:-}" in
   action-finetune) action_finetune_model false ;;
   evaluate) evaluate_model ;;
   sample) sample_model ;;
+  build-long-horizon-dataset) long_horizon_dataset ;;
+  long-horizon-dataset-smoke) long_horizon_dataset_smoke ;;
+  long-horizon-train-smoke) long_horizon_train_smoke ;;
+  long-horizon-train) long_horizon_train ;;
+  long-horizon-eval) long_horizon_eval ;;
+  long-horizon-render) long_horizon_render ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-condition|posterior-hierarchical-standard-cvae-condition-fixed|posterior-hierarchical-standard-cvae-condition-dynamic|posterior-hierarchical-standard-cvae-condition-smoke|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|posterior-h50-action-replay-exact-init|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|build-long-horizon-dataset|long-horizon-dataset-smoke|long-horizon-train-smoke|long-horizon-train|long-horizon-eval|long-horizon-render|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-condition|posterior-hierarchical-standard-cvae-condition-fixed|posterior-hierarchical-standard-cvae-condition-dynamic|posterior-hierarchical-standard-cvae-condition-smoke|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|posterior-h50-action-replay-exact-init|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

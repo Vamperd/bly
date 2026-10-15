@@ -363,7 +363,46 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         }
 
     def _physics_item(self, index: int) -> dict[str, Any]:
-        ref = self.refs[index]
+        return self._physics_item_ref(self.refs[index])
+
+    def get_window(self, episode_index: int, start: int) -> dict[str, Any]:
+        """Read a deterministic Physics window, including a padded tail.
+
+        Long-horizon manifests may address a final chunk whose start is after
+        ``steps - window``.  Such a start is valid for the existing padding
+        contract but is intentionally not inserted into the ordinary fixed
+        sampler.  This method keeps that derived access path explicit.
+        """
+        if not self.physics_v3:
+            raise ValueError("get_window is only supported for Physics datasets")
+        episode_index = int(episode_index)
+        start = int(start)
+        if not 0 <= episode_index < len(self.episodes):
+            raise IndexError("episode_index is out of range")
+        steps = int(self.episodes[episode_index]["steps"])
+        if start < 0 or start >= max(steps, 1):
+            raise ValueError(f"window start {start} is outside episode with {steps} transitions")
+        return self._physics_item_ref(WindowRef(episode_index, start))
+
+    def physics_action_mapping(self, episode_index: int) -> dict[str, Any]:
+        """Return the recorded per-episode canonical-to-raw Action mapping."""
+        if not self.physics_v3:
+            raise ValueError("physics_action_mapping is only supported for Physics datasets")
+        metadata = self.episodes[int(episode_index)]
+        schema = self._schema(metadata["schema_path"])
+        env_id = int(metadata["env_id"])
+        stream = self._handle(metadata["hdf5_path"])
+        context = stream[f"contexts/{metadata['context_id']}"]
+        clip = schema.get("action_clip")
+        return {
+            "default": resolve_physics_parameter(schema["nominal_default_joint_pos"], env_id).reshape(ACTION_DIM),
+            "scale": resolve_physics_parameter(schema["action_scale"], env_id).reshape(ACTION_DIM),
+            "offset": np.asarray(context["action_offset"], dtype=np.float32).reshape(ACTION_DIM),
+            "clip": None if clip is None else resolve_physics_parameter(clip, env_id).reshape(ACTION_DIM, 2),
+            "wrapper_clip": schema.get("wrapper_action_clip"),
+        }
+
+    def _physics_item_ref(self, ref: WindowRef) -> dict[str, Any]:
         metadata = self.episodes[ref.episode_index]
         steps = int(metadata["steps"])
         stream = self._handle(metadata["hdf5_path"])

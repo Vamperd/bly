@@ -269,12 +269,27 @@ def load_rows(path):
 
 
 def make_dataset(dataset_run, config, smoke=False):
-    from .dataset import StateActionWindowDataset
     data = config.get("data", {})
     if int(data.get("window_transitions", 64)) != 64 or data.get("num_workers", 0) != 0:
         raise ValueError("v2 requires T64 and synchronous num_workers=0")
-    dataset = StateActionWindowDataset(dataset_run, "train", 64, int(data.get("stride", 64)),
-        max_episodes=data.get("max_episodes", 256), random_crop=False)
+    long_manifest = data.get("long_horizon_manifest")
+    if long_manifest:
+        from .long_horizon_dataset import LongHorizonWindowDataset
+        manifest_path = Path(long_manifest)
+        if not manifest_path.is_absolute():
+            manifest_path = Path(dataset_run) / manifest_path
+        expected = Path(dataset_run) / "manifests" / "long_horizon_windows.jsonl"
+        if manifest_path.resolve() != expected.resolve():
+            raise ValueError("long_horizon_manifest must belong to dataset_run")
+        dataset = LongHorizonWindowDataset(
+            dataset_run,
+            "train",
+            include_tail=bool(data.get("include_tail_groups", True)),
+        )
+    else:
+        from .dataset import StateActionWindowDataset
+        dataset = StateActionWindowDataset(dataset_run, "train", 64, int(data.get("stride", 64)),
+            max_episodes=data.get("max_episodes", 256), random_crop=False)
     limit = 2 if smoke else data.get("max_windows")
     indices = list(range(len(dataset) if limit is None else min(len(dataset), int(limit))))
     if not indices:
@@ -283,10 +298,16 @@ def make_dataset(dataset_run, config, smoke=False):
 
 
 def data_identity(dataset_run, windows):
-    return {"dataset_run": str(dataset_run), "dataset_manifest_sha256": file_sha256(dataset_run / "manifests/dataset_manifest.json"),
+    identity = {"dataset_run": str(dataset_run), "dataset_manifest_sha256": file_sha256(dataset_run / "manifests/dataset_manifest.json"),
         "episodes_index_sha256": file_sha256(dataset_run / "manifests/episodes.jsonl"),
         "normalization_sha256": file_sha256(dataset_run / "data/normalization.npz"),
         "selected_windows_sha256": digest(windows), "selected_window_count": len(windows), "window": 64}
+    groups = dataset_run / "manifests" / "long_horizon_groups.jsonl"
+    long_windows = dataset_run / "manifests" / "long_horizon_windows.jsonl"
+    if groups.is_file() and long_windows.is_file():
+        identity["long_horizon_groups_sha256"] = file_sha256(groups)
+        identity["long_horizon_windows_sha256"] = file_sha256(long_windows)
+    return identity
 
 
 def check_source_identity(
@@ -302,7 +323,9 @@ def check_source_identity(
     missing = []
     recovered_manifest_mismatch = False
     recovered_identity_mismatches = []
-    for key in ("dataset_manifest_sha256", "episodes_index_sha256", "normalization_sha256", "selected_windows_sha256", "selected_window_count"):
+    keys = ["dataset_manifest_sha256", "episodes_index_sha256", "normalization_sha256", "selected_windows_sha256", "selected_window_count"]
+    keys.extend(key for key in ("long_horizon_groups_sha256", "long_horizon_windows_sha256") if key in identity)
+    for key in keys:
         if old.get(key) is None:
             missing.append(key)
         elif old[key] != identity[key]:
@@ -580,6 +603,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     eval_fixtures = Fixtures(cached_data, indices, expand=code != "A")
     normalization = read_normalization(dataset_run / "data/normalization.npz")
     selection = {"A": "full_reconstruction_loss", "B": "equal_family_masked_domain_mean_MSE", "C": "standard_normal_masked_energy_score"}[code]
+    long_horizon_enabled = bool(getattr(data, "long_horizon_manifest", None))
+    long_horizon_group_count = int(getattr(data, "group_count", 0)) if long_horizon_enabled else 0
     contract = {"protocol_version": PROTOCOL, "stage": code, "mask_mode": options["mask_mode"], "max_steps": maximum,
         "micro_batch": batch_size, "learning_rate": rate, "warmup_steps": warmup, "min_lr_ratio": floor,
         "lr_schedule": schedule, **intervals, "initialization_seed": seed, "training_mask_seed": mask_seed,
@@ -587,6 +612,10 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         "kl_beta": beta if code == "C" else 0., "beta_warmup_steps": beta_warmup,
         "objective": "full_state_continuous_action_contact_equal_mean_v1", "selection": selection,
         "fixture_count": len(fixtures), "selected_window_count": len(windows), "quality_rule_version": "warnings-v1",
+        "long_horizon": {"enabled": long_horizon_enabled, "group_count": long_horizon_group_count,
+                         "target_horizon_steps": int(data_cfg.get("target_horizon_steps", 0)) if long_horizon_enabled else None,
+                         "context_steps": int(data_cfg.get("context_steps", 0)) if long_horizon_enabled else None,
+                         "group_sampling": data_cfg.get("group_sampling", "complete_groups") if long_horizon_enabled else None},
         "runtime_precision": precision, "compile": {"enabled": bool(compile_cfg.get("enabled", False)),
             "mode": compile_cfg.get("mode", DEFAULT_COMPILE_MODE), "dynamic": bool(compile_cfg.get("dynamic", False)),
             "fullgraph": bool(compile_cfg.get("fullgraph", False))},
@@ -719,6 +748,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     last_step, committed, evaluation_count = start, True, sum(row["optimizer_step"] <= start for row in eval_rows)
     durable_step = start if resumed else None
     grad_seen = set(resumed.get("gradient_seen", []) if resumed else [])
+    group_ids_seen = set(resumed.get("group_ids_seen", []) if resumed else [])
     gradient_observations = {}
     started_at = time.perf_counter()
     stop_requested = []
@@ -730,6 +760,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "max_steps": maximum, "sample_exposures": sampler.exposures, "best_step": best_step,
             "best_metrics": best, "best_heldout_step": best_heldout_step,
             "best_heldout_metrics": best_heldout, "quality_pass": None,
+            "long_horizon_group_count": long_horizon_group_count,
+            "long_horizon_groups_seen": len(group_ids_seen),
+            "long_horizon_group_coverage": (
+                len(group_ids_seen) / max(long_horizon_group_count, 1)
+                if long_horizon_enabled else None
+            ),
             "updated_at": datetime.now(timezone.utc).isoformat(), **extra})
     def checkpoint_payload(step):
         with isolated_rng():
@@ -760,6 +796,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "best_heldout_metrics": best_heldout, "best_heldout_step": best_heldout_step,
             "best_reconstruction_loss": best_reconstruction, "best_reconstruction_step": best_reconstruction_step,
             "gradient_seen": sorted(grad_seen),
+            "group_ids_seen": sorted(group_ids_seen),
             "readback_probe": {key: getattr(output, key).cpu() for key in ("physical_state", "action")},
             "readback_deployment_probe": (
                 {key: getattr(deployment_output, key).cpu() for key in ("physical_state", "action")}
@@ -1007,6 +1044,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             started = time.perf_counter()
             fetch_started = started
             cpu = sampler.next(fixtures)
+            if long_horizon_enabled and "segment_group_id" in cpu:
+                values = cpu["segment_group_id"]
+                if isinstance(values, (list, tuple)):
+                    group_ids_seen.update(str(value) for value in values)
+                else:
+                    group_ids_seen.add(str(values))
             cpu = pin_batch(cpu, enabled=pin_memory)
             batch = to_device(cpu, device, non_blocking=non_blocking_transfer)
             data_fetch_seconds = time.perf_counter() - fetch_started

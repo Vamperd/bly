@@ -1126,3 +1126,17 @@ Windows 可运行不依赖 Isaac/HDF5 的轻量测试；完整 HDF5、CUDA、Isa
 独立 stage compile、标准化窗口缓存和可选 pinned/non-blocking 传输。旧 checkpoint、HDF5 和历史
 run 只读，新优化必须建立新 run。Ubuntu 仍需执行四类 smoke、数值 parity 和稳态吞吐门禁，静态
 测试不能替代 CUDA 性能结论。
+
+## 13. T64 连续动作分段与长时推理实现（2026-10-15）
+
+Windows 已实现 `cvae_sa.long_horizon_dataset`、`LongHorizonWindowDataset` 和
+`cvae_sa.long_horizon_eval`。新派生数据集版本为
+`sonic_long_horizon_state_action_dataset_v1`：按原始 episode 以 192 transition 分组，每组最多
+三个 T64 chunk，源 HDF5 只读引用，尾部使用 valid padding，并生成 group/window/coverage/source
+hash manifest。训练入口支持 `data.long_horizon_manifest`，把 group identity 和 group coverage 写入
+training contract、progress 和 checkpoint；默认随机 Mask、65-token 模型和 canonical Action 合同不变。
+
+方法 A 为 T64 全 Action Mask；方法 B 为上一窗口后 32 步完整 State/Action 加下一窗口前 32 个 State，
+预测下一窗口前 32 个 Action，使用 standard-normal route。当前实现只完成 Windows 静态/轻量验证；
+HDF5/CUDA dataset smoke、2-step FP32 eager、Ubuntu 训练、长时 replay 和视频仍待执行。不得把
+`cvae_long_horizon_execution.ok` 解读为模型质量通过，也不得删除或覆盖源 HDF5、旧 dataset 或旧 run。

@@ -690,3 +690,15 @@ latent 分组报告与 best/last 完全一致：global 平均 KL `8.7081e-6`，l
 latent 分组仍显示 `local_15` 承担约半数 local KL，global 没有明显重新激活。当前最稳妥的解释是：
 增大 KL 确实压低了 local posterior 偏离，并改善了 fixed standard-normal 指标，但没有解决 latent
 结构集中或 held-out Mask 坐标迁移；fixed 指标的改善还可能来自 fixed Mask 训练协议本身。
+
+## 21. 长时 T64 派生数据集实现状态（2026-10-15）
+
+已在 Windows 实现 `long_horizon_dataset.py`、`long_horizon_eval.py`、FP32 eager 长时配置和
+`cvae_repro.sh` 的 build/smoke/train/eval/render 入口。实现包含 episode 分组、tail padding、
+transition coverage、源 HDF5 hash、group-aware training metadata，以及方法 A/B 的 192-step
+离线预测和 Action 对比视频生成。
+
+当前状态为“代码实现完成、Ubuntu execution 未验证”。下一步按新目录顺序运行 dataset smoke、
+2-step FP32 eager training smoke、pilot training、192-step evaluation；execution marker 与
+quality_pass 必须分开记录。方法 B 的首块 warm-up 和 32-step OOD Mask 不得省略或改写成普通
+causal rollout 结果。

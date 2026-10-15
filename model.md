@@ -489,3 +489,15 @@ Dynamo recompile limit 时只允许一次显式 eager fallback，并在 `compile
 和 checkpoint runtime contract 中记录 requested/succeeded、fallback reason/phase、graph breaks、
 recompiles、cold start 与 output ownership contract。BF16 参数、AdamW 状态、KL/重建/contact
 loss 和评测指标的 FP32 保留区域不变。
+
+## 11. T64 连续动作分段与 192 步推理
+
+新增 `sonic_long_horizon_state_action_dataset_v1` 派生合同。原始 episode 被视为完整 motion clip，
+按 192 transition 非重叠分组，每组最多三个连续 T64 窗口；尾部 group 保留 valid padding，所有有效
+Action 必须恰好覆盖一次。新 manifest 只保存 group/window/source hash，HDF5 保持只读，normalization
+沿用源训练 split。
+
+65-token 模型仍只接收单个 T64 窗口。长时评测提供两条 standard-normal 路径：`full_action_t64`
+对每个窗口隐藏全部 Action；`tail32_context_next32` 使用前 32 步完整 State/Action 和后 32 步
+State，隐藏后 32 步 Action。后者的首块需要 32 步 warm-up，且当前默认随机 Mask 未直接包含 32-step
+Action gap，因此质量必须单独标记为结构化 held-out/OOD 诊断。

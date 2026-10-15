@@ -597,3 +597,14 @@ Action 映射和仿真评分，但在模型调用前置零；`action_before_wind
 准备命令必须显式使用 `--allow-recovered-identity`。这类 run 的
 `exact_identity_verified` 必须按 false 解读，只能作为同一重建数据上的三路线诊断比较，不能
 声称是原训练 HDF5 的 exact identity replay。
+
+## 21. 长时数据集实现的证据边界（2026-10-15）
+
+长时功能已完成源码实现，但目前没有 Ubuntu HDF5/CUDA 运行证据。派生 dataset marker 只能证明
+manifest、source hash、chunk coverage 和 padding 检查完整；long-horizon execution marker 只能证明
+checkpoint/推理 artifact 完整，不能证明 192-step Action 或物理 replay 质量通过。
+
+方法 A 是已存在 full-action Mask 的 T64 串接；方法 B 是前 32 步 context 加下一窗口前 32 个 State
+的结构化 32-step Action gap。方法 B 不在当前默认随机 Mask 分布内，必须单独报告 warm-up、visible
+index、mask hash 和 OOD 状态。任何物理质量结论还必须先通过同一初始状态和 seed 的 deterministic
+baseline。
