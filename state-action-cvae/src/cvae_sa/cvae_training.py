@@ -18,7 +18,7 @@ import torch
 from torch.utils.data import DataLoader, default_collate
 
 from .cvae_protocol import (CHECKPOINT, LEGACY_CHECKPOINT, PROTOCOL, Fixtures, RecoverableSampler,
-    capture_rng, digest, durable_save, isolated_rng, lr_factor, materialize_normalized_window_cache,
+    capture_rng, digest, durable_save, durable_save_many, isolated_rng, lr_factor, materialize_normalized_window_cache,
     quality_warnings, restore_rng, run_lock)
 from .cvae_diagnostics import ablations, batch_ids, epsilon_for, evaluate, read_normalization, route_output
 from .models import build_model
@@ -373,9 +373,10 @@ def provenance(config, contract, identity, source):
         "python_version": sys.version, "pid": os.getpid(), "created_at": datetime.now(timezone.utc).isoformat()}
 
 
-def mask_bank(fixtures, seed, held_out, path):
+def mask_bank(fixtures, seed, held_out, path, *, batch_size=32):
     rows = []
-    loader = DataLoader(fixtures, batch_size=32, shuffle=False, generator=torch.Generator().manual_seed(0))
+    loader = DataLoader(fixtures, batch_size=int(batch_size), shuffle=False, num_workers=0,
+                        generator=torch.Generator().manual_seed(0))
     for batch in loader:
         sm, am, names = make_physical_masks(batch, seed, held_out=held_out)
         for i, identity in enumerate(batch_ids(batch)):
@@ -384,6 +385,17 @@ def mask_bank(fixtures, seed, held_out, path):
                          "action_hidden_indices": am[i].flatten().nonzero().flatten().tolist()})
     atomic_write_json(path, {"protocol_version": PROTOCOL, "sha256": digest(rows), "fixtures": rows})
     return digest(rows)
+
+
+def evaluation_profile_for_step(step: int, maximum: int, validation_interval: int,
+                                full_validation_interval: int) -> str | None:
+    """Return the scheduled evaluation profile without changing optimizer steps."""
+    step, maximum = int(step), int(maximum)
+    if step < 1 or step > maximum or step % int(validation_interval):
+        return None
+    if step == maximum or step % int(full_validation_interval) == 0:
+        return "diagnostic"
+    return "summary"
 
 
 def plots(run, rows):
@@ -478,7 +490,8 @@ def strict_readback(path, model, optimizer, scheduler, probe, stage, seed):
 def run_experiment(dataset_run, output_run, source_run, config, *, stage, init_run=None, smoke=False,
     kl_beta_override=None, max_steps_override=None, micro_batch_override=None, learning_rate_override=None,
     lr_schedule=None, warmup_steps_override=None, min_lr_ratio_override=None, validation_interval_override=None,
-    checkpoint_interval_override=None, log_interval_override=None, resume_run=None, mask_mode="fixed",
+    checkpoint_interval_override=None, log_interval_override=None, eval_micro_batch_override=None,
+    full_validation_interval_override=None, resume_run=None, mask_mode="fixed",
     init_checkpoint=None, continue_checkpoint=None, additional_steps=None, allow_legacy_identity=False,
     eval_samples=8, beta_warmup_steps=None, skip_initial_eval=False):
     from .posterior_hierarchical_standard_cvae import _stage_key, hierarchical_kl, load_checkpoint, weighted_reconstruction_loss
@@ -526,7 +539,8 @@ def run_experiment(dataset_run, output_run, source_run, config, *, stage, init_r
             micro_batch_override=micro_batch_override, learning_rate_override=learning_rate_override, lr_schedule=lr_schedule,
             warmup_steps_override=warmup_steps_override, min_lr_ratio_override=min_lr_ratio_override,
             validation_interval_override=validation_interval_override, checkpoint_interval_override=checkpoint_interval_override,
-            log_interval_override=log_interval_override, resume_run=resume_run, mask_mode=mask_mode,
+            log_interval_override=log_interval_override, eval_micro_batch_override=eval_micro_batch_override,
+            full_validation_interval_override=full_validation_interval_override, resume_run=resume_run, mask_mode=mask_mode,
             init_checkpoint=init_checkpoint, continue_checkpoint=continue_checkpoint, additional_steps=additional_steps,
             allow_legacy_identity=allow_legacy_identity, eval_samples=eval_samples, beta_warmup_steps=beta_warmup_steps,
             skip_initial_eval=skip_initial_eval)
@@ -559,13 +573,18 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     if options["smoke"]:
         warmup = min(warmup, maximum - 1)
     batch_size, rate = int(option("micro_batch", 32)), float(option("learning_rate", 1e-4))
+    eval_batch_size = int(option("eval_micro_batch", batch_size))
     floor, schedule = float(option("min_lr_ratio", .01)), options["lr_schedule"] or cfg.get("lr_schedule", "cosine")
     if maximum < 1 or batch_size < 1 or not np.isfinite(rate) or rate <= 0 or schedule not in {"constant", "linear", "cosine"}:
         raise ValueError("invalid training budget or learning rate")
     lr_factor(0, maximum, warmup, floor, schedule)
     intervals = {k: int(option(k, v)) for k, v in (("validation_interval", 1000), ("checkpoint_interval", 500), ("log_interval", 50))}
-    if min(intervals.values()) < 1:
+    full_validation_interval = int(option("full_validation_interval", intervals["validation_interval"]))
+    skip_initial_eval = bool(options["skip_initial_eval"] or cfg.get("skip_initial_eval", False))
+    if min(intervals.values()) < 1 or eval_batch_size < 1 or full_validation_interval < 1:
         raise ValueError("intervals must be positive")
+    if full_validation_interval < intervals["validation_interval"] or full_validation_interval % intervals["validation_interval"]:
+        raise ValueError("full_validation_interval must be a multiple of validation_interval")
     seed, mask_seed = int(config.get("initialization_seed", 20260921)), int(config.get("training_mask_seed", 20260920))
     beta = float(options["kl_beta_override"] if options["kl_beta_override"] is not None else cfg.get("kl", {}).get("beta", .001))
     beta_warmup = int(options["beta_warmup_steps"] if options["beta_warmup_steps"] is not None else cfg.get("kl", {}).get("beta_warmup_steps", 10000))
@@ -606,12 +625,16 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     long_horizon_enabled = bool(getattr(data, "long_horizon_manifest", None))
     long_horizon_group_count = int(getattr(data, "group_count", 0)) if long_horizon_enabled else 0
     contract = {"protocol_version": PROTOCOL, "stage": code, "mask_mode": options["mask_mode"], "max_steps": maximum,
-        "micro_batch": batch_size, "learning_rate": rate, "warmup_steps": warmup, "min_lr_ratio": floor,
-        "lr_schedule": schedule, **intervals, "initialization_seed": seed, "training_mask_seed": mask_seed,
-        "eval_samples": options["eval_samples"], "skip_initial_eval": bool(options["skip_initial_eval"]),
+        "micro_batch": batch_size, "eval_micro_batch": eval_batch_size, "learning_rate": rate,
+        "warmup_steps": warmup, "min_lr_ratio": floor, "lr_schedule": schedule, **intervals,
+        "full_validation_interval": full_validation_interval, "initialization_seed": seed, "training_mask_seed": mask_seed,
+        "eval_samples": options["eval_samples"], "skip_initial_eval": skip_initial_eval,
         "kl_beta": beta if code == "C" else 0., "beta_warmup_steps": beta_warmup,
         "objective": "full_state_continuous_action_contact_equal_mean_v1", "selection": selection,
         "fixture_count": len(fixtures), "selected_window_count": len(windows), "quality_rule_version": "warnings-v1",
+        "evaluation_schedule": {"routine_profile": "summary", "full_profile": "diagnostic",
+                                "summary_only_until_full": bool(cfg.get("summary_only_until_full", False)),
+                                "best_checkpoint_profile": "diagnostic"},
         "long_horizon": {"enabled": long_horizon_enabled, "group_count": long_horizon_group_count,
                          "target_horizon_steps": int(data_cfg.get("target_horizon_steps", 0)) if long_horizon_enabled else None,
                          "context_steps": int(data_cfg.get("context_steps", 0)) if long_horizon_enabled else None,
@@ -709,7 +732,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     mode = "resume" if resumed else ("continue" if options["continue_checkpoint"] else "init" if path else "random")
     pin_memory = bool(data_cfg.get("pin_memory", False)) and device.type == "cuda"
     non_blocking_transfer = bool(data_cfg.get("non_blocking_transfer", False)) and pin_memory
-    loader = DataLoader(eval_fixtures, batch_size=batch_size, shuffle=False, num_workers=0,
+    loader = DataLoader(eval_fixtures, batch_size=eval_batch_size, shuffle=False, num_workers=0,
                         pin_memory=pin_memory, generator=torch.Generator().manual_seed(seed + 1))
     probe = default_collate([eval_fixtures[i] for i in range(min(2, len(eval_fixtures)))])
     compile_routes = {}
@@ -732,8 +755,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         atomic_write_json(run / "manifests/model_signature.json", model.architecture_signature(model.config, sum(p.numel() for p in model.parameters())))
         if code != "A":
             with isolated_rng():
-                mask_bank(eval_fixtures, mask_seed, False, run / "data/fixed_mask_bank.json")
-                mask_bank(eval_fixtures, mask_seed + 700001, True, run / "data/heldout_mask_bank.json")
+                mask_bank(eval_fixtures, mask_seed, False, run / "data/fixed_mask_bank.json", batch_size=eval_batch_size)
+                mask_bank(eval_fixtures, mask_seed + 700001, True, run / "data/heldout_mask_bank.json", batch_size=eval_batch_size)
     metrics_path = run / "logs/metrics.jsonl"
     eval_rows = load_rows(run / "logs/evaluations.jsonl")
     best = resumed.get("best_metrics") if resumed else None
@@ -809,6 +832,17 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         durable_save(run / "checkpoints" / name, checkpoint_payload(last_step))
         if name == "last.pt":
             durable_step = last_step
+    def save_many(names):
+        nonlocal durable_step
+        if not committed:
+            raise RuntimeError("refusing checkpoint from incomplete optimizer update")
+        names = list(dict.fromkeys(names))
+        if not names:
+            return
+        payload = checkpoint_payload(last_step)
+        durable_save_many([run / "checkpoints" / name for name in names], payload)
+        if "last.pt" in names:
+            durable_step = last_step
     def audit(step, warnings):
         readback = strict_readback(run / "checkpoints/last.pt", model, optimizer, scheduler, probe, code, mask_seed)
         missing = sorted({name.split('.')[0] for name, p in model.named_parameters() if p.requires_grad} - grad_seen)
@@ -826,32 +860,42 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 raise RuntimeError(f"active module gradient never observed: {unexpected}")
         atomic_write_json(run / f"manifests/audit_{step:09d}.json", report)
         return report
-    def full_eval():
+    def full_eval(*, full_diagnostics):
         nonlocal best, best_step, best_heldout, best_heldout_step
         nonlocal best_reconstruction, best_reconstruction_step, evaluation_count
         routes = [code] if code != "C" else ["posterior_mean", "posterior_sample", "standard_normal", "zero"]
         reports = {}
+        evaluation_profile = "diagnostic" if full_diagnostics else "summary"
+        encoding_cache = {}
+        def evaluation_heartbeat(route_name, batch_count):
+            # Progress is operational telemetry, not an evaluation target.
+            # Throttle atomic progress writes while retaining route liveness.
+            if int(batch_count) == 1 or int(batch_count) % 16 == 0:
+                progress(phase="evaluation", route=route_name, evaluation_batches=int(batch_count))
         for route in routes:
             progress(phase="evaluation", route=route, evaluation_batches=0)
             compiled_route, eager_route, route_info = compile_routes[route]
             reports[route], _ = evaluate(model, loader, device, normalization, route=route, seed=mask_seed,
-                samples=options["eval_samples"], output_dir=run / f"evaluations/step_{last_step:09d}/fixed/{route}",
-                heartbeat=lambda n: progress(phase="evaluation", route=route, evaluation_batches=n),
+                samples=options["eval_samples"], detail_level=evaluation_profile,
+                output_dir=(run / f"evaluations/step_{last_step:09d}/fixed/{route}" if full_diagnostics else None),
+                heartbeat=lambda n, route_name=route: evaluation_heartbeat(route_name, n),
                 route_callable=compiled_route, non_blocking=non_blocking_transfer,
-                precision=precision, compile_info=route_info)
+                precision=precision, compile_info=route_info, encoding_cache=encoding_cache)
         primary = reports[code if code != "C" else "standard_normal"]
         row = {**primary, "optimizer_step": last_step, "cumulative_step": source_step + last_step,
-               "phase": "evaluation", "routes": reports}
+               "phase": "evaluation", "evaluation_profile": evaluation_profile,
+               "selection_eligible": bool(full_diagnostics), "routes": reports}
         if code != "A":
             held_route = code if code == "B" else "standard_normal"
             held_compiled, _, held_info = compile_routes[held_route]
             held, _ = evaluate(model, loader, device, normalization, route=held_route,
                 seed=mask_seed + 700001, held_out=True, samples=options["eval_samples"],
                 reference_mask_seed=mask_seed,
-                output_dir=run / f"evaluations/step_{last_step:09d}/heldout",
-                heartbeat=lambda n: progress(phase="evaluation", route="heldout", evaluation_batches=n),
+                detail_level=evaluation_profile,
+                output_dir=(run / f"evaluations/step_{last_step:09d}/heldout" if full_diagnostics else None),
+                heartbeat=lambda n: evaluation_heartbeat("heldout", n),
                 route_callable=held_compiled, non_blocking=non_blocking_transfer,
-                precision=precision, compile_info=held_info)
+                precision=precision, compile_info=held_info, encoding_cache=encoding_cache)
             row["heldout_mask"] = held
         eval_rows.append(row)
         if code != "A":
@@ -860,11 +904,13 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 raise RuntimeError(f"evaluation target coverage missing families: {sorted(missing_families)}")
         append(run / "logs/evaluations.jsonl", row)
         append(metrics_path, {k: v for k, v in row.items() if k not in {"routes", "partitions", "mask_families", "heldout_mask"}})
-        improved = best is None or row["selection_score"] < best["selection_score"]
-        if improved:
-            best, best_step = {k: row[k] for k in ("selection_score", "total_loss", "state_rmse", "action_rmse", "max_abs", "optimizer_step")}, last_step
+        improved = False
+        if full_diagnostics:
+            improved = best is None or row["selection_score"] < best["selection_score"]
+            if improved:
+                best, best_step = {k: row[k] for k in ("selection_score", "total_loss", "state_rmse", "action_rmse", "max_abs", "optimizer_step")}, last_step
         heldout_improved = False
-        if code == "B" and row.get("heldout_mask") is not None:
+        if full_diagnostics and code == "B" and row.get("heldout_mask") is not None:
             heldout = row["heldout_mask"]
             heldout_score = heldout.get("selection_score")
             heldout_improved = heldout_score is not None and (
@@ -876,29 +922,31 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 )}
                 best_heldout["optimizer_step"] = last_step
                 best_heldout_step = last_step
-        reconstruction_score = reports.get("posterior_mean", primary)["total_loss"]
-        reconstruction_improved = reconstruction_score < best_reconstruction
-        if reconstruction_improved:
-            best_reconstruction = reconstruction_score
-            best_reconstruction_step = last_step
-        # Commit last first. If interrupted between file replacements, its model
-        # reconstructs a missing/stale best for this same step on resume.
-        save()
-        if improved:
-            save("best.pt")
-            if code == "B":
-                # Explicitly name the fixed-bank selection policy while
-                # preserving the historical best.pt alias.
-                save("best_fixed.pt")
-        if heldout_improved:
-            save("best_heldout.pt")
-        if reconstruction_improved:
-            save("best_reconstruction.pt")
+        reconstruction_improved = False
+        if full_diagnostics:
+            reconstruction_score = reports.get("posterior_mean", primary)["total_loss"]
+            reconstruction_improved = reconstruction_score < best_reconstruction
+            if reconstruction_improved:
+                best_reconstruction = reconstruction_score
+                best_reconstruction_step = last_step
+            # Commit last first. If interrupted between file replacements, its model
+            # reconstructs a missing/stale best for this same step on resume.
+            checkpoint_names = ["last.pt"]
+            if improved:
+                checkpoint_names.append("best.pt")
+                if code == "B":
+                    checkpoint_names.append("best_fixed.pt")
+            if heldout_improved:
+                checkpoint_names.append("best_heldout.pt")
+            if reconstruction_improved:
+                checkpoint_names.append("best_reconstruction.pt")
+            save_many(checkpoint_names)
         evaluation_count += 1
-        warnings = quality_warnings(eval_rows)
-        if evaluation_count in {1, 2} or evaluation_count % 5 == 0 or last_step == maximum:
+        quality_rows = [item for item in eval_rows if item.get("selection_eligible")]
+        warnings = quality_warnings(quality_rows)
+        if full_diagnostics and (evaluation_count in {1, 2} or evaluation_count % 5 == 0 or last_step == maximum):
             audit(last_step, warnings)
-        if evaluation_count % 5 == 0 and len(indices) > 1:
+        if full_diagnostics and evaluation_count % 5 == 0 and len(indices) > 1:
             with isolated_rng():
                 manifest = eval_fixtures.manifest()
                 selected_indices = []
@@ -942,9 +990,10 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                     ),
                 }
                 atomic_write_json(run / f"evaluations/step_{last_step:09d}/ablations.json", result)
-        plots(run, eval_rows)
-        progress(quality_warnings=warnings)
-        print(f"[stage={code}] eval step={last_step}/{maximum} selection={row['selection_score']:.6g} full={row['total_loss']:.6g} state={row['state_rmse']:.6g} action={row['action_rmse']:.6g} max={row['max_abs']:.6g} best={best_step} warnings={warnings}", flush=True)
+        if full_diagnostics:
+            plots(run, quality_rows)
+        progress(quality_warnings=warnings, evaluation_profile=evaluation_profile)
+        print(f"[stage={code}] {evaluation_profile} eval step={last_step}/{maximum} selection={row['selection_score']:.6g} full={row['total_loss']:.6g} state={row['state_rmse']:.6g} action={row['action_rmse']:.6g} max={row['max_abs']:.6g} best={best_step} warnings={warnings}", flush=True)
     previous_handlers = {}
     encoder_calls = {"posterior": 0, "condition": 0}
     def count_call(name):
@@ -1006,10 +1055,10 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             restore_rng(checkpoint["rng_state"])
         if start == 0 and not resumed:
             save()
-            if not options["skip_initial_eval"]:
-                full_eval()
+            if not skip_initial_eval:
+                full_eval(full_diagnostics=True)
         elif best is None or not eval_rows or (start == maximum and eval_rows[-1]["optimizer_step"] != maximum):
-            full_eval()
+            full_eval(full_diagnostics=True)
         progress()
         expected_calls = {"posterior": int(code in {"A", "C"}), "condition": int(code in {"B", "C"})}
         if train_compile_info["succeeded"]:
@@ -1159,17 +1208,22 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 print(f"[stage={code}] step={step}/{maximum} loss={row['loss']:.6g} lr_used={used_lr:.4g} grad={float(before):.4g} exposures={sampler.exposures}", flush=True)
             if stop_requested:
                 break
-            if step % intervals["validation_interval"] == 0 or step == maximum:
-                full_eval()
+            profile = evaluation_profile_for_step(
+                step, maximum, intervals["validation_interval"], full_validation_interval
+            )
+            if profile is not None:
+                full_eval(full_diagnostics=profile == "diagnostic")
             elif step % intervals["checkpoint_interval"] == 0:
                 save()
                 progress()
         if stop_requested:
-            save()
+            if durable_step != last_step:
+                save()
             progress("interrupted")
             atomic_write_text(run / "markers/cvae.interrupted", "INTERRUPTED AT COMMITTED UPDATE BOUNDARY\n")
             return {"interrupted": True, "stage": code, "model_contract": {"actual_parameter_count": sum(p.numel() for p in model.parameters())}}
-        save()
+        if durable_step != last_step:
+            save()
         readback = strict_readback(run / "checkpoints/last.pt", model, optimizer, scheduler, probe, code, mask_seed)
         best_readback = strict_readback(run / "checkpoints/best.pt", model, optimizer, scheduler, probe, code, mask_seed)
         best_fixed_readback = (
@@ -1180,6 +1234,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             strict_readback(run / "checkpoints/best_heldout.pt", model, optimizer, scheduler, probe, code, mask_seed)
             if code == "B" and best_heldout_step is not None else None
         )
+        quality_eval_rows = [item for item in eval_rows if item.get("selection_eligible")]
         summary = {"format_version": "sonic_65_token_hierarchical_standard_cvae_summary_v2", "protocol_version": PROTOCOL,
             "architecture_version": model.ARCHITECTURE_VERSION, "stage": code, "execution_pass": True, "quality_pass": None,
             "smoke": options["smoke"], "completed_optimizer_steps": last_step, "cumulative_step": source_step + last_step,
@@ -1193,7 +1248,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "checkpoint_readback": readback, "best_checkpoint_readback": best_readback,
             "best_fixed_checkpoint_readback": best_fixed_readback,
             "best_heldout_checkpoint_readback": best_heldout_readback,
-            "evaluation_count": evaluation_count, "quality_warnings": quality_warnings(eval_rows),
+            "evaluation_count": evaluation_count, "quality_warnings": quality_warnings(quality_eval_rows),
             "artifacts": {"metrics": "logs/metrics.jsonl", "evaluations": "logs/evaluations.jsonl", "diagnostics": "evaluations/", "audits": "manifests/audit_*.json"},
             "unique_next_step": "REVIEW_REPORT_BEFORE_ANY_NEXT_STAGE"}
         atomic_write_json(run / "manifests/standard_cvae_summary.json", summary)

@@ -501,3 +501,11 @@ Action 必须恰好覆盖一次。新 manifest 只保存 group/window/source has
 对每个窗口隐藏全部 Action；`tail32_context_next32` 使用前 32 步完整 State/Action 和后 32 步
 State，隐藏后 32 步 Action。后者的首块需要 32 步 warm-up，且当前默认随机 Mask 未直接包含 32-step
 Action gap，因此质量必须单独标记为结构化 held-out/OOD 诊断。
+
+C 阶段评估提速已在 Windows 实现：训练 `micro_batch=32` 与评估 `eval_micro_batch=128` 分离，
+默认每 5000 步执行全 fixture 的 summary evaluation，每 50000 步及最终步执行 full diagnostic
+evaluation；`eval_samples=8`、fixed/held-out Mask、route 和 sample identity 不变。summary 只跳过
+per-fixture trace、SVG 和大体积 diagnostics 写盘，不参与 `best.pt` 选择；full evaluation 仍执行
+原质量指标和 checkpoint 选择。FP32 eager 路径按 batch 复用 posterior/condition encoder，并将
+多个 checkpoint alias 使用一次序列化 payload 写出；cached/pinned runtime 另有独立配置，尚未有
+Ubuntu CUDA throughput 证据。

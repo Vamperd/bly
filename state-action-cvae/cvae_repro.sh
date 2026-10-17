@@ -1151,7 +1151,7 @@ long_horizon_dataset_smoke() {
 }
 
 long_horizon_train_smoke() {
-  local dataset_run="${CVAE_LONG_HORIZON_DATASET_RUN:-}" config="$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json" run_dir
+  local dataset_run="${CVAE_LONG_HORIZON_DATASET_RUN:-}" config="${CVAE_LONG_HORIZON_CONFIG:-$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json}" run_dir
   [[ -n "$dataset_run" ]] || die "CVAE_LONG_HORIZON_DATASET_RUN is required"
   [[ -f "$dataset_run/markers/cvae_long_horizon_dataset.ok" ]] || die "long-horizon dataset marker is missing: $dataset_run"
   run_dir="$(new_run_dir cvae_long_horizon_train_smoke)"
@@ -1160,17 +1160,20 @@ long_horizon_train_smoke() {
     "$PYTHON" -m cvae_sa.posterior_hierarchical_standard_cvae \
       --dataset-run "$dataset_run" --output-run "$run_dir" --config "$config" --stage C \
       --mask-mode fixed --max-steps 2 --validation-interval 2 --checkpoint-interval 2 --log-interval 1 \
+      --full-validation-interval 2 --eval-micro-batch "${CVAE_LONG_HORIZON_EVAL_MICRO_BATCH:-128}" \
       --micro-batch "${CVAE_POSTERIOR_MICRO_BATCH:-32}" --kl-beta "${CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA:-0.003}" \
-      --beta-warmup-steps 2 --eval-samples 2
+      --beta-warmup-steps 2 --eval-samples "${CVAE_POSTERIOR_EVAL_SAMPLES:-8}"
   [[ -f "$run_dir/markers/cvae_posterior_standard_cvae_smoke.ok" ]] || die "long-horizon training smoke marker is missing"
   update_latest cvae_long_horizon_train_smoke "$run_dir"
   printf '%s\n' "$run_dir"
 }
 
 long_horizon_train() {
-  local dataset_run="${CVAE_LONG_HORIZON_DATASET_RUN:-}" config="$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json" run_dir
+  local dataset_run="${CVAE_LONG_HORIZON_DATASET_RUN:-}" config="${CVAE_LONG_HORIZON_CONFIG:-$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json}" run_dir
+  local eval_args=()
   [[ -n "$dataset_run" ]] || die "CVAE_LONG_HORIZON_DATASET_RUN is required"
   [[ -f "$dataset_run/markers/cvae_long_horizon_dataset.ok" ]] || die "long-horizon dataset marker is missing: $dataset_run"
+  [[ "${CVAE_LONG_HORIZON_SKIP_INITIAL_EVAL:-0}" == "1" ]] && eval_args+=(--skip-initial-eval)
   run_dir="$(new_run_dir cvae_long_horizon_train)"
   capture_environment "$run_dir"
   run_logged "$run_dir" long_horizon_train.log \
@@ -1178,13 +1181,16 @@ long_horizon_train() {
       --dataset-run "$dataset_run" --output-run "$run_dir" --config "$config" --stage C \
       --mask-mode "${CVAE_POSTERIOR_MASK_MODE:-fixed}" \
       --max-steps "${CVAE_LONG_HORIZON_MAX_STEPS:-200000}" \
-      --validation-interval "${CVAE_LONG_HORIZON_VALIDATION_INTERVAL:-50000}" \
+      --validation-interval "${CVAE_LONG_HORIZON_VALIDATION_INTERVAL:-5000}" \
+      --full-validation-interval "${CVAE_LONG_HORIZON_FULL_VALIDATION_INTERVAL:-50000}" \
       --checkpoint-interval "${CVAE_LONG_HORIZON_CHECKPOINT_INTERVAL:-50000}" \
       --log-interval "${CVAE_LONG_HORIZON_LOG_INTERVAL:-100}" \
       --micro-batch "${CVAE_POSTERIOR_MICRO_BATCH:-32}" \
+      --eval-micro-batch "${CVAE_LONG_HORIZON_EVAL_MICRO_BATCH:-128}" \
       --kl-beta "${CVAE_POSTERIOR_STANDARD_CVAE_KL_BETA:-0.003}" \
       --beta-warmup-steps "${CVAE_LONG_HORIZON_BETA_WARMUP_STEPS:-10000}" \
-      --eval-samples "${CVAE_POSTERIOR_EVAL_SAMPLES:-8}"
+      --eval-samples "${CVAE_POSTERIOR_EVAL_SAMPLES:-8}" \
+      "${eval_args[@]}"
   [[ -f "$run_dir/markers/cvae_posterior_standard_cvae_execution.ok" ]] || die "long-horizon training marker is missing"
   update_latest cvae_long_horizon_train "$run_dir"
   printf '%s\n' "$run_dir"

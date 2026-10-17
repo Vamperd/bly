@@ -702,3 +702,10 @@ transition coverage、源 HDF5 hash、group-aware training metadata，以及方�
 2-step FP32 eager training smoke、pilot training、192-step evaluation；execution marker 与
 quality_pass 必须分开记录。方法 B 的首块 warm-up 和 32-step OOD Mask 不得省略或改写成普通
 causal rollout 结果。
+
+2026-10-16 已加入 C 阶段评估提速实现：训练 batch 保持 32，评估独立使用 128；每 5,000 步执行
+全 fixture summary evaluation，每 50,000 步和最终步执行 full diagnostic evaluation。所有 route、
+8 个 latent samples、fixed/held-out Mask 和 identity 保持不变。summary 不写 per-fixture trace、
+SVG 和大 diagnostics 文件，也不更新 best checkpoint；full evaluation 才执行正式 checkpoint
+选择。FP32 eager 已加入 batch 内 posterior/condition encoder 复用与一次 payload 多 alias checkpoint
+写出；cached/pinned 配置已建立，但 Ubuntu CUDA 速度与显存尚未验证。

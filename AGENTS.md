@@ -1140,3 +1140,11 @@ training contract、progress 和 checkpoint；默认随机 Mask、65-token 模�
 预测下一窗口前 32 个 Action，使用 standard-normal route。当前实现只完成 Windows 静态/轻量验证；
 HDF5/CUDA dataset smoke、2-step FP32 eager、Ubuntu 训练、长时 replay 和视频仍待执行。不得把
 `cvae_long_horizon_execution.ok` 解读为模型质量通过，也不得删除或覆盖源 HDF5、旧 dataset 或旧 run。
+
+C 阶段评估提速已在 Windows 实现：训练 `micro_batch=32` 与评估 `eval_micro_batch=128` 分离，
+默认每 5000 步执行全 fixture 的 summary evaluation，每 50000 步及最终步执行 full diagnostic
+evaluation；`eval_samples=8`、fixed/held-out Mask、route 和 sample identity 不变。summary 只跳过
+per-fixture trace、SVG 和大体积 diagnostics 写盘，不参与 `best.pt` 选择；full evaluation 仍执行
+原质量指标和 checkpoint 选择。FP32 eager 路径按 batch 复用 posterior/condition encoder，并将
+多个 checkpoint alias 使用一次序列化 payload 写出；cached/pinned runtime 另有独立配置，尚未有
+Ubuntu CUDA throughput 证据。

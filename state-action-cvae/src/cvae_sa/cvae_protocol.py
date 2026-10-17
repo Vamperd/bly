@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import hashlib
+import io
 import json
 import math
 import os
@@ -250,6 +251,30 @@ def durable_save(path: Path, checkpoint: dict):
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+def durable_save_many(paths: list[Path], checkpoint: dict):
+    """Serialize one checkpoint payload and atomically publish several aliases."""
+    if not paths:
+        return
+    buffer = io.BytesIO()
+    torch.save(checkpoint, buffer)
+    payload = buffer.getvalue()
+    for path in paths:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        with temp.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        atomic_replace(temp, path)
+        if os.name != "nt":
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
 
 
 @contextmanager

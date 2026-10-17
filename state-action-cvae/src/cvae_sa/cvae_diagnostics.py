@@ -16,6 +16,7 @@ import torch
 from torch.nn import functional as F
 
 from .cvae_protocol import digest, isolated_rng, scalar
+from .models import HierarchicalStandardCVAEOutput
 from .posterior_t64_protocol import make_physical_masks
 from .util import atomic_write_json
 
@@ -105,6 +106,67 @@ def route_output(model, batch, sm, am, route, epsilon=None):
     raise ValueError(f"unknown evaluation route {route}")
 
 
+def cached_route_output(model, batch, sm, am, route, epsilon, cache):
+    """Evaluate one route while reusing deterministic encoder results per batch.
+
+    The cache is used only by eager evaluation.  It stores posterior and
+    condition encodings for the current full evaluation so posterior samples,
+    standard-normal samples, and zero-latent decoding do not rerun encoders.
+    Latent epsilon generation and decoder order remain unchanged.
+    """
+    if cache is None or route not in {"posterior_mean", "posterior_sample", "standard_normal", "zero"}:
+        return route_output(model, batch, sm, am, route, epsilon)
+    posterior = cache.get("posterior")
+    condition = cache.get("condition")
+    if route in {"posterior_mean", "posterior_sample"} and posterior is None:
+        posterior = model.encode_posterior_distribution(batch)
+        cache["posterior"] = posterior
+    if condition is None:
+        condition = model.encode_condition(batch, sm, am)
+        cache["condition"] = condition
+    if route == "posterior_mean":
+        fused = model.fuse_latents(posterior, condition)
+        decoded = model.decode_from_fused_latents(batch, fused, condition)
+        return HierarchicalStandardCVAEOutput(
+            decoded.physical_state, decoded.action, decoded.state_contact_logits,
+            posterior, None, posterior.global_mean, posterior.local_mean,
+            "posterior_mean", condition,
+        )
+    if route == "posterior_sample":
+        global_latent, local_latents = model.reparameterize(posterior, epsilon)
+        fused = model.fuse_latents((global_latent, local_latents), condition)
+        decoded = model.decode_from_fused_latents(batch, fused, condition)
+        return HierarchicalStandardCVAEOutput(
+            decoded.physical_state, decoded.action, decoded.state_contact_logits,
+            posterior, None, global_latent, local_latents,
+            "posterior_sample", condition,
+        )
+    if route == "standard_normal":
+        global_latent, local_latents = epsilon
+        fused = model.fuse_latents((global_latent, local_latents), condition)
+        decoded = model.decode_from_fused_latents(batch, fused, condition)
+        return HierarchicalStandardCVAEOutput(
+            decoded.physical_state, decoded.action, decoded.state_contact_logits,
+            None, None, global_latent, local_latents,
+            "standard_normal", condition,
+        )
+    global_latent = torch.zeros(
+        batch["physical_state"].shape[0], model.global_latent_dim,
+        device=batch["physical_state"].device, dtype=torch.float32,
+    )
+    local_latents = torch.zeros(
+        batch["physical_state"].shape[0], int(getattr(model, "local_chunks", 16)), model.local_latent_dim,
+        device=batch["physical_state"].device, dtype=torch.float32,
+    )
+    fused = model.fuse_latents((global_latent, local_latents), condition)
+    decoded = model.decode_from_fused_latents(batch, fused, condition)
+    return HierarchicalStandardCVAEOutput(
+        decoded.physical_state, decoded.action, decoded.state_contact_logits,
+        None, None, global_latent, local_latents,
+        "condition_mean", condition,
+    )
+
+
 def clone_evaluation_output(output):
     """Own the tensors returned by a compiled route before the next invocation.
 
@@ -126,8 +188,9 @@ def clone_evaluation_output(output):
 
 
 class Diagnostics:
-    def __init__(self, normalization):
+    def __init__(self, normalization, *, summary_only=False):
         self.normalization = normalization
+        self.summary_only = bool(summary_only)
         self.errors = {d: [] for d in ("state", "action")}
         self.valid = {d: [] for d in self.errors}
         self.hidden = {d: [] for d in self.errors}
@@ -136,6 +199,7 @@ class Diagnostics:
         self.worst = {d: (-1., None) for d in self.errors}
         self.contacts = {part: {"count": 0, "bce_sum": 0., "tp": 0, "tn": 0, "fp": 0, "fn": 0} for part in PARTS}
         self.overlap = {}
+        self.family_acc = {}
 
     def add(self, batch, output, sm, am, names, *, export_dir=None):
         ids = batch_ids(batch)
@@ -159,6 +223,37 @@ class Diagnostics:
             c["bce_sum"] += float(contact_bce[take].sum(dtype=np.float64))
             for key, condition in (("tp", c_pred & c_true), ("tn", ~c_pred & ~c_true), ("fp", c_pred & ~c_true), ("fn", ~c_pred & c_true)):
                 c[key] += int((take & condition).sum())
+        if self.summary_only:
+            for domain, width in (("state", 68), ("action", 29)):
+                pred = predictions[domain][..., :width]
+                target = targets[domain][..., :width]
+                valid = np.broadcast_to(validity[domain][..., None], pred.shape).copy()
+                hidden = masks[domain][..., :width] & valid
+                error_batch = pred - target
+                if not np.isfinite(error_batch[valid]).all():
+                    raise FloatingPointError("non-finite evaluation prediction")
+                self.errors[domain].append(error_batch)
+                self.valid[domain].append(valid)
+                self.hidden[domain].append(hidden)
+                for index, name in enumerate(names):
+                    family = self.family_acc.setdefault(name, {
+                        part: {d: {"count": 0, "sse": 0.0, "sae": 0.0, "windows": 0, "total_windows": 0}
+                               for d in ("state", "action")}
+                        for part in PARTS
+                    })
+                    error = error_batch[index]
+                    valid_i = valid[index]
+                    hidden_i = hidden[index]
+                    for part, take in (("full", valid_i), ("masked", hidden_i), ("visible", valid_i & ~hidden_i)):
+                        values = error[take]
+                        acc = family[part][domain]
+                        acc["count"] += int(values.size)
+                        acc["sse"] += float(np.square(values, dtype=np.float64).sum())
+                        acc["sae"] += float(np.abs(values, dtype=np.float64).sum())
+                        acc["total_windows"] += 1
+                        if values.size:
+                            acc["windows"] += 1
+            return
         for i, identity in enumerate(ids):
             row = {**identity, "mask_name": names[i]}
             row["contact"] = {}
@@ -234,6 +329,40 @@ class Diagnostics:
             self.windows.append(row)
 
     def finish(self):
+        if self.summary_only:
+            result = {"partitions": {}, "features": {}, "time": {}, "chunks": {},
+                      "chunk_positions": {}, "top_elements": {"state": [], "action": []},
+                      "windows": [], "mask_families": {}, "traces": {}}
+            errors = {domain: np.concatenate(values, axis=0) for domain, values in self.errors.items()}
+            valid = {domain: np.concatenate(values, axis=0) for domain, values in self.valid.items()}
+            hidden = {domain: np.concatenate(values, axis=0) for domain, values in self.hidden.items()}
+            for part in PARTS:
+                result["partitions"][part] = {"contact": {**self.contacts[part],
+                    "bce": self.contacts[part]["bce_sum"] / max(self.contacts[part]["count"], 1),
+                    "accuracy": (self.contacts[part]["tp"] + self.contacts[part]["tn"]) /
+                    max(self.contacts[part]["count"], 1)}}
+                for domain in ("state", "action"):
+                    take = valid[domain] if part == "full" else hidden[domain] if part == "masked" else valid[domain] & ~hidden[domain]
+                    result["partitions"][part][domain] = stats(errors[domain][take])
+            for name, family in self.family_acc.items():
+                result["mask_families"][name] = {}
+                for part in PARTS:
+                    result["mask_families"][name][part] = {}
+                    for domain in ("state", "action"):
+                        acc = family[part][domain]
+                        count = acc["count"]
+                        result["mask_families"][name][part][domain] = {
+                            "count": count,
+                            "mse": acc["sse"] / count if count else None,
+                            "micro_rmse": (acc["sse"] / count) ** .5 if count else None,
+                            "macro_window_rmse": None,
+                            "windows_with_targets": acc["windows"],
+                            "zero_target_windows": acc["total_windows"] - acc["windows"],
+                        }
+                    result["mask_families"][name][part]["contacts"] = {}
+            result["overlap_consistency"] = {domain: {"raw_frames_with_multiple_windows": None,
+                "max_prediction_range": None} for domain in ("state", "action")}
+            return result
         result = {"partitions": {}, "features": {}, "time": {}, "chunks": {}, "chunk_positions": {},
                   "top_elements": self.top, "windows": self.windows, "mask_families": {}, "traces": self.traces}
         for part in PARTS:
@@ -325,14 +454,17 @@ def ensemble_scores(outputs, batch, sm, am):
     return rows
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate(model, loader, device, normalization, *, route, seed, held_out=False, samples=8, output_dir=None,
              export_all=False, heartbeat=None, reference_mask_seed=None, route_callable=None,
-             non_blocking=False, precision="FP32", compile_info=None):
+             non_blocking=False, precision="FP32", compile_info=None,
+             detail_level="diagnostic", encoding_cache=None):
+    if detail_level not in {"summary", "diagnostic"}:
+        raise ValueError(f"unknown evaluation detail level: {detail_level}")
     was_training = model.training
     with isolated_rng():
         model.eval()
-        diagnostics = Diagnostics(normalization)
+        diagnostics = Diagnostics(normalization, summary_only=detail_level == "summary")
         ensemble = []
         overlap_flags = []
         compile_cold_start = True
@@ -414,7 +546,11 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
                                 if str(precision).upper() == "BF16" and device.type == "cuda"
                                 else nullcontext())
                     with autocast:
-                        outputs.append(route_output(model, batch, sm, am, route, epsilon))
+                        cache = None
+                        if encoding_cache is not None and not (compile_info and compile_info.get("succeeded")):
+                            cache_key = (ordinal, int(seed), bool(held_out))
+                            cache = encoding_cache.setdefault(cache_key, {})
+                        outputs.append(cached_route_output(model, batch, sm, am, route, epsilon, cache))
                 evaluated_fixtures += len(cpu["physical_state"])
                 diagnostics.add(batch, outputs[0], sm, am, names, export_dir=(output_dir / "all_predictions") if export_all and output_dir else None)
                 if route != "A":
@@ -481,7 +617,7 @@ def evaluate(model, loader, device, normalization, *, route, seed, held_out=Fals
             summary["coordinate_groups"][label] = {"fixture_count": len(selected),
                 "masked": {d: merge_moments(r[d]["masked"] for r in selected) for d in ("state", "action")},
                 "energy_score": float(np.mean(energy)) if energy else None}
-    if output_dir:
+    if output_dir and detail_level == "diagnostic":
         atomic_write_json(output_dir / "diagnostics.json", details)
         atomic_write_json(output_dir / "summary.json", summary)
         render_traces(output_dir, details)

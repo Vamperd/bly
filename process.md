@@ -608,3 +608,10 @@ checkpoint/推理 artifact 完整，不能证明 192-step Action 或物理 repla
 的结构化 32-step Action gap。方法 B 不在当前默认随机 Mask 分布内，必须单独报告 warm-up、visible
 index、mask hash 和 OOD 状态。任何物理质量结论还必须先通过同一初始状态和 seed 的 deterministic
 baseline。
+
+2026-10-16 C 阶段评估提速已在 Windows 实现。`eval_micro_batch` 与训练 batch 分离，默认训练 32、
+评估 128；summary evaluation 每 5,000 步仍遍历全量 fixture，保留相同 routes、samples、Mask 和
+seed，只跳过大体积 diagnostics/trace/plot 写盘。每 50,000 步和最终步执行 full diagnostic evaluation，
+并在该 profile 中更新正式 best checkpoint。FP32 eager route 已加入 posterior/condition encoder 复用，
+checkpoint alias 使用一次序列化 payload；cached/pinned runtime 仅作为后续独立 smoke，当前没有
+Ubuntu throughput 或质量 parity 证据。
