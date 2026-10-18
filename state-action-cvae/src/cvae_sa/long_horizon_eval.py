@@ -281,6 +281,11 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
 
 def render_action_video(run: Path, output_name: str = "comparison_grid.mp4", output_dir: Path | None = None) -> Path:
     """Render an offline Action/error comparison video when matplotlib is available."""
+    import matplotlib
+    # Ubuntu replay/render runs are normally headless.  Force a non-GUI
+    # backend before importing pyplot so TkAgg cannot create a zero-sized
+    # toolbar image while rendering the MP4.
+    matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
     from matplotlib.animation import FFMpegWriter
 
