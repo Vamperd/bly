@@ -517,3 +517,8 @@ Action 和记录的未来期望 State 预测下一段 32 步，并在每个 bloc
 `tail32_context_next32` 保留为 recorded-context/OOD 诊断，不能当作递归闭环 B 或物理外推质量
 证据。递归路径必须分别记录每个 segment 的 raw Action、exact initialization、执行 State、
 mask identity 和 baseline replay。
+
+多动作诊断新增 `cvae_sa.long_horizon_ab_compare`。它在同一 192-step source window 内比较 A
+与递归 B，分别以 recorded source 和 Origin Action replay 为参考，按 transition 输出综合连续
+State RMSE、canonical Action RMSE、contact disagreement，并记录最大误差关节/State feature。
+KL2 与 KL4 必须各自成组，不在同一曲线中比较 checkpoint。

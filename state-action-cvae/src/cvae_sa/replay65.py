@@ -1368,12 +1368,15 @@ def compare(args):
     if output.exists() and any(output.iterdir()):
         raise FileExistsError("compare requires a new empty output run")
     reference, routes, source_window = None, [], None
-    for run_path, label, color in zip(args.runs, args.labels, COMPARE_COLORS):
+    masks = list(args.masks) if getattr(args, "masks", None) else [args.mask] * len(args.runs)
+    if len(masks) != len(args.runs):
+        raise ValueError("--masks must match --runs")
+    for run_path, label, color, mask in zip(args.runs, args.labels, COMPARE_COLORS, masks):
         run = run_path.resolve()
         verify_prepared(run)
         window = run / load_json(run / "manifests/replay65.json")["windows"][0]
         meta = load_json(window / "manifests/replay65.json")
-        entry = compare_entry(meta, args.mask)
+        entry = compare_entry(meta, mask)
         child = window / "simulations" / entry["mask"]
         if not (child / "manifests/replay65_worker_complete.json").is_file():
             raise FileNotFoundError(f"route {label} has not simulated {entry['mask']}; run replay65 simulate --run {run}")
@@ -1401,7 +1404,7 @@ def compare(args):
     meta = load_json(source_window / "manifests/replay65.json")
     start = int(meta.get("window_start", meta["window"]["window_start"]))
     source_full = _load_replay(source_window / "data/source.replay.npz")
-    manifest = {"version": VERSION, "mask": args.mask, "window": meta["window"], "source_mode": meta.get("source_mode", "dataset"),
+    manifest = {"version": VERSION, "mask": args.mask, "masks": masks, "window": meta["window"], "source_mode": meta.get("source_mode", "dataset"),
         "single_window_continuation": bool(meta.get("single_window_continuation", False)),
         "continuation_input_contract": meta.get("continuation_input_contract"),
         "horizon_steps": reference["horizon_steps"], "score_offset": reference["score_offset"], "window_start": start,
@@ -1497,6 +1500,8 @@ def main(argv=None):
     m.add_argument("--runs",type=Path,nargs="+",required=True)
     m.add_argument("--labels",nargs="+",help="default: A B C (one per run)")
     m.add_argument("--mask",choices=PHYSICAL_MASK_NAMES,default="full_action",help="B/C mask; A uses its single replay")
+    m.add_argument("--masks",nargs="+",choices=tuple(PHYSICAL_MASK_NAMES) + ("recursive_state_feedback_b",),
+                   help="optional per-run mask labels; overrides --mask and must match --runs")
     m.add_argument("--layout",choices=("ghost","grid","both"),default="both")
     m.add_argument("--output-run",type=Path,required=True)
     m.add_argument("--model",type=Path)
@@ -1511,6 +1516,8 @@ def main(argv=None):
         args.labels = args.labels or ["A", "B", "C", "D"][:len(args.runs)]
         if len(args.labels) != len(args.runs):
             parser.error("--labels must match --runs")
+        if args.masks is not None and len(args.masks) != len(args.runs):
+            parser.error("--masks must match --runs")
         if not args.skip_render and args.model is None:
             parser.error("compare requires --model unless --skip-render")
     if sys.platform == "linux":

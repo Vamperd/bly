@@ -1156,3 +1156,9 @@ canonical Action 和记录的下一段 32 个期望 State 递归预测并执行�
 `tail32_context_next32` 仍只是 recorded-context/OOD 诊断。Ubuntu 运行必须使用新输出 run，先
 验证已有 origin baseline，再执行递归模块的六个 32-step simulator segment，最后用
 `replay65 report` 和 `replay65 render` 生成 193 帧视频；execution 与 physical quality 继续分开。
+
+长时 A/B 多动作诊断使用 `cvae_sa.long_horizon_ab_compare`：每个动作只比较同一 checkpoint
+下的 A 与 `recursive_state_feedback_b`，不把 KL2 与 KL4 混成一条质量曲线。输出 compact JSON/SVG，
+分别给出相对 recorded source 与 Origin Action replay 的综合 State RMSE、canonical Action RMSE、
+contact disagreement 及最大误差关节；三动作批量 run 完成后可删除 segments、checkpoints、
+replay_motion 和 worker logs，并同步更新 prepared hash。

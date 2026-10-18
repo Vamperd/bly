@@ -717,3 +717,10 @@ SVG 和大 diagnostics 文件，也不更新 best checkpoint；full evaluation �
 `tail32_context_next32` 只保留为 recorded-context/OOD 诊断，不代表闭环外推。该入口会为每个
 32-step segment 写 exact initialization、raw Action、replay 和链式 State，并生成可由
 `replay65 report/render` 消费的 193 帧回放 run；Ubuntu Isaac 执行和物理质量仍待实际门禁。
+
+新增 `cvae_sa.long_horizon_ab_compare` 用于多动作诊断。每个随机选择的 192-step group 单独比较
+同一 checkpoint 的 A 与递归 B，不绘制 KL2/KL4 之间的横向质量曲线；四类逐 transition 曲线分别
+对应 State/Action 相对 recorded source 与相对 Origin Action replay。State 报告 70 维综合 RMSE、
+连续 68 维 RMSE 和 contact disagreement，Action 使用 canonical 29 维 RMSE，并报告最大误差
+joint。三动作批量输出只保留 A/B replay、compare grid 视频、compact JSON/SVG 和报告，清理
+segments、checkpoint、replay_motion 与 worker logs 后更新 prepared hash。

@@ -614,6 +614,12 @@ Action，只执行前 32 个；再用实际执行 State、上一段生成 Action
 32 个 Action，循环至 192 步。旧 `tail32_context_next32` 只表示 recorded-context 诊断，不得用
 作递归 simulator feedback 结果。
 
+多动作 A/B 诊断必须按 checkpoint 分组执行：同一组内只比较同一 checkpoint 的 A 与
+`recursive_state_feedback_b`，三个随机 group 分别保留 source、Origin replay、A/B replay 的必要
+轨迹和 compact 指标。`long_horizon_ab_compare` 的 State 综合误差覆盖 70 维并另报连续 State 与
+contact，Action 使用 canonical 29 维；每条曲线同时给出 source reference 和 Origin replay reference，
+最大 State/Action 误差必须映射回具体关节。KL2 与 KL4 不合并到同一质量结论。
+
 2026-10-16 C 阶段评估提速已在 Windows 实现。`eval_micro_batch` 与训练 batch 分离，默认训练 32、
 评估 128；summary evaluation 每 5,000 步仍遍历全量 fixture，保留相同 routes、samples、Mask 和
 seed，只跳过大体积 diagnostics/trace/plot 写盘。每 50,000 步和最终步执行 full diagnostic evaluation，
