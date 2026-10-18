@@ -1142,9 +1142,16 @@ def render(args):
     verify_prepared(args.run.resolve(),code=not getattr(args, "allow_render_code_change", False))
     report(args)
     run=args.run.resolve()
-    launch([sys.executable,str(KIT/"render_replay65.py"),"--run",str(run),"--model",str(args.model.resolve()),"--gl",args.gl],run/"logs/render.log")
-    report(args)
-    progress(run,"render_complete")
+    command = [sys.executable, str(KIT / "render_replay65.py"), "--run", str(run),
+               "--model", str(args.model.resolve()), "--gl", args.gl]
+    if getattr(args, "origin_only", False):
+        command.append("--origin-only")
+    launch(command, run / "logs/render.log")
+    if getattr(args, "origin_only", False):
+        progress(run, "origin_render_complete")
+    else:
+        report(args)
+        progress(run,"render_complete")
 
 
 def mapping_error(path, init, steps):
@@ -1482,6 +1489,7 @@ def main(argv=None):
     b.add_argument("--label", default="method_b_tail32_context_next32")
     s=sub.add_parser("simulate"); s.add_argument("--run",type=Path,required=True); s.add_argument("--baseline-only",action="store_true")
     r=sub.add_parser("render"); r.add_argument("--run",type=Path,required=True); r.add_argument("--model",type=Path,required=True); r.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
+    r.add_argument("--origin-only",action="store_true",help="render only Source vs Origin Action repeatability")
     r.add_argument("--allow-render-code-change",action="store_true",
                    help="read-only renderer refresh after a renderer overlay change; preparation inputs remain sealed")
     r=sub.add_parser("report"); r.add_argument("--run",type=Path,required=True); r.add_argument("--export",action="store_true"); r.add_argument("--output",type=Path)

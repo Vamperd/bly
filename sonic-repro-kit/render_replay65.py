@@ -38,13 +38,15 @@ def draw_timeline(cv2, frame, hidden, t, y=457):
     cv2.line(frame, (x, y - 4), (x, y + 18), (255, 255, 255), 2)
 
 
-def video_jobs(window, meta):
+def video_jobs(window, meta, origin_only=False):
     truth = window/"data/source.trajectory.pkl"
     jobs=[]
     baseline=window/"simulations/baseline/data/replay"
     if (baseline/"000001.trajectory.pkl").exists():
         jobs.append(("original_repeatability",[truth,baseline/"000000.trajectory.pkl",baseline/"000001.trajectory.pkl"],
                      ["Source","Original Action repeat 1","Original Action repeat 2"],None))
+    if origin_only:
+        return jobs
     for entry in meta["entries"]:
         if not entry["representative"]:
             continue
@@ -62,6 +64,8 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run",type=Path,required=True); p.add_argument("--model",type=Path,required=True)
     p.add_argument("--gl",default="egl",choices=("egl","osmesa","glfw"))
+    p.add_argument("--origin-only",action="store_true",
+                   help="render only the Source vs Origin Action repeatability video")
     args=p.parse_args(argv)
     os.environ["MUJOCO_GL"]=args.gl
     import cv2
@@ -93,7 +97,7 @@ def main(argv=None):
         try:
             horizon=int(meta.get("horizon_steps",64)); offset=int(meta.get("score_offset",0)); frames_total=horizon+1
             provenance=frame_provenance(meta,horizon)
-            for name,paths,labels,prediction in video_jobs(window,meta):
+            for name,paths,labels,prediction in video_jobs(window,meta,args.origin_only):
                 trajectories=[load_trajectory(path) for path in paths]
                 qposes=[scored_frames(build_mujoco_qpos(t),horizon,offset) for t in trajectories]
                 if any(q.shape!=(frames_total,36) or not np.isfinite(q).all() for q in qposes) or any(not np.isclose(t["fps"],50) for t in trajectories):
