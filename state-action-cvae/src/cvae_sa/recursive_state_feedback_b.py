@@ -156,7 +156,7 @@ class RecursiveStateFeedbackB:
         state_mask = torch.zeros((1, 65, 70), dtype=torch.bool)
         action_mask = torch.zeros((1, 64, 29), dtype=torch.bool)
         action_mask[:, BLOCK:] = True
-        _, action, _, _, _, _ = self.evaluator._predict(
+        _, action = self.evaluator._predict(
             sample, state_mask, action_mask, seed=self.seed,
             sample_index=target_start // BLOCK
         )
