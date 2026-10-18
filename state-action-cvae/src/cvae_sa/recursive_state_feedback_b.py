@@ -168,6 +168,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     output = args.output_run.expanduser().resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"output run must be new and empty: {output}")
+    for folder in ("data", "manifests", "markers", "plots", "videos", "logs"):
+        (output / folder).mkdir(parents=True, exist_ok=True)
     engine = RecursiveStateFeedbackB(
         args.dataset_run, args.checkpoint, args.template_run,
         args.group_id, args.seed, args.device,
