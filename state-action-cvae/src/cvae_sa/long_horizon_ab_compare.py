@@ -182,9 +182,10 @@ def _action_metrics(candidate: np.ndarray, reference: np.ndarray, joint_names: l
 
 def _svg_curve(path: Path, series: dict[str, dict[str, list[float]]], title: str,
                annotations: dict[str, list[str]]) -> None:
-    width, height = 1400, 900
-    left, right, top, bottom = 90, 390, 55, 55
+    width, height = 1600, 1050
+    left, right, top, bottom = 230, 430, 70, 70
     panel_height = (height - top - bottom) / 4
+    plot_width = width - left - right
     panels = (
         ("state_source", "State RMSE vs source"),
         ("action_source", "Action RMSE vs source"),
@@ -197,29 +198,37 @@ def _svg_curve(path: Path, series: dict[str, dict[str, list[float]]], title: str
         f'<text x="{width // 2}" y="28" text-anchor="middle" font-family="sans-serif" font-size="20">{html.escape(title)}</text>',
     ]
     for index, (key, label) in enumerate(panels):
-        y0 = top + index * panel_height
-        y1 = y0 + panel_height - 25
-        peak = max(1.0e-12, max(max(values[key]) for values in series.values()) * 1.1)
-        panel_frames = max(len(values[key]) for values in series.values())
-        parts.append(f'<rect x="{left}" y="{y0:.1f}" width="{width-left-right}" height="{y1-y0:.1f}" fill="none" stroke="#999"/>')
-        parts.append(f'<text x="{left-10}" y="{(y0+y1)/2:.1f}" text-anchor="end" font-family="sans-serif" font-size="13">{html.escape(label)}</text>')
-        parts.append(f'<text x="{left-10}" y="{y0+12:.1f}" text-anchor="end" font-family="sans-serif" font-size="10">{peak:.3g}</text>')
-        for name, values in series.items():
+        y0 = top + index * panel_height + 8
+        y1 = top + (index + 1) * panel_height - 30
+        peak = max(1.0e-12, max(max(data[key]) for data in series.values()) * 1.1)
+        panel_frames = max(len(data[key]) for data in series.values())
+        parts.append(f'<rect x="{left}" y="{y0:.1f}" width="{plot_width}" height="{y1-y0:.1f}" fill="none" stroke="#999"/>')
+        parts.append(f'<text x="{left+12}" y="{y0+21:.1f}" font-family="sans-serif" font-size="15" font-weight="bold">{html.escape(label)}</text>')
+        parts.append(f'<text x="{left-14}" y="{y0+13:.1f}" text-anchor="end" font-family="sans-serif" font-size="11">{peak:.3g}</text>')
+        parts.append(f'<text x="{left-14}" y="{y1+4:.1f}" text-anchor="end" font-family="sans-serif" font-size="11">0</text>')
+        for boundary in (32, 64, 96, 128, 160):
+            if boundary < panel_frames:
+                x = left + boundary * plot_width / max(panel_frames - 1, 1)
+                parts.append(f'<line x1="{x:.1f}" y1="{y0:.1f}" x2="{x:.1f}" y2="{y1:.1f}" stroke="#b8b8b8" stroke-dasharray="5 5"/>')
+                parts.append(f'<text x="{x+3:.1f}" y="{y0+36:.1f}" font-family="sans-serif" font-size="10" fill="#666">{boundary}</text>')
+        for name, data in series.items():
             color = COLORS[name]
             points = " ".join(
-                f"{left + frame*(width-left-right)/max(panel_frames-1,1):.1f},{y1-value/peak*(y1-y0):.1f}"
-                for frame, value in enumerate(values[key])
+                f"{left + frame*plot_width/max(panel_frames-1,1):.1f},{y1-value/peak*(y1-y0):.1f}"
+                for frame, value in enumerate(data[key])
             )
             parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{points}"/>')
-        parts.append(f'<text x="{width//2}" y="{y1+18:.1f}" text-anchor="middle" font-family="sans-serif" font-size="11">transition (50 Hz)</text>')
+        parts.append(f'<text x="{left + plot_width/2:.1f}" y="{y1+20:.1f}" text-anchor="middle" font-family="sans-serif" font-size="11">transition (50 Hz)</text>')
+    info_x = width - right + 20
+    parts.append(f'<text x="{info_x}" y="{top+5}" font-family="sans-serif" font-size="15" font-weight="bold">Legend / largest errors</text>')
     for index, (name, color) in enumerate(COLORS.items()):
-        y = top + index * 22
-        parts.append(f'<rect x="{width-right+15}" y="{y}" width="15" height="11" fill="{color}"/>')
-        parts.append(f'<text x="{width-right+38}" y="{y+10}" font-family="sans-serif" font-size="13">{html.escape(name)}</text>')
+        y = top + 35 + index * 125
+        parts.append(f'<rect x="{info_x}" y="{y}" width="16" height="12" fill="{color}"/>')
+        parts.append(f'<text x="{info_x+25}" y="{y+11}" font-family="sans-serif" font-size="14" font-weight="bold">{html.escape(name)}</text>')
         for line_index, line in enumerate(annotations.get(name, [])):
             parts.append(
-                f'<text x="{width-right+15}" y="{y+28+line_index*13}" '
-                f'font-family="sans-serif" font-size="10">{html.escape(line)}</text>'
+                f'<text x="{info_x}" y="{y+30+line_index*17}" '
+                f'font-family="sans-serif" font-size="11">{html.escape(line)}</text>'
             )
     parts.append("</svg>")
     atomic_write_text(path, "\n".join(parts) + "\n")
