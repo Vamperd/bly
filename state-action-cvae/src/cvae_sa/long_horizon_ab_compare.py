@@ -191,7 +191,6 @@ def _svg_curve(path: Path, series: dict[str, dict[str, list[float]]], title: str
         ("state_original", "State RMSE vs original replay"),
         ("action_original", "Action RMSE vs original replay"),
     )
-    frames = len(next(iter(series.values()))[panels[0][0]])
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
         '<rect width="100%" height="100%" fill="white"/>',
@@ -201,14 +200,15 @@ def _svg_curve(path: Path, series: dict[str, dict[str, list[float]]], title: str
         y0 = top + index * panel_height
         y1 = y0 + panel_height - 25
         peak = max(1.0e-12, max(max(values[key]) for values in series.values()) * 1.1)
+        panel_frames = max(len(values[key]) for values in series.values())
         parts.append(f'<rect x="{left}" y="{y0:.1f}" width="{width-left-right}" height="{y1-y0:.1f}" fill="none" stroke="#999"/>')
         parts.append(f'<text x="{left-10}" y="{(y0+y1)/2:.1f}" text-anchor="end" font-family="sans-serif" font-size="13">{html.escape(label)}</text>')
         parts.append(f'<text x="{left-10}" y="{y0+12:.1f}" text-anchor="end" font-family="sans-serif" font-size="10">{peak:.3g}</text>')
         for name, values in series.items():
             color = COLORS[name]
             points = " ".join(
-                f"{left + frame*(width-left-right)/max(frames-1,1):.1f},{y1-values[key][frame]/peak*(y1-y0):.1f}"
-                for frame in range(frames)
+                f"{left + frame*(width-left-right)/max(panel_frames-1,1):.1f},{y1-value/peak*(y1-y0):.1f}"
+                for frame, value in enumerate(values[key])
             )
             parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{points}"/>')
         parts.append(f'<text x="{width//2}" y="{y1+18:.1f}" text-anchor="middle" font-family="sans-serif" font-size="11">transition (50 Hz)</text>')
