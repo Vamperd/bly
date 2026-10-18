@@ -45,6 +45,7 @@ def _load_arrays(path: Path) -> dict[str, np.ndarray]:
 
 def _update_initialization(template: dict[str, np.ndarray], replay_path: Path,
                            init_path: Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    init_path.parent.mkdir(parents=True, exist_ok=True)
     values = {name: np.asarray(value).copy() for name, value in template.items()}
     replay = _load_replay(replay_path)
     raw = _load_arrays(replay_path)
