@@ -425,7 +425,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for path in output.rglob("*")
             if path.is_file()
             and path.name not in {"prepared_hashes.json", "progress.json"}
-            and "checkpoints" not in path.relative_to(output).parts
+            and not ({"checkpoints", "replay_motion"} & set(path.relative_to(output).parts))
         }
         atomic_write_json(output / "manifests/prepared_hashes.json", hashes)
         atomic_write_json(output / "manifests/recursive_state_feedback_b.json", {
