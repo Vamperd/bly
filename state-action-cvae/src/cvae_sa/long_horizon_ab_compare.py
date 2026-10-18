@@ -180,9 +180,10 @@ def _action_metrics(candidate: np.ndarray, reference: np.ndarray, joint_names: l
     return _domain_metrics(candidate - reference, joint_names)
 
 
-def _svg_curve(path: Path, series: dict[str, dict[str, list[float]]], title: str) -> None:
-    width, height = 1200, 900
-    left, right, top, bottom = 90, 220, 55, 55
+def _svg_curve(path: Path, series: dict[str, dict[str, list[float]]], title: str,
+               annotations: dict[str, list[str]]) -> None:
+    width, height = 1400, 900
+    left, right, top, bottom = 90, 390, 55, 55
     panel_height = (height - top - bottom) / 4
     panels = (
         ("state_source", "State RMSE vs source"),
@@ -215,6 +216,11 @@ def _svg_curve(path: Path, series: dict[str, dict[str, list[float]]], title: str
         y = top + index * 22
         parts.append(f'<rect x="{width-right+15}" y="{y}" width="15" height="11" fill="{color}"/>')
         parts.append(f'<text x="{width-right+38}" y="{y+10}" font-family="sans-serif" font-size="13">{html.escape(name)}</text>')
+        for line_index, line in enumerate(annotations.get(name, [])):
+            parts.append(
+                f'<text x="{width-right+15}" y="{y+28+line_index*13}" '
+                f'font-family="sans-serif" font-size="10">{html.escape(line)}</text>'
+            )
     parts.append("</svg>")
     atomic_write_text(path, "\n".join(parts) + "\n")
 
@@ -240,6 +246,7 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("A/B joint-name order mismatch")
     results: dict[str, Any] = {}
     curves: dict[str, dict[str, list[float]]] = {}
+    annotations: dict[str, list[str]] = {}
     for name, route in (("A", route_a), ("recursive_B", route_b)):
         candidate_state = route["model"]["physical_state"]
         candidate_action = route["model_action"]
@@ -260,6 +267,12 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
             "state_original": state_original["per_frame_rmse"],
             "action_original": action_original["per_frame_rmse"],
         }
+        annotations[name] = [
+            "source max State: " + state_source["worst_joint"]["joint_name"],
+            "source max Action: " + action_source["worst"]["feature_name"],
+            "Origin max State: " + state_original["worst_joint"]["joint_name"],
+            "Origin max Action: " + action_original["worst"]["feature_name"],
+        ]
     meta = {
         "version": VERSION,
         "horizon_steps": HORIZON,
@@ -279,7 +292,8 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
     }
     atomic_write_json(output / "manifests" / "ab_error_metrics.json", meta)
     _svg_curve(output / "plots" / "ab_error_curves.svg", curves,
-               f"A vs recursive B | {a_meta['window'].get('motion_key', 'motion')} | 192 transitions")
+               f"A vs recursive B | {a_meta['window'].get('motion_key', 'motion')} | 192 transitions",
+               annotations)
     for name, result in results.items():
         print(
             f"{name}: state_rmse_source={result['state_vs_source']['overall']['rmse']:.6g} "
