@@ -9,8 +9,8 @@ from pathlib import Path
 
 import numpy as np
 from render_mujoco_trajectory import (G1_ISAACLAB_JOINT_NAMES, build_mujoco_qpos,
-    load_trajectory, prepare_runtime_xml, write_json_atomic)
-from render_h50a_exact_action_replays import _validate_joint_order, _writer
+    load_trajectory, prepare_runtime_xml, validate_model_profile, write_json_atomic)
+from render_h50a_exact_action_replays import _writer
 from render_replay65 import scored_frames
 from replay65_render_utils import FRAME_PROVENANCE_VERSION, draw_provenance_timeline, frame_provenance
 
@@ -54,7 +54,7 @@ def error_text(route, t):
     return "  ".join(f"{name}={route['per_frame'][key][t]:.3f}{unit}" for key, name, unit in ERROR_KEYS)
 
 
-def load_inputs(manifest):
+def load_inputs(manifest, *, model, robot_profile):
     horizon, offset = int(manifest["horizon_steps"]), int(manifest["score_offset"])
     source_path = Path(manifest["source_trajectory"])
     with np.load(source_path.with_name("source.replay.npz"), allow_pickle=False) as archive:
@@ -69,8 +69,8 @@ def load_inputs(manifest):
         trajectory = load_trajectory(path)
         if not np.isclose(trajectory["fps"], 50):
             raise ValueError(f"expected 50 Hz trajectory: {path}")
-        qpos = scored_frames(build_mujoco_qpos(trajectory), horizon, offset)
-        if qpos.shape != (horizon + 1, 36) or not np.isfinite(qpos).all():
+        qpos = scored_frames(build_mujoco_qpos(trajectory, profile=robot_profile, model=model), horizon, offset)
+        if qpos.shape != (horizon + 1, int(model.nq)) or not np.isfinite(qpos).all():
             raise ValueError(f"partial/non-finite trajectory cannot be compared: {path}")
         qposes.append(qpos)
     return qposes, {str(path): expected for path, expected in paths}
@@ -80,6 +80,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest", type=Path, required=True)
     p.add_argument("--model", type=Path, required=True)
+    p.add_argument("--robot-profile", choices=("g1", "g1_plus_locked29"), default="g1")
+    p.add_argument("--mesh-dir", type=Path)
     p.add_argument("--gl", default="egl", choices=("egl", "osmesa", "glfw"))
     p.add_argument("--layout", default="both", choices=("ghost", "grid", "both"))
     args = p.parse_args(argv)
@@ -99,12 +101,11 @@ def main(argv=None):
         provenance_meta.update(json.loads(window_meta_path.read_text(encoding="utf-8")))
     provenance = frame_provenance(provenance_meta, horizon)
     frames_total, start = horizon + 1, int(manifest["window_start"])
-    qposes, input_hashes = load_inputs(manifest)
     xml = output / "manifests/compare_render.xml"
-    xml_details = prepare_runtime_xml(args.model.resolve(), xml, *GHOST_SIZE)
-    model = mujoco.MjModel.from_xml_path(str(xml)); _validate_joint_order(model)
-    if model.nq != 36:
-        raise ValueError("expected G1 MuJoCo model nq=36")
+    xml_details = prepare_runtime_xml(args.model.resolve(), xml, *GHOST_SIZE, mesh_dir=args.mesh_dir)
+    model = mujoco.MjModel.from_xml_path(str(xml))
+    profile_details = validate_model_profile(model, args.robot_profile)
+    qposes, input_hashes = load_inputs(manifest, model=model, robot_profile=args.robot_profile)
     data = mujoco.MjData(model)
     camera = mujoco.MjvCamera(); mujoco.mjv_defaultCamera(camera)
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
@@ -194,7 +195,13 @@ def main(argv=None):
             raise RuntimeError(f"encoded frame count mismatch for {path}: {frames} != {frames_total}")
         videos.append({"path": str(path.relative_to(output)), "sha256": sha(path), "frames": frames, "seconds": seconds})
         print(f"Rendered {path} ({frames} frames)", flush=True)
-    write_json_atomic(output / "manifests/compare_render.json", {"version": "65-token-replay-compare-v1",
+    write_json_atomic(output / "manifests/compare_render.json", {"version": "65-token-replay-compare-v2",
+        "robot_profile": args.robot_profile,
+        "model_nq": int(model.nq), "model_nv": int(model.nv),
+        "model_joint_names": profile_details["model_joint_names"],
+        "fixed_joint_names": profile_details["fixed_joint_names"],
+        "model_to_policy_mapping": profile_details["model_to_policy_mapping"],
+        "policy_to_model_mapping": profile_details["policy_to_model_mapping"],
         "videos": videos, "input_hashes": input_hashes, "compare_manifest_sha256": sha(manifest_path),
         "frame_provenance_version": FRAME_PROVENANCE_VERSION, "frame_provenance": provenance,
         "xml": xml_details, "camera": "follows source root; same camera for every route",

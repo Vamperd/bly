@@ -9,11 +9,13 @@ import numpy as np
 
 from render_mujoco_trajectory import (
     G1_ISAACLAB_TO_MUJOCO_DOF,
+    G1_MUJOCO_JOINT_NAMES,
     RUNTIME_GROUND_GEOM_NAME,
     RUNTIME_GROUND_MATERIAL_NAME,
     RUNTIME_GROUND_TEXTURE_NAME,
     build_mujoco_qpos,
     prepare_runtime_xml,
+    validate_model_profile,
 )
 from verify_minimal import path_is_within
 
@@ -49,6 +51,55 @@ class BuildQposTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "norm differs"):
             build_mujoco_qpos(trajectory)
+
+    def test_locked29_profile_maps_by_model_joint_name(self) -> None:
+        class Joint:
+            def __init__(self, name):
+                self.name = name
+
+        class Model:
+            njnt = 30
+            nq = 36
+            nv = 35
+            jnt_qposadr = list(range(7, 36)) + [0]
+
+            def joint(self, index):
+                names = list(G1_MUJOCO_JOINT_NAMES) + ["floating_base_joint"]
+                return Joint(names[index])
+
+        trajectory = {
+            "dof_pos": np.arange(58, dtype=np.float32).reshape(2, 29),
+            "root_pos_w": np.zeros((2, 3), dtype=np.float32),
+            "root_quat_w": np.asarray([[1, 0, 0, 0], [1, 0, 0, 0]], dtype=np.float32),
+        }
+        model = Model()
+        details = validate_model_profile(model, "g1_plus_locked29")
+        qpos = build_mujoco_qpos(trajectory, profile="g1_plus_locked29", model=model)
+        self.assertEqual(details["profile"], "g1_plus_locked29")
+        self.assertEqual(details["model_to_policy_mapping"], G1_ISAACLAB_TO_MUJOCO_DOF.tolist())
+        self.assertEqual(qpos.shape, (2, 36))
+        np.testing.assert_array_equal(qpos[:, 7:], trajectory["dof_pos"][:, G1_ISAACLAB_TO_MUJOCO_DOF])
+
+    def test_locked29_profile_rejects_movable_neck(self) -> None:
+        class Joint:
+            def __init__(self, name):
+                self.name = name
+
+        class Model:
+            njnt = 32
+            nq = 38
+            nv = 37
+            jnt_qposadr = list(range(7, 38)) + [0]
+
+            def joint(self, index):
+                names = list(G1_MUJOCO_JOINT_NAMES[:15]) + [
+                    "neck_pitch_joint",
+                    "neck_yaw_joint",
+                ] + list(G1_MUJOCO_JOINT_NAMES[15:]) + ["floating_base_joint"]
+                return Joint(names[index])
+
+        with self.assertRaisesRegex(ValueError, "requires fixed joints"):
+            validate_model_profile(Model(), "g1_plus_locked29")
 
 
 class RuntimeXmlTests(unittest.TestCase):

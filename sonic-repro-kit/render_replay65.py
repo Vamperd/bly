@@ -9,8 +9,8 @@ from pathlib import Path
 
 import numpy as np
 from render_mujoco_trajectory import (G1_ISAACLAB_JOINT_NAMES, build_mujoco_qpos,
-    load_trajectory, prepare_runtime_xml, write_json_atomic)
-from render_h50a_exact_action_replays import _validate_joint_order, _writer
+    load_trajectory, prepare_runtime_xml, validate_model_profile, write_json_atomic)
+from render_h50a_exact_action_replays import _writer
 from replay65_render_utils import FRAME_PROVENANCE_VERSION, draw_provenance_timeline, frame_provenance
 
 
@@ -63,6 +63,8 @@ def video_jobs(window, meta, origin_only=False):
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--run",type=Path,required=True); p.add_argument("--model",type=Path,required=True)
+    p.add_argument("--robot-profile", choices=("g1", "g1_plus_locked29"), default="g1")
+    p.add_argument("--mesh-dir", type=Path)
     p.add_argument("--gl",default="egl",choices=("egl","osmesa","glfw"))
     p.add_argument("--origin-only",action="store_true",
                    help="render only the Source vs Origin Action repeatability video")
@@ -86,10 +88,9 @@ def main(argv=None):
             if tuple(archive["joint_names"].tolist())!=G1_ISAACLAB_JOINT_NAMES:
                 raise ValueError("recorded Isaac joint order does not match the renderer permutation")
         xml=window/"manifests/replay65_render.xml"
-        xml_details=prepare_runtime_xml(args.model.resolve(),xml,640,480)
-        model=mujoco.MjModel.from_xml_path(str(xml)); _validate_joint_order(model)
-        if model.nq!=36:
-            raise ValueError("expected G1 MuJoCo model nq=36")
+        xml_details=prepare_runtime_xml(args.model.resolve(),xml,640,480,mesh_dir=args.mesh_dir)
+        model=mujoco.MjModel.from_xml_path(str(xml))
+        profile_details = validate_model_profile(model, args.robot_profile)
         data=mujoco.MjData(model); renderer=mujoco.Renderer(model,height=480,width=640)
         camera=mujoco.MjvCamera(); mujoco.mjv_defaultCamera(camera)
         camera.type=mujoco.mjtCamera.mjCAMERA_FREE
@@ -99,8 +100,8 @@ def main(argv=None):
             provenance=frame_provenance(meta,horizon)
             for name,paths,labels,prediction in video_jobs(window,meta,args.origin_only):
                 trajectories=[load_trajectory(path) for path in paths]
-                qposes=[scored_frames(build_mujoco_qpos(t),horizon,offset) for t in trajectories]
-                if any(q.shape!=(frames_total,36) or not np.isfinite(q).all() for q in qposes) or any(not np.isclose(t["fps"],50) for t in trajectories):
+                qposes=[scored_frames(build_mujoco_qpos(t, profile=args.robot_profile, model=model),horizon,offset) for t in trajectories]
+                if any(q.shape!=(frames_total, int(model.nq)) or not np.isfinite(q).all() for q in qposes) or any(not np.isclose(t["fps"],50) for t in trajectories):
                     raise ValueError(f"video requires {frames_total} finite frames, 50Hz; partial replay cannot masquerade as complete")
                 hidden=np.zeros(frames_total,bool)
                 if prediction:
@@ -111,7 +112,7 @@ def main(argv=None):
                 input_hashes={str(path.relative_to(run)):sha(path) for path in paths}
                 old=previous.get(relative_output)
                 if output.exists():
-                    if old and old["sha256"]==sha(output) and old["input_hashes"]==input_hashes and old["baseline_banner"]==report["banner"]:
+                    if old and old.get("robot_profile") == args.robot_profile and old["sha256"]==sha(output) and old["input_hashes"]==input_hashes and old["baseline_banner"]==report["banner"]:
                         outputs.append(old)
                         continue
                     raise FileExistsError(f"unverified/changed video is not overwritten: {output}")
@@ -148,12 +149,23 @@ def main(argv=None):
                 if frames!=frames_total or output.stat().st_size<=0:
                     raise RuntimeError("encoded frame count mismatch")
                 outputs.append({"path":str(output.relative_to(run)),"sha256":sha(output),"frames":frames,"seconds":seconds,
+                    "robot_profile": args.robot_profile,
+                    "model_nq": int(model.nq), "model_nv": int(model.nv),
+                    "model_joint_names": profile_details["model_joint_names"],
+                    "fixed_joint_names": profile_details["fixed_joint_names"],
+                    "model_to_policy_mapping": profile_details["model_to_policy_mapping"],
+                    "policy_to_model_mapping": profile_details["policy_to_model_mapping"],
                     "input_hashes":input_hashes,"baseline_banner":report["banner"],"xml":xml_details,
                     "frame_provenance":provenance})
-                write_json_atomic(render_manifest,{"version":"65-token-replay-render-v1","videos":list({v["path"]:v for v in [*previous.values(),*outputs]}.values()),"rendering":True,"quality_pass":None})
+                write_json_atomic(render_manifest,{"version":"65-token-replay-render-v2",
+                    "robot_profile": args.robot_profile,
+                    "model_nq": int(model.nq), "model_nv": int(model.nv),
+                    "videos":list({v["path"]:v for v in [*previous.values(),*outputs]}.values()),
+                    "rendering":True,"quality_pass":None})
         finally:
             renderer.close()
-    write_json_atomic(run/"manifests/replay65_render.json",{"version":"65-token-replay-render-v1","videos":outputs,
+    write_json_atomic(run/"manifests/replay65_render.json",{"version":"65-token-replay-render-v2","robot_profile": args.robot_profile,
+        "model_nq": int(model.nq), "model_nv": int(model.nv), "videos":outputs,
         "frame_provenance_version":FRAME_PROVENANCE_VERSION,
         "camera":"shared recorded root track; no predicted root correction","quality_pass":None})
     print(f"Rendered {len(outputs)} videos under {run}")

@@ -349,6 +349,48 @@ test -n "$RUN_DIR" && tail -n 150 "$RUN_DIR/logs/train_smoke.log" 2>/dev/null
 
 ## 七、MuJoCo 离线渲染
 
+### G1+ locked29 replay65 渲染
+
+G1+ 资产目录是 Ubuntu 运行端的独立 bundle，不进入 Git：
+
+```text
+~/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus/
+```
+
+在 Ubuntu 上先使用 Windows 同步过来的完整目录进行只读审计，并在新的 run 目录生成
+`g1_pl_locked29.urdf`。该运行时副本只把 `neck_pitch_joint` 和 `neck_yaw_joint` 转为
+fixed，不修改源 `g1_pl.urdf` 或 mesh 文件：
+
+```bash
+RUN_DIR=~/bly/runs/g1plus_asset_audit_$(date +%Y%m%d_%H%M%S)
+python sonic-repro-kit/prepare_g1_plus_locked29.py \
+  --asset-root ~/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus \
+  --run-root "$RUN_DIR"
+```
+
+然后在 Ubuntu 使用固定版本的 `urdf2mjcf` 将
+`$RUN_DIR/assets/g1_pl_locked29.urdf` 转换成同目录的
+`g1_pl_locked29.xml`。MuJoCo 加载前必须确认模型是 29 个 movable joints、`nq=36`、
+`nv=35`，并且所有 mesh 路径可解析。
+
+`replay65` renderer 支持显式 profile；默认 `g1` 行为不变，G1+ 使用
+`g1_plus_locked29`：
+
+```bash
+cd ~/bly/state-action-cvae
+source <existing-ubuntu-environment>/bin/activate
+MUJOCO_GL=egl python -m cvae_sa.replay65 render \
+  --run ~/bly/runs/<fresh_replay65_render_run> \
+  --model "$RUN_DIR/assets/g1_pl_locked29.xml" \
+  --mesh-dir ~/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus/meshes \
+  --robot-profile g1_plus_locked29 \
+  --gl egl
+```
+
+渲染输出必须写入新的 `~/bly/runs/<run_id>/`，不得覆盖旧 G1 视频。渲染 manifest 会记录
+profile、模型 joint order、`nq/nv`、固定 neck 关节和输入模型路径；该视频仍然只是
+replay65 的 kinematic rendering，不构成 G1+ 动力学或实机质量通过。
+
 Windows 修改推送后，Ubuntu 执行端先记录实际状态；如果外层工作树不适合
 fast-forward，同步前停止并回传状态，不要 reset 或手工改源码：
 

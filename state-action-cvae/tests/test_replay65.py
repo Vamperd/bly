@@ -403,12 +403,16 @@ class Replay65CaptureCompareTest(unittest.TestCase):
 
     def test_cli_parses_capture_and_compare(self):
         with patch.object(replay,"capture") as capture, patch.object(replay,"compare") as compare, \
+                patch.object(replay,"render") as render, \
                 patch.object(replay.sys,"platform","win32"):
             replay.main(["capture","--checkpoint","c.pt","--dataset-run","d","--output-run","o","--window-index","844"])
             replay.main(["compare","--runs","a","b","c","--output-run","o","--skip-render"])
+            replay.main(["render","--run","r","--model","m","--robot-profile","g1_plus_locked29",
+                         "--allow-render-code-change"])
         self.assertEqual(capture.call_args[0][0].horizon_steps,192)
         self.assertEqual(compare.call_args[0][0].labels,["A","B","C"])
         self.assertEqual(compare.call_args[0][0].layout,"both")
+        self.assertEqual(render.call_args[0][0].robot_profile,"g1_plus_locked29")
 
 
 if __name__=="__main__":

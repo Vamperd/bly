@@ -1144,6 +1144,9 @@ def render(args):
     run=args.run.resolve()
     command = [sys.executable, str(KIT / "render_replay65.py"), "--run", str(run),
                "--model", str(args.model.resolve()), "--gl", args.gl]
+    command.extend(["--robot-profile", getattr(args, "robot_profile", "g1")])
+    if getattr(args, "mesh_dir", None) is not None:
+        command.extend(["--mesh-dir", str(args.mesh_dir.resolve())])
     if getattr(args, "origin_only", False):
         command.append("--origin-only")
     launch(command, run / "logs/render.log")
@@ -1372,13 +1375,18 @@ def compare(args):
     output = args.output_run.resolve()
     if len(args.labels) != len(args.runs) or not 1 <= len(args.runs) <= len(COMPARE_COLORS):
         raise ValueError(f"--labels must match --runs (1-{len(COMPARE_COLORS)} runs)")
+    route_count = len(args.runs) + (1 if getattr(args, "include_origin", False) else 0)
+    if route_count > 3:
+        raise ValueError("Source plus routes must fit the 2x2 grid (at most three routes)")
     if output.exists() and any(output.iterdir()):
         raise FileExistsError("compare requires a new empty output run")
     reference, routes, source_window = None, [], None
     masks = list(args.masks) if getattr(args, "masks", None) else [args.mask] * len(args.runs)
     if len(masks) != len(args.runs):
         raise ValueError("--masks must match --runs")
-    for run_path, label, color, mask in zip(args.runs, args.labels, COMPARE_COLORS, masks):
+    color_offset = 1 if getattr(args, "include_origin", False) else 0
+    for run_index, (run_path, label, mask) in enumerate(zip(args.runs, args.labels, masks)):
+        color = COMPARE_COLORS[run_index + color_offset]
         run = run_path.resolve()
         verify_prepared(run)
         window = run / load_json(run / "manifests/replay65.json")["windows"][0]
@@ -1411,7 +1419,32 @@ def compare(args):
     meta = load_json(source_window / "manifests/replay65.json")
     start = int(meta.get("window_start", meta["window"]["window_start"]))
     source_full = _load_replay(source_window / "data/source.replay.npz")
+    if getattr(args, "include_origin", False):
+        baseline_child = source_window / "simulations" / "baseline"
+        verify_worker(baseline_child)
+        origin_path = baseline_child / "data" / "replay" / "000000.replay.npz"
+        origin = _trajectory_region(_load_replay(origin_path), reference["score_offset"],
+                                    reference["score_offset"] + reference["horizon_steps"])
+        source_region = _trajectory_region(source_full, reference["score_offset"],
+                                           reference["score_offset"] + reference["horizon_steps"])
+        origin_errors = _per_frame_errors(source_region, origin)
+        origin_metrics = _trajectory_metrics(source_region, origin)
+        routes.insert(0, {
+            "label": "Origin",
+            "route": "origin",
+            "mask": "origin",
+            "color": list(COMPARE_COLORS[0]),
+            "run": str(source_window.parent.parent),
+            "window": str(source_window),
+            "trajectory": str(baseline_child / "data" / "replay" / "000000.trajectory.pkl"),
+            "trajectory_sha256": file_sha256(baseline_child / "data" / "replay" / "000000.trajectory.pkl"),
+            "metrics": origin_metrics,
+            "quality_pass": passes(origin_metrics),
+            "fall_frame": first_fall_frame(origin),
+            "per_frame": {k: [float(v) for v in values] for k, values in origin_errors.items()},
+        })
     manifest = {"version": VERSION, "mask": args.mask, "masks": masks, "window": meta["window"], "source_mode": meta.get("source_mode", "dataset"),
+        "include_origin": bool(getattr(args, "include_origin", False)),
         "single_window_continuation": bool(meta.get("single_window_continuation", False)),
         "continuation_input_contract": meta.get("continuation_input_contract"),
         "horizon_steps": reference["horizon_steps"], "score_offset": reference["score_offset"], "window_start": start,
@@ -1431,7 +1464,10 @@ def compare(args):
     if args.skip_render:
         return manifest
     launch([sys.executable, str(KIT / "render_replay65_compare.py"), "--manifest", str(output / "manifests/compare.json"),
-            "--model", str(args.model.resolve()), "--gl", args.gl, "--layout", args.layout], output / "logs/render_compare.log")
+            "--model", str(args.model.resolve()), "--gl", args.gl, "--layout", args.layout,
+            "--robot-profile", getattr(args, "robot_profile", "g1"),
+            *(["--mesh-dir", str(args.mesh_dir.resolve())] if getattr(args, "mesh_dir", None) is not None else [])],
+           output / "logs/render_compare.log")
     return manifest
 
 
@@ -1489,6 +1525,8 @@ def main(argv=None):
     b.add_argument("--label", default="method_b_tail32_context_next32")
     s=sub.add_parser("simulate"); s.add_argument("--run",type=Path,required=True); s.add_argument("--baseline-only",action="store_true")
     r=sub.add_parser("render"); r.add_argument("--run",type=Path,required=True); r.add_argument("--model",type=Path,required=True); r.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
+    r.add_argument("--robot-profile", choices=("g1", "g1_plus_locked29"), default="g1")
+    r.add_argument("--mesh-dir", type=Path)
     r.add_argument("--origin-only",action="store_true",help="render only Source vs Origin Action repeatability")
     r.add_argument("--allow-render-code-change",action="store_true",
                    help="read-only renderer refresh after a renderer overlay change; preparation inputs remain sealed")
@@ -1511,9 +1549,13 @@ def main(argv=None):
     m.add_argument("--masks",nargs="+",choices=tuple(PHYSICAL_MASK_NAMES) + ("recursive_state_feedback_b",),
                    help="optional per-run mask labels; overrides --mask and must match --runs")
     m.add_argument("--layout",choices=("ghost","grid","both"),default="both")
+    m.add_argument("--include-origin",action="store_true",
+                   help="add the deterministic Origin Action replay as a comparison route")
     m.add_argument("--output-run",type=Path,required=True)
     m.add_argument("--model",type=Path)
     m.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
+    m.add_argument("--robot-profile", choices=("g1", "g1_plus_locked29"), default="g1")
+    m.add_argument("--mesh-dir", type=Path)
     m.add_argument("--skip-render",action="store_true")
     args=parser.parse_args(argv)
     if args.command == "prepare" and (args.sample_index < 0 or (args.window_index is not None and args.window_index < 0)):

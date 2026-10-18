@@ -7,8 +7,9 @@ import argparse
 import json
 import os
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -86,6 +87,126 @@ G1_MUJOCO_JOINT_NAMES = tuple(
 )
 
 
+@dataclass(frozen=True)
+class RenderRobotProfile:
+    """Name-based kinematic contract between a trajectory and a MuJoCo model."""
+
+    name: str
+    policy_joint_names: tuple[str, ...]
+    default_model_joint_names: tuple[str, ...]
+    expected_nq: int
+    expected_nv: int
+    fixed_joint_names: tuple[str, ...] = ()
+
+
+RENDER_ROBOT_PROFILES: Mapping[str, RenderRobotProfile] = {
+    "g1": RenderRobotProfile(
+        name="g1",
+        policy_joint_names=G1_ISAACLAB_JOINT_NAMES,
+        default_model_joint_names=G1_MUJOCO_JOINT_NAMES,
+        expected_nq=36,
+        expected_nv=35,
+    ),
+    "g1_plus_locked29": RenderRobotProfile(
+        name="g1_plus_locked29",
+        policy_joint_names=G1_ISAACLAB_JOINT_NAMES,
+        default_model_joint_names=G1_MUJOCO_JOINT_NAMES,
+        expected_nq=36,
+        expected_nv=35,
+        fixed_joint_names=("neck_pitch_joint", "neck_yaw_joint"),
+    ),
+}
+
+
+def get_render_profile(name: str) -> RenderRobotProfile:
+    try:
+        return RENDER_ROBOT_PROFILES[name]
+    except KeyError as error:
+        choices = ", ".join(sorted(RENDER_ROBOT_PROFILES))
+        raise ValueError(f"unknown robot profile {name!r}; choose one of: {choices}") from error
+
+
+def _is_free_joint(model: Any, index: int) -> bool:
+    joint_type = getattr(model, "jnt_type", None)
+    if joint_type is not None:
+        # MuJoCo's mjJNT_FREE enum value is 0.
+        return int(joint_type[index]) == 0
+    return str(model.joint(index).name) == "floating_base_joint"
+
+
+def _model_joint_names(model: Any) -> tuple[str, ...]:
+    return tuple(
+        str(model.joint(index).name)
+        for index in range(int(model.njnt))
+        if not _is_free_joint(model, index)
+    )
+
+
+def validate_model_profile(model: Any, profile: str | RenderRobotProfile) -> dict[str, Any]:
+    """Validate a loaded MuJoCo model against a name-based render profile."""
+    if isinstance(profile, str):
+        profile = get_render_profile(profile)
+    names = _model_joint_names(model)
+    if len(names) != len(set(names)):
+        raise ValueError(f"MuJoCo model contains duplicate movable joint names: {names}")
+    missing = [name for name in profile.policy_joint_names if name not in names]
+    if missing:
+        raise ValueError(f"MuJoCo model is missing checkpoint joints: {missing}")
+    unexpected_fixed = [name for name in profile.fixed_joint_names if name in names]
+    if unexpected_fixed:
+        raise ValueError(
+            f"robot profile {profile.name!r} requires fixed joints, but model exposes them as movable: "
+            f"{unexpected_fixed}"
+        )
+    if int(model.nq) != profile.expected_nq:
+        raise ValueError(
+            f"robot profile {profile.name!r} expects nq={profile.expected_nq}, found {model.nq}"
+        )
+    if int(model.nv) != profile.expected_nv:
+        raise ValueError(
+            f"robot profile {profile.name!r} expects nv={profile.expected_nv}, found {model.nv}"
+        )
+    free_joint_count = sum(_is_free_joint(model, index) for index in range(int(model.njnt)))
+    if free_joint_count != 1:
+        raise ValueError(f"robot profile {profile.name!r} requires exactly one free root joint, found {free_joint_count}")
+    return {
+        "profile": profile.name,
+        "model_nq": int(model.nq),
+        "model_nv": int(model.nv),
+        "model_joint_names": list(names),
+        "policy_joint_names": list(profile.policy_joint_names),
+        "fixed_joint_names": list(profile.fixed_joint_names),
+        # ``joint_mapping`` historically means model/MuJoCo order -> policy/
+        # Isaac order.  Keep that meaning and expose the inverse explicitly.
+        "mapping": [profile.policy_joint_names.index(name) for name in names],
+        "model_to_policy_mapping": [profile.policy_joint_names.index(name) for name in names],
+        "policy_to_model_mapping": [names.index(name) for name in profile.policy_joint_names],
+        "free_joint_count": free_joint_count,
+    }
+
+
+def _model_joint_qpos_addresses(model: Any, names: tuple[str, ...]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for index in range(int(model.njnt)):
+        name = str(model.joint(index).name)
+        if _is_free_joint(model, index):
+            continue
+        result[name] = int(model.jnt_qposadr[index])
+    if tuple(result) != names:
+        # The order is intentionally not used for mapping, but duplicate or
+        # missing addresses indicate a malformed model and must be explicit.
+        if set(result) != set(names):
+            raise ValueError("model joint qpos addresses do not match validated joint names")
+    return result
+
+
+def _root_qpos_address(model: Any) -> int:
+    for index in range(int(model.njnt)):
+        if _is_free_joint(model, index):
+            return int(model.jnt_qposadr[index])
+    raise ValueError("MuJoCo model does not contain a free root joint")
+
+
 def load_trajectory(path: Path) -> dict[str, Any]:
     """Load trusted, locally generated TrajectoryRecorderTerm output."""
     with path.open("rb") as stream:
@@ -95,8 +216,21 @@ def load_trajectory(path: Path) -> dict[str, Any]:
     return trajectory
 
 
-def build_mujoco_qpos(trajectory: dict[str, Any]) -> np.ndarray:
-    """Convert recorded Isaac Lab state into MuJoCo's 36-value qpos layout."""
+def build_mujoco_qpos(
+    trajectory: dict[str, Any],
+    *,
+    profile: str | RenderRobotProfile = "g1",
+    model: Any | None = None,
+) -> np.ndarray:
+    """Map a 29-D Isaac trajectory into the selected model's qpos layout.
+
+    The legacy G1 call remains ``build_mujoco_qpos(trajectory)``.  When a
+    MuJoCo model is supplied, qpos addresses are obtained from that model and
+    joint values are placed by name, so an inserted or removed fixed joint
+    cannot silently shift the checkpoint's arm joints.
+    """
+    if isinstance(profile, str):
+        profile = get_render_profile(profile)
     missing = [key for key in ("dof_pos", "root_pos_w", "root_quat_w") if key not in trajectory]
     if missing:
         raise ValueError(f"Trajectory is missing required fields: {', '.join(missing)}")
@@ -132,11 +266,39 @@ def build_mujoco_qpos(trajectory: dict[str, Any]) -> np.ndarray:
         raise ValueError(f"Root quaternion norm differs from 1 by as much as {worst:.6f}")
     root_quat = root_quat / quat_norm[:, None]
 
+    if len(profile.policy_joint_names) != 29:
+        raise ValueError(f"render profile must expose 29 policy joints, found {len(profile.policy_joint_names)}")
+    if tuple(profile.policy_joint_names) != G1_ISAACLAB_JOINT_NAMES:
+        raise ValueError("this replay65 trajectory adapter requires the canonical Isaac G1 policy order")
     if sorted(G1_ISAACLAB_TO_MUJOCO_DOF.tolist()) != list(range(29)):
         raise RuntimeError("G1 joint mapping is not a permutation of 0..28")
-    mujoco_joints = dof_pos[:, G1_ISAACLAB_TO_MUJOCO_DOF]
-    qpos = np.concatenate((root_pos, root_quat, mujoco_joints), axis=1)
-    if qpos.shape != (dof_pos.shape[0], 36):
+
+    policy_values = {
+        name: dof_pos[:, index]
+        for index, name in enumerate(profile.policy_joint_names)
+    }
+    if model is None:
+        model_names = profile.default_model_joint_names
+        model_nq = profile.expected_nq
+        addresses = {name: 7 + index for index, name in enumerate(model_names)}
+        root_address = 0
+    else:
+        validation = validate_model_profile(model, profile)
+        model_names = tuple(validation["model_joint_names"])
+        model_nq = int(model.nq)
+        addresses = _model_joint_qpos_addresses(model, model_names)
+        root_address = _root_qpos_address(model)
+
+    qpos = np.zeros((dof_pos.shape[0], model_nq), dtype=np.float64)
+    if root_address + 7 > model_nq:
+        raise ValueError(f"floating root qpos range exceeds model width: {root_address}+7 > {model_nq}")
+    qpos[:, root_address : root_address + 3] = root_pos
+    qpos[:, root_address + 3 : root_address + 7] = root_quat
+    for name, values in policy_values.items():
+        if name not in addresses:
+            raise ValueError(f"model has no qpos address for checkpoint joint {name!r}")
+        qpos[:, addresses[name]] = values
+    if qpos.shape != (dof_pos.shape[0], model_nq):
         raise RuntimeError(f"Internal qpos shape error: {qpos.shape}")
     return qpos
 
@@ -182,6 +344,7 @@ def prepare_runtime_xml(
     destination_path: Path,
     width: int,
     height: int,
+    mesh_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Create a run-local model with absolute meshes, a floor, and a sized framebuffer."""
     if width <= 0 or height <= 0:
@@ -195,7 +358,20 @@ def prepare_runtime_xml(
     if compiler is None:
         compiler = ET.Element("compiler")
         root.insert(0, compiler)
-    mesh_dir = (source_path.parent / "meshes").resolve(strict=True)
+    declared_mesh_dir = compiler.get("meshdir")
+    mesh_candidates = []
+    if mesh_dir is not None:
+        mesh_candidates.append(mesh_dir.expanduser().resolve())
+    if declared_mesh_dir:
+        declared = Path(declared_mesh_dir)
+        mesh_candidates.append(declared if declared.is_absolute() else source_path.parent / declared)
+    mesh_candidates.append(source_path.parent / "meshes")
+    mesh_dir = next((candidate.resolve() for candidate in mesh_candidates if candidate.is_dir()), None)
+    if mesh_dir is None:
+        raise FileNotFoundError(
+            f"could not resolve a mesh directory for {source_path}; checked "
+            f"{[str(candidate) for candidate in mesh_candidates]}"
+        )
     compiler.set("meshdir", str(mesh_dir))
 
     removed_meshes = _remove_matching_children(root, "mesh", "name", "terrain_mesh")
@@ -306,6 +482,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-distance", type=float, default=2.0)
     parser.add_argument("--camera-azimuth", type=float, default=120.0)
     parser.add_argument("--camera-elevation", type=float, default=-30.0)
+    parser.add_argument("--robot-profile", choices=tuple(sorted(RENDER_ROBOT_PROFILES)), default="g1")
+    parser.add_argument("--mesh-dir", type=Path)
     return parser.parse_args()
 
 
@@ -330,7 +508,6 @@ def main() -> int:
     import mujoco
 
     trajectory = load_trajectory(trajectory_path)
-    qpos_frames = build_mujoco_qpos(trajectory)
     fps = float(trajectory.get("fps", 0.0))
     if not np.isfinite(fps) or fps <= 0:
         raise ValueError(f"Trajectory FPS must be positive and finite, found {fps}")
@@ -342,23 +519,15 @@ def main() -> int:
         runtime_xml,
         width=args.width,
         height=args.height,
+        mesh_dir=args.mesh_dir,
     )
 
     model = mujoco.MjModel.from_xml_path(str(runtime_xml))
-    if model.nq != 36:
-        raise ValueError(f"Expected MuJoCo model nq=36, found {model.nq}")
+    profile_details = validate_model_profile(model, args.robot_profile)
+    qpos_frames = build_mujoco_qpos(trajectory, profile=args.robot_profile, model=model)
     if qpos_frames.shape[1] != model.nq:
         raise ValueError(f"Trajectory qpos width {qpos_frames.shape[1]} != model nq {model.nq}")
-    model_joint_names = tuple(
-        model.joint(index).name
-        for index in range(model.njnt)
-        if model.joint(index).name != "floating_base_joint"
-    )
-    if model_joint_names != G1_MUJOCO_JOINT_NAMES:
-        raise ValueError(
-            "MuJoCo model joint order does not match SONIC's canonical G1 order: "
-            f"{model_joint_names}"
-        )
+    model_joint_names = tuple(profile_details["model_joint_names"])
 
     pelvis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
     if pelvis_id < 0:
@@ -408,6 +577,7 @@ def main() -> int:
         "gl_backend": args.gl,
         "trajectory": str(trajectory_path),
         "source_model": str(model_path),
+        "robot_profile": args.robot_profile,
         "runtime_model": str(runtime_xml.resolve()),
         "output": str(output_path),
         "frames": int(qpos_frames.shape[0]),
@@ -429,7 +599,12 @@ def main() -> int:
         "quaternion_format": "wxyz",
         "isaaclab_joint_order": list(G1_ISAACLAB_JOINT_NAMES),
         "mujoco_joint_order": list(model_joint_names),
-        "joint_mapping": G1_ISAACLAB_TO_MUJOCO_DOF.tolist(),
+        "joint_mapping": profile_details["mapping"],
+        "model_to_policy_mapping": profile_details["model_to_policy_mapping"],
+        "policy_to_model_mapping": profile_details["policy_to_model_mapping"],
+        "fixed_joint_names": profile_details["fixed_joint_names"],
+        "model_nq": int(model.nq),
+        "model_nv": int(model.nv),
         "xml_patch": xml_details,
         "video_size_bytes": output_path.stat().st_size,
     }
