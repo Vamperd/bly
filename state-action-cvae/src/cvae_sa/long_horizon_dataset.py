@@ -18,6 +18,7 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
+from .dataset import WindowRef
 from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
 
 
@@ -282,10 +283,21 @@ class LongHorizonWindowDataset(Dataset[dict[str, Any]]):
         from .dataset import StateActionWindowDataset
         source_run = Path(self.manifest["source_dataset_run"])
         self.source = StateActionWindowDataset(source_run, split, 64, 64, max_episodes=None, random_crop=False)
+        # replay65 and a few read-only dataset utilities use the fixed-window
+        # reference contract to locate adjacent T64 chunks.  Keep the derived
+        # manifest as the public index while exposing references that point to
+        # the same source episode/start coordinates.
+        self.episodes = self.source.episodes
         self._episode_indices = {
             f"{row['source_run']}::{row['episode']}": index
             for index, row in enumerate(self.source.episodes)
         }
+        self.refs = []
+        for row in self.windows:
+            episode_index = self._episode_indices.get(str(row["episode_ref"]))
+            if episode_index is None:
+                raise ValueError(f"source episode is not available in split: {row['episode_ref']}")
+            self.refs.append(WindowRef(episode_index, int(row["window_start"])))
         self.group_count = len({row["segment_group_id"] for row in self.windows})
         self.long_horizon_manifest = str(self.dataset_run / "manifests" / "long_horizon_windows.jsonl")
 
