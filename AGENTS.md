@@ -1148,3 +1148,11 @@ per-fixture trace、SVG 和大体积 diagnostics 写盘，不参与 `best.pt` �
 原质量指标和 checkpoint 选择。FP32 eager 路径按 batch 复用 posterior/condition encoder，并将
 多个 checkpoint alias 使用一次序列化 payload 写出；cached/pinned runtime 另有独立配置，尚未有
 Ubuntu CUDA throughput 证据。
+
+2026-10-18 新增 `cvae_sa.recursive_state_feedback_b`。该入口先对完整 T64 State 做全 Action
+Mask 推理，执行前 32 个 Action；随后以真实 simulator State 反馈、上一段已执行的 32 个
+canonical Action 和记录的下一段 32 个期望 State 递归预测并执行，直到完成 192 transitions。
+第一个临时 64-step 预测的后 32 个 Action 会在真实反馈后被替换。旧的
+`tail32_context_next32` 仍只是 recorded-context/OOD 诊断。Ubuntu 运行必须使用新输出 run，先
+验证已有 origin baseline，再执行递归模块的六个 32-step simulator segment，最后用
+`replay65 report` 和 `replay65 render` 生成 193 帧视频；execution 与 physical quality 继续分开。

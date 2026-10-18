@@ -709,3 +709,11 @@ causal rollout 结果。
 SVG 和大 diagnostics 文件，也不更新 best checkpoint；full evaluation 才执行正式 checkpoint
 选择。FP32 eager 已加入 batch 内 posterior/condition encoder 复用与一次 payload 多 alias checkpoint
 写出；cached/pinned 配置已建立，但 Ubuntu CUDA 速度与显存尚未验证。
+
+2026-10-18 新增 `recursive_state_feedback_b`。它先对第一个 T64 窗口执行完整 Action Mask
+推理，暂存 64 个 Action 但只把前 32 个送入真实 simulator；取得实际执行 State 后，用边界前
+33 个实际 State、前 32 个已生成 Action 和后 32 个记录期望 State 重新预测下一段 32 个 Action，
+再执行该段并循环到 192 步。这样第一个临时预测的后 32 个 Action 会被真实反馈结果替换。旧的
+`tail32_context_next32` 只保留为 recorded-context/OOD 诊断，不代表闭环外推。该入口会为每个
+32-step segment 写 exact initialization、raw Action、replay 和链式 State，并生成可由
+`replay65 report/render` 消费的 193 帧回放 run；Ubuntu Isaac 执行和物理质量仍待实际门禁。

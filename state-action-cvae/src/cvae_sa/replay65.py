@@ -6,6 +6,7 @@ Isaac/MuJoCo are imported only by the separately launched Ubuntu workers.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timezone
 import html
 import json
@@ -645,6 +646,137 @@ def prepare(args):
         progress(run,"prepared",windows=paths)
     finally:
         dataset.close()
+
+
+def prepare_method_b(args):
+    """Prepare a physical replay from an offline tail32/context-next32 eval.
+
+    Method B predicts only masked target Action blocks.  The visible Action
+    context is copied from the recorded source before the combined raw Action
+    sequence is sent to the replay worker.  A prepared Method-A run is used as
+    the immutable source/baseline template so initialization and simulator
+    identity remain identical.
+    """
+    template = args.template_run.expanduser().resolve()
+    offline = args.offline_run.expanduser().resolve()
+    output = args.output_run.expanduser().resolve()
+    label = str(args.label)
+    if not label or "/" in label or "\\" in label or label in {"baseline", ".", ".."}:
+        raise ValueError("invalid Method B replay label")
+    verify_prepared(template, code=True)
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(f"output run must be new and empty: {output}")
+    offline_manifest = load_json(offline / "manifests" / "long_horizon_eval.json")
+    group_ids = offline_manifest.get("group_ids") or []
+    if len(group_ids) != 1:
+        raise ValueError("Method B replay requires exactly one offline evaluation group")
+    arrays = sorted((offline / "data").glob("*.npz"))
+    if len(arrays) != 1:
+        raise ValueError("Method B replay requires exactly one offline NPZ group output")
+    with np.load(arrays[0], allow_pickle=False) as values:
+        required = ("truth_action_raw", "action_b_raw", "truth_action_canonical",
+                    "action_b_achieved", "mask_b", "truth_state", "truth_action")
+        missing = [name for name in required if name not in values]
+        if missing:
+            raise ValueError("offline Method B output is missing: " + ", ".join(missing))
+        truth_raw = np.asarray(values["truth_action_raw"], dtype=np.float32)
+        predicted_raw = np.asarray(values["action_b_raw"], dtype=np.float32)
+        truth_canonical = np.asarray(values["truth_action_canonical"], dtype=np.float32)
+        predicted_canonical = np.asarray(values["action_b_achieved"], dtype=np.float32)
+        action_mask = np.asarray(values["mask_b"], dtype=bool)
+        truth_state = np.asarray(values["truth_state"], dtype=np.float32)
+        truth_action = np.asarray(values["truth_action"], dtype=np.float32)
+    if truth_raw.shape != (HORIZON, 29) or predicted_raw.shape != truth_raw.shape:
+        raise ValueError("Method B raw Action output must have shape [192,29]")
+    if action_mask.shape != truth_raw.shape:
+        raise ValueError("Method B Action mask shape mismatch")
+    if int(action_mask.sum()) == 0 or int(action_mask.sum()) >= int(action_mask.size):
+        raise ValueError("Method B mask must contain both visible and hidden Action elements")
+    executed_raw = np.where(action_mask, predicted_raw, truth_raw).astype(np.float32)
+    completed_canonical = np.where(action_mask, predicted_canonical, truth_canonical).astype(np.float32)
+
+    template_root = load_json(template / "manifests" / "replay65.json")
+    if len(template_root.get("windows", [])) != 1:
+        raise ValueError("Method B template must contain exactly one replay window")
+    relative = Path(template_root["windows"][0])
+    template_window = template / relative
+    template_meta = load_json(template_window / "manifests" / "replay65.json")
+    if int(template_meta.get("horizon_steps", CHUNK)) != HORIZON:
+        raise ValueError("Method B template must use a 192-transition horizon")
+    source = _load_replay(template_window / "data/source.replay.npz")
+    if not np.allclose(source["raw_action"], truth_raw, atol=1e-6, rtol=0):
+        raise ValueError("offline Method B group does not match template source Action")
+
+    for folder in ("data", "manifests", "markers", "plots", "videos", "logs"):
+        (output / folder).mkdir(parents=True, exist_ok=True)
+    (output / relative / "data" / label).mkdir(parents=True, exist_ok=True)
+    (output / relative / "simulations").mkdir(parents=True, exist_ok=True)
+    for name in ("source.replay.npz", "source.trajectory.pkl", "exact_initialization.npz"):
+        shutil.copy2(template_window / "data" / name, output / relative / "data" / name)
+    for name in ("source_schema.json", "exact_initialization.json"):
+        shutil.copy2(template_window / "manifests" / name, output / relative / "manifests" / name)
+    shutil.copytree(
+        template_window / "simulations" / "baseline",
+        output / relative / "simulations" / "baseline",
+    )
+    if (template / "data" / "normalization.npz").is_file():
+        shutil.copy2(template / "data" / "normalization.npz", output / "data" / "normalization.npz")
+    shutil.copy2(template / "manifests" / "provenance.json", output / "manifests" / "provenance.json")
+
+    prediction_dir = output / relative / "data" / label
+    _write_npz(
+        prediction_dir / "prediction.npz",
+        truth_state=truth_state,
+        truth_action=truth_canonical,
+        predicted_state=truth_state,
+        predicted_action=completed_canonical,
+        predicted_state_normalized=truth_state,
+        predicted_action_normalized=truth_action,
+        completed_state=truth_state,
+        completed_action=completed_canonical,
+        state_mask=np.zeros_like(truth_state, dtype=bool),
+        action_mask=action_mask,
+        executed_raw=executed_raw,
+        window_executed_raw=executed_raw,
+        achieved_action=completed_canonical,
+        valid_state=np.ones((HORIZON + 1, 70), dtype=bool),
+        valid_action=np.ones((HORIZON, 29), dtype=bool),
+    )
+    entry = {
+        "mask": label,
+        "fixture_id": digest([group_ids[0], label, offline_manifest.get("seed")]),
+        "offline": {"method": "tail32_context_next32", "offline_run": str(offline),
+                    "group_id": group_ids[0], "masked_action_elements": int(action_mask.sum())},
+        "physical_groups": {}, "chunks": [], "chunk_boundary_state_max_abs": [],
+        "state_top100": [], "action_top100": [], "representative": True,
+        "action_model_replay": True, "hidden_initial_state": False,
+        "simulation_initial_state": "recorded_truth_not_model_input",
+        "visualization": {"method": "tail32_context_next32"},
+    }
+    window_meta = deepcopy(template_meta)
+    window_meta["route"] = "C"
+    window_meta["action_mode"] = "tail32_context_next32"
+    window_meta["entries"] = [entry]
+    window_meta["method_b_offline_run"] = str(offline)
+    window_meta["method_b_group_id"] = group_ids[0]
+    atomic_write_json(output / relative / "manifests" / "replay65.json", window_meta)
+
+    root_meta = deepcopy(template_root)
+    root_meta["windows"] = [str(relative)]
+    root_meta["method"] = "tail32_context_next32"
+    root_meta["method_b_offline_run"] = str(offline)
+    root_meta["method_b_group_id"] = group_ids[0]
+    root_meta["quality_pass"] = None
+    atomic_write_json(output / "manifests" / "replay65.json", root_meta)
+    atomic_write_text(output / "markers" / "replay65_method_b_prepared.ok", "PASS\n")
+    hashes = {
+        str(path.relative_to(output)): file_sha256(path)
+        for path in output.rglob("*")
+        if path.is_file() and path.name not in {"progress.json", "prepared_hashes.json"}
+    }
+    atomic_write_json(output / "manifests" / "prepared_hashes.json", hashes)
+    progress(output, "prepared_method_b", windows=[str(relative)], group_id=group_ids[0], label=label)
+    print(json.dumps({"output_run": str(output), "group_id": group_ids[0], "label": label}, ensure_ascii=False))
 
 
 def vars_serializable(args):
@@ -1338,6 +1470,13 @@ def main(argv=None):
         ),
     )
     p.add_argument("--device")
+    b=sub.add_parser("prepare-method-b", help="prepare legacy recorded-context tail32/context-next32 replay (not recursive B)")
+    b.add_argument("--template-run", type=Path, required=True,
+                    help="prepared 192-step replay run with the same source/baseline")
+    b.add_argument("--offline-run", type=Path, required=True,
+                    help="single-group cvae_sa.long_horizon_eval output")
+    b.add_argument("--output-run", type=Path, required=True)
+    b.add_argument("--label", default="method_b_tail32_context_next32")
     s=sub.add_parser("simulate"); s.add_argument("--run",type=Path,required=True); s.add_argument("--baseline-only",action="store_true")
     r=sub.add_parser("render"); r.add_argument("--run",type=Path,required=True); r.add_argument("--model",type=Path,required=True); r.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
     r.add_argument("--allow-render-code-change",action="store_true",
@@ -1380,7 +1519,9 @@ def main(argv=None):
         if run_path == runs_root or not run_path.is_relative_to(runs_root):
             parser.error("Ubuntu replay outputs must be a child run under /home/helloworld/bly/runs")
     try:
-        if args.command == "simulate":
+        if args.command == "prepare-method-b":
+            prepare_method_b(args)
+        elif args.command == "simulate":
             verify_prepared(args.run.resolve(),code=True)
             with run_lock(args.run.resolve()):
                 simulate(args)

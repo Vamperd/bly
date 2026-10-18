@@ -509,3 +509,11 @@ per-fixture trace、SVG 和大体积 diagnostics 写盘，不参与 `best.pt` �
 原质量指标和 checkpoint 选择。FP32 eager 路径按 batch 复用 posterior/condition encoder，并将
 多个 checkpoint alias 使用一次序列化 payload 写出；cached/pinned runtime 另有独立配置，尚未有
 Ubuntu CUDA throughput 证据。
+### Recursive state-feedback B
+
+当前新增 `recursive_state_feedback_b` 作为独立长时诊断路径。它先用完整 T64 State 输入
+生成临时 64-step Action，只执行前 32 步；随后使用真实 simulator 执行 State、上一段已生成
+Action 和记录的未来期望 State 预测下一段 32 步，并在每个 block 后重新执行 simulator。旧的
+`tail32_context_next32` 保留为 recorded-context/OOD 诊断，不能当作递归闭环 B 或物理外推质量
+证据。递归路径必须分别记录每个 segment 的 raw Action、exact initialization、执行 State、
+mask identity 和 baseline replay。

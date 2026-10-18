@@ -609,6 +609,11 @@ checkpoint/推理 artifact 完整，不能证明 192-step Action 或物理 repla
 index、mask hash 和 OOD 状态。任何物理质量结论还必须先通过同一初始状态和 seed 的 deterministic
 baseline。
 
+用户确认的递归 B 另行命名为 `recursive_state_feedback_b`：先从完整 T64 State 生成临时 64 个
+Action，只执行前 32 个；再用实际执行 State、上一段生成 Action 和期望未来 State 预测下一段
+32 个 Action，循环至 192 步。旧 `tail32_context_next32` 只表示 recorded-context 诊断，不得用
+作递归 simulator feedback 结果。
+
 2026-10-16 C 阶段评估提速已在 Windows 实现。`eval_micro_batch` 与训练 batch 分离，默认训练 32、
 评估 128；summary evaluation 每 5,000 步仍遍历全量 fixture，保留相同 routes、samples、Mask 和
 seed，只跳过大体积 diagnostics/trace/plot 写盘。每 50,000 步和最终步执行 full diagnostic evaluation，
