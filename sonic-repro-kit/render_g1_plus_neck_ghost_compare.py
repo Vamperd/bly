@@ -25,7 +25,8 @@ PROFILE = "g1_plus_unlocked31"
 NECK_NAMES = ("neck_pitch_joint", "neck_yaw_joint")
 FPS = 50.0
 GHOST_ALPHA = 0.55
-ROUTE_COLOR = (40, 190, 255)
+STATIC_COLOR = (40, 190, 255)
+MOVING_COLOR = (255, 100, 180)
 
 
 def sha256(path: Path) -> str:
@@ -62,7 +63,7 @@ def build_qposes(model, trajectory_path: Path, frames: int, neck_values):
 
 def render_variant(
     *, imageio, cv2, count_frames_and_secs, mujoco, model,
-    source_qpos, route_qpos, name, output, camera_distance,
+    source_qpos, static_qpos, moving_qpos, output, camera_distance,
     camera_azimuth, camera_elevation,
 ):
     data = mujoco.MjData(model)
@@ -97,22 +98,43 @@ def render_variant(
             camera.lookat[0:2] = source_qpos[frame_index, 0:2]
             camera.lookat[2] = source_qpos[0, 2]
             base = draw(source_qpos[frame_index])
-            layer = draw(route_qpos[frame_index])
-            segmentation = draw(route_qpos[frame_index], segment=True)
-            mask = robot_mask(segmentation, geom_types, plane_type, geom_objtype)
-            frame = blend(base, layer, mask, ROUTE_COLOR)
+            static_layer = draw(static_qpos[frame_index])
+            static_segmentation = draw(static_qpos[frame_index], segment=True)
+            static_mask = robot_mask(
+                static_segmentation, geom_types, plane_type, geom_objtype
+            )
+            frame = blend(base, static_layer, static_mask, STATIC_COLOR)
+
+            moving_layer = draw(moving_qpos[frame_index])
+            moving_segmentation = draw(moving_qpos[frame_index], segment=True)
+            moving_mask = robot_mask(
+                moving_segmentation, geom_types, plane_type, geom_objtype
+            )
+            frame = blend(frame, moving_layer, moving_mask, MOVING_COLOR)
 
             cv2.rectangle(frame, (0, 0), (1280, 108), (25, 25, 25), -1)
             cv2.putText(
                 frame,
-                f"G1+ unlocked31 | Ghost | {name} | frame {frame_index}/{source_qpos.shape[0] - 1}",
+                f"G1+ unlocked31 | Ghost source/static/moving | frame {frame_index}/{source_qpos.shape[0] - 1}",
                 (10, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (245, 245, 245), 1,
             )
-            cv2.rectangle(frame, (10, 43), (29, 61), ROUTE_COLOR, -1)
+            cv2.rectangle(frame, (10, 43), (29, 61), (235, 235, 235), -1)
             cv2.putText(
                 frame,
-                "C replay route (cyan) over source (opaque)",
+                "source (opaque)",
                 (38, 59), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (235, 235, 235), 1,
+            )
+            cv2.rectangle(frame, (250, 43), (269, 61), STATIC_COLOR, -1)
+            cv2.putText(
+                frame,
+                "C replay + neck static",
+                (278, 59), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (235, 235, 235), 1,
+            )
+            cv2.rectangle(frame, (520, 43), (539, 61), MOVING_COLOR, -1)
+            cv2.putText(
+                frame,
+                "C replay + neck moving",
+                (548, 59), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (235, 235, 235), 1,
             )
             cv2.putText(
                 frame,
@@ -182,14 +204,12 @@ def render(args: argparse.Namespace) -> dict[str, object]:
 
     source_static = build_qposes(model, source_path, frames, neck_static)
     route_static = build_qposes(model, route_path, frames, neck_static)
-    source_moving = build_qposes(model, source_path, frames, neck_moving)
     route_moving = build_qposes(model, route_path, frames, neck_moving)
 
     np.savez_compressed(
         output / "data" / "ghost_qposes.npz",
         source_static=source_static,
         route_static=route_static,
-        source_moving=source_moving,
         route_moving=route_moving,
     )
 
@@ -197,19 +217,11 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         render_variant(
             imageio=imageio, cv2=cv2, count_frames_and_secs=count_frames_and_secs,
             mujoco=mujoco, model=model, source_qpos=source_static,
-            route_qpos=route_static, name="neck_static",
-            output=output / "videos" / "ghost_static.mp4",
+            static_qpos=route_static, moving_qpos=route_moving,
+            output=output / "videos" / "ghost_source_static_moving.mp4",
             camera_distance=args.camera_distance, camera_azimuth=args.camera_azimuth,
             camera_elevation=args.camera_elevation,
-        ),
-        render_variant(
-            imageio=imageio, cv2=cv2, count_frames_and_secs=count_frames_and_secs,
-            mujoco=mujoco, model=model, source_qpos=source_moving,
-            route_qpos=route_moving, name="neck_moving",
-            output=output / "videos" / "ghost_moving.mp4",
-            camera_distance=args.camera_distance, camera_azimuth=args.camera_azimuth,
-            camera_elevation=args.camera_elevation,
-        ),
+        )
     ]
 
     manifest = {
@@ -231,7 +243,13 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         "fps": FPS,
         "neck_amplitude_fraction": float(args.neck_amplitude_fraction),
         "ghost_alpha": GHOST_ALPHA,
-        "route_color": list(ROUTE_COLOR),
+        "source_variant": "source with neck static",
+        "static_variant": "C replay with neck static",
+        "moving_variant": "C replay with neck moving",
+        "route_colors": {
+            "static": list(STATIC_COLOR),
+            "moving": list(MOVING_COLOR),
+        },
         "same_camera": True,
         "kinematic_only": True,
         "quality_pass": None,
