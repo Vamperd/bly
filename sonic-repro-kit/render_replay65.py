@@ -99,7 +99,6 @@ def main(argv=None):
         camera.azimuth=135
         camera.elevation=-25
         camera.distance=3.5
-        lookat_z = float(qposes[0][0, 2])
         try:
             horizon=int(meta.get("horizon_steps",64)); offset=int(meta.get("score_offset",0)); frames_total=horizon+1
             provenance=frame_provenance(meta,horizon)
@@ -108,6 +107,9 @@ def main(argv=None):
                 qposes=[scored_frames(build_mujoco_qpos(t, profile=args.robot_profile, model=model),horizon,offset) for t in trajectories]
                 if any(q.shape!=(frames_total, int(model.nq)) or not np.isfinite(q).all() for q in qposes) or any(not np.isclose(t["fps"],50) for t in trajectories):
                     raise ValueError(f"video requires {frames_total} finite frames, 50Hz; partial replay cannot masquerade as complete")
+                # qposes is loaded per video job.  Capture the initial root
+                # height only after that job's trajectories are available.
+                lookat_z = float(qposes[0][0, 2])
                 hidden=np.zeros(frames_total,bool)
                 if prediction:
                     with np.load(prediction,allow_pickle=False) as values:
