@@ -313,6 +313,27 @@ def _remove_matching_children(root: ET.Element, tag: str, attribute: str, value:
     return removed
 
 
+def _remove_worldbody_plane_geoms(root: ET.Element) -> int:
+    """Remove source ground planes before adding the run-local visual ground.
+
+    Converted robot MJCF files may already contain a worldbody ``floor`` plane.
+    Keeping it coplanar with the renderer overlay produces depth-buffer
+    z-fighting, which appears as alternating black/checker ground frames.
+    Robot collision meshes are not affected because only plane geoms below the
+    worldbody are removed.
+    """
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        return 0
+    removed = 0
+    for parent in worldbody.iter():
+        for child in list(parent):
+            if child.tag == "geom" and child.get("type") == "plane":
+                parent.remove(child)
+                removed += 1
+    return removed
+
+
 RUNTIME_GROUND_TEXTURE_NAME = "sonic_floor_checker"
 RUNTIME_GROUND_MATERIAL_NAME = "sonic_floor_material"
 RUNTIME_GROUND_GEOM_NAME = "sonic_floor"
@@ -395,6 +416,7 @@ def prepare_runtime_xml(
         root, "material", "name", RUNTIME_GROUND_MATERIAL_NAME
     )
     replaced_ground = _remove_matching_children(root, "geom", "name", RUNTIME_GROUND_GEOM_NAME)
+    removed_worldbody_planes = _remove_worldbody_plane_geoms(root)
 
     asset = _find_or_create_top_level(root, "asset", before="worldbody")
     if ground_style == "checker":
@@ -475,6 +497,7 @@ def prepare_runtime_xml(
             "textures": replaced_texture,
             "materials": replaced_material,
             "ground_geoms": replaced_ground,
+            "worldbody_plane_geoms": removed_worldbody_planes,
         },
     }
 

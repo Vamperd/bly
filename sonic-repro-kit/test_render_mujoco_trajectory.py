@@ -113,6 +113,7 @@ class RuntimeXmlTests(unittest.TestCase):
   <compiler meshdir="meshes" />
   <asset><mesh name="terrain_mesh" file="missing.stl" /></asset>
   <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05" />
     <body name="terrain_body"><geom type="mesh" mesh="terrain_mesh" /></body>
   </worldbody>
 </mujoco>
@@ -129,6 +130,7 @@ class RuntimeXmlTests(unittest.TestCase):
             self.assertEqual(Path(compiler.get("meshdir", "")), (model_dir / "meshes").resolve())
             self.assertIsNone(runtime_root.find(".//mesh[@name='terrain_mesh']"))
             self.assertIsNone(runtime_root.find(".//body[@name='terrain_body']"))
+            self.assertIsNone(runtime_root.find("./worldbody/geom[@name='floor']"))
             visual_global = runtime_root.find("./visual/global")
             self.assertIsNotNone(visual_global)
             self.assertEqual(visual_global.get("offwidth"), "960")
@@ -145,6 +147,7 @@ class RuntimeXmlTests(unittest.TestCase):
             self.assertEqual(ground.get("pos"), "0 0 0")
             self.assertEqual(details["removed_terrain_meshes"], 1)
             self.assertEqual(details["removed_terrain_bodies"], 1)
+            self.assertEqual(details["replaced_runtime_elements"]["worldbody_plane_geoms"], 1)
             self.assertEqual(details["framebuffer"], {"width": 960, "height": 540})
             self.assertEqual(details["ground"]["style"], "checker")
 
