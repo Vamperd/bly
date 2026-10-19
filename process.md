@@ -620,6 +620,64 @@ Action，只执行前 32 个；再用实际执行 State、上一段生成 Action
 contact，Action 使用 canonical 29 维；每条曲线同时给出 source reference 和 Origin replay reference，
 最大 State/Action 误差必须映射回具体关节。KL2 与 KL4 不合并到同一质量结论。
 
+## 22. G1+ unlocked31 证据边界与清理清单（2026-10-20）
+
+### 已验证迁移
+
+G1+ 原始 bundle 在 Ubuntu 的只读位置为：
+
+```text
+/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus/
+```
+
+`g1_pl.urdf`、`meshes/`、`motor_info.md` 是后续重建所需的源资料，必须保留。最终 fixed6 模型为：
+
+```text
+/home/helloworld/bly/runs/g1plus_unlocked31_diag_20261019_160509_3309439/unlocked31_run/assets/g1_pl_unlocked31_mujoco_fixed6.xml
+```
+
+它通过 `nq=38`、`nv=37`、`njnt=32`、`nu=31`、profile mapping、neck hinge 和 actuator response
+检查。body drift smoke 失败是 free-floating/no-hold 测试设计边界；不能解释为 neck actuator 缺失。
+
+### 三动作 ghost
+
+三动作最终目录为：
+
+```text
+/home/helloworld/bly/runs/g1plus_unlocked31_action_01_source_static_moving_ghost_20261020_002708_157847/
+/home/helloworld/bly/runs/g1plus_unlocked31_action_02_source_static_moving_ghost_20261020_002708_157847/
+/home/helloworld/bly/runs/g1plus_unlocked31_action_03_source_static_moving_ghost_20261020_002708_157847/
+```
+
+每个目录的 `ghost_source_static_moving.mp4` 是 source、C recursive replay + neck static、C replay
++ neck moving 的同相机运动学 ghost，193 帧。其 manifest、model hash、source/replay hash 应与视频
+一起归档。`quality_pass` 保持 null，`kinematic_only` 为 true。
+
+### 可清理与不可清理
+
+不可清理：原始 G1+ bundle、`g1plus_asset_audit_20261019_024703`、
+`g1plus_unlocked31_diag_20261019_160509_3309439`、三动作 C 多动作 run 及三份最终 ghost 目录中的
+视频/manifest。它们分别承担源资产、转换 provenance、C replay 依赖和最终视频证据。
+
+候选清理（当前未删除）：
+
+```text
+g1plus_unlocked31_C_action03_neck_compare_20261020_001423_157847
+g1plus_unlocked31_action_dynamics_compare_20261020_000958_157847
+g1plus_unlocked31_action03_neck_compare_20261019_235044_157847
+g1plus_unlocked31_actuator_smoke_20261019_233013_157847
+g1plus_unlocked31_mjcf_diag_20261019_232720_157847
+g1plus_black192_zfight_fix_20261019_135444_3309439
+g1plus_replay65_prepare_20261019_124743_1247522
+```
+
+清理前应至少把小型 manifest/失败日志复制到归档位置，并确认最终视频已在用户需要的位置保存。
+`latent_distribution_kl2_kl4_recovered_20261019_190949_4046727` 属于 latent 诊断，不在 G1+ 清理范围。
+
+上一轮 zero-body-control dynamics compare 机器人下蹲，是因为 29 个身体 torque ctrl 全为零且没有
+姿态保持；该 run 只能作为失败原因证据，不能作为 C action replay。C canonical Action 是关节目标，
+不能直接塞入 fixed6 的 torque actuator ctrl。
+
 2026-10-16 C 阶段评估提速已在 Windows 实现。`eval_micro_batch` 与训练 batch 分离，默认训练 32、
 评估 128；summary evaluation 每 5,000 步仍遍历全量 fixture，保留相同 routes、samples、Mask 和
 seed，只跳过大体积 diagnostics/trace/plot 写盘。每 50,000 步和最终步执行 full diagnostic evaluation，

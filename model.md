@@ -522,3 +522,51 @@ mask identity 和 baseline replay。
 与递归 B，分别以 recorded source 和 Origin Action replay 为参考，按 transition 输出综合连续
 State RMSE、canonical Action RMSE、contact disagreement，并记录最大误差关节/State feature。
 KL2 与 KL4 必须各自成组，不在同一曲线中比较 checkpoint。
+
+## 22. G1+ unlocked31 资产、模型与迁移状态（2026-10-20）
+
+G1+ 原始资产只读位置：
+
+```text
+/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus/
+```
+
+必须保留 `g1_pl.urdf`、`meshes/` 和 `motor_info.md`。run-local 准备和转换产物位于：
+
+```text
+/home/helloworld/bly/runs/g1plus_unlocked31_diag_20261019_160509_3309439/unlocked31_run/
+```
+
+最终使用：
+
+```text
+assets/g1_pl_unlocked31_mujoco_fixed6.xml
+sha256=abd1a3dcccdeb43e163ef0d6f21d9eec2e6d426c97fb255d4c3dfe452aa34455
+```
+
+转换器 `urdf2mjcf==0.0.4` 的两个缺陷已在 run-local 副本中修正：
+
+1. 删除 `add_visual_geom_logic()` 产生的缺失 `size`/空 `type` 视觉复制 geom；
+2. 为 converter synthetic `root` 保留 freejoint，并写入原始 pelvis 的 `fullinertia`，而不是使用
+   零质量 root 或虚构小质量。
+
+fixed6 已通过 `nq=38`、`nv=37`、`njnt=32`、`nu=31`，两个 neck joint 为 hinge，profile
+mapping 通过。它是 31-DoF G1+ runtime model；29-DoF C checkpoint 仍只负责 body joints，
+neck 是额外渲染变量，不声称 checkpoint 已扩展为 31-D policy。
+
+三动作 C ghost 归档为：
+
+```text
+/home/helloworld/bly/runs/g1plus_unlocked31_action_01_source_static_moving_ghost_20261020_002708_157847/
+/home/helloworld/bly/runs/g1plus_unlocked31_action_02_source_static_moving_ghost_20261020_002708_157847/
+/home/helloworld/bly/runs/g1plus_unlocked31_action_03_source_static_moving_ghost_20261020_002708_157847/
+```
+
+每个目录中的 `videos/ghost_source_static_moving.mp4` 为 193 帧、50 Hz；manifest 记录 source、
+C recursive replay、neck static/moving 三层、模型 hash、runtime XML hash 和 `kinematic_only=true`。
+source 路径是 `windows/w000000/data/source.trajectory.pkl`；C route 路径是
+`windows/w000000/simulations/recursive_state_feedback_b/data/replay/000000.trajectory.pkl`。
+
+上一轮 `simulate_g1_plus_action_compare.py` 的 static-zero body control 会导致机器人在重力下
+逐渐蹲下；该结果只说明“无身体控制的 free-floating rollout 会失稳”，不能替代 C replay，也不应
+作为 G1+ 兼容性质量结论。C canonical Action 是关节目标，不能直接当作 fixed6 MJCF 的 torque ctrl。

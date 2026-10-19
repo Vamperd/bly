@@ -724,3 +724,39 @@ SVG 和大 diagnostics 文件，也不更新 best checkpoint；full evaluation �
 连续 68 维 RMSE 和 contact disagreement，Action 使用 canonical 29 维 RMSE，并报告最大误差
 joint。三动作批量输出只保留 A/B replay、compare grid 视频、compact JSON/SVG 和报告，清理
 segments、checkpoint、replay_motion 与 worker logs 后更新 prepared hash。
+
+## 22. G1+ unlocked31 迁移与三动作视频（2026-10-20）
+
+G1+ 迁移已完成到可重复的 run-local fixed6 模型：
+
+```text
+source bundle: /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus/
+final model:   /home/helloworld/bly/runs/g1plus_unlocked31_diag_20261019_160509_3309439/unlocked31_run/assets/g1_pl_unlocked31_mujoco_fixed6.xml
+sha256:        abd1a3dcccdeb43e163ef0d6f21d9eec2e6d426c97fb255d4c3dfe452aa34455
+```
+
+结构门禁已通过：`nq=38`、`nv=37`、`njnt=32`、`nu=31`，31 个 movable joints，两个 neck hinge
+和 actuator wiring 均可读回。无姿态保持的 free-floating body drift smoke 未通过，原因是测试把
+非 neck torque ctrl 设为零；这不是 C replay 或 G1+ 实机质量结论。
+
+三动作 ghost 结果已封存：
+
+```text
+/home/helloworld/bly/runs/g1plus_unlocked31_action_01_source_static_moving_ghost_20261020_002708_157847/
+/home/helloworld/bly/runs/g1plus_unlocked31_action_02_source_static_moving_ghost_20261020_002708_157847/
+/home/helloworld/bly/runs/g1plus_unlocked31_action_03_source_static_moving_ghost_20261020_002708_157847/
+```
+
+每个结果是一条 193 帧 ghost：source opaque、C recursive replay + neck static、C recursive replay
++ neck moving。它是同相机运动学对比，不能写成 MuJoCo torque rollout 或 sim-to-real 通过。
+三动作的 C source/replay 依赖仍在：
+
+```text
+/home/helloworld/bly/runs/cvae_long_horizon_ab_three_actions_20261019_012955_694718/kl4_200k/action_01/
+/home/helloworld/bly/runs/cvae_long_horizon_ab_three_actions_20261019_012955_694718/kl4_200k/action_02/
+/home/helloworld/bly/runs/cvae_long_horizon_ab_three_actions_20261019_012955_694718/kl4_200k/action_03/
+```
+
+该 C 多动作 run、原始 G1+ bundle、asset audit run 和 final fixed6 run 在视频归档后仍需保留。
+旧单动作 neck compare、zero-body-control dynamics compare、z-fight/prepare 中间 run 只在其
+manifest/失败证据已归档后作为候选清理，不自动删除。

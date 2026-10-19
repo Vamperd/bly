@@ -1162,3 +1162,68 @@ canonical Action 和记录的下一段 32 个期望 State 递归预测并执行�
 分别给出相对 recorded source 与 Origin Action replay 的综合 State RMSE、canonical Action RMSE、
 contact disagreement 及最大误差关节；三动作批量 run 完成后可删除 segments、checkpoints、
 replay_motion 和 worker logs，并同步更新 prepared hash。
+
+## 14. G1+ unlocked31 迁移与视频归档（2026-10-20）
+
+G1+ 兼容性工作已在 Ubuntu 完成结构迁移和三动作 ghost 渲染。原始资产 bundle 保持只读，
+位置为：
+
+```text
+/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus/
+```
+
+其中 `g1_pl.urdf`、`meshes/`、`motor_info.md` 是后续重新转换和 mesh 解析所需的唯一源资料，
+不得删除。最终 run-local unlocked31 模型和转换证据位于：
+
+```text
+/home/helloworld/bly/runs/g1plus_unlocked31_diag_20261019_160509_3309439/unlocked31_run/
+```
+
+当前使用的最终模型为：
+
+```text
+assets/g1_pl_unlocked31_mujoco_fixed6.xml
+sha256=abd1a3dcccdeb43e163ef0d6f21d9eec2e6d426c97fb255d4c3dfe452aa34455
+```
+
+该模型已通过 `nq=38`、`nv=37`、`njnt=32`、`nu=31`、31 个 movable joint、两个 neck hinge
+和 profile mapping 检查。neck actuator 响应和有限值检查通过；free-floating、无姿态保持的
+body drift smoke 不通过，不能写成动力学稳定性通过。
+
+三动作 ghost 视频已经生成，必须保留视频和 `manifests/ghost_compare.json`：
+
+```text
+/home/helloworld/bly/runs/g1plus_unlocked31_action_01_source_static_moving_ghost_20261020_002708_157847/
+/home/helloworld/bly/runs/g1plus_unlocked31_action_02_source_static_moving_ghost_20261020_002708_157847/
+/home/helloworld/bly/runs/g1plus_unlocked31_action_03_source_static_moving_ghost_20261020_002708_157847/
+```
+
+每个 ghost 使用 source opaque、C `recursive_state_feedback_b` + neck static、C replay + neck
+moving 三层同相机运动学叠加，193 帧，`kinematic_only=true`。其 source/C replay 轨迹来自：
+
+```text
+/home/helloworld/bly/runs/cvae_long_horizon_ab_three_actions_20261019_012955_694718/kl4_200k/action_01/
+/home/helloworld/bly/runs/cvae_long_horizon_ab_three_actions_20261019_012955_694718/kl4_200k/action_02/
+/home/helloworld/bly/runs/cvae_long_horizon_ab_three_actions_20261019_012955_694718/kl4_200k/action_03/
+```
+
+这个 C 多动作 run 及其 source/replay 轨迹不能随 G1+ 视频清理。`source.trajectory.pkl` 是 source
+轨迹；`simulations/recursive_state_feedback_b/data/replay/000000.trajectory.pkl` 是 C 外推后
+的 29-DoF replay 轨迹。它们不是直接可当作 MuJoCo torque ctrl 的 canonical Action。
+
+以下 run 只作为清理候选，须先确认视频和 manifest 已备份，并由用户在 Ubuntu 执行删除：
+
+```text
+g1plus_unlocked31_C_action03_neck_compare_20261020_001423_157847
+g1plus_unlocked31_action_dynamics_compare_20261020_000958_157847
+g1plus_unlocked31_action03_neck_compare_20261019_235044_157847
+g1plus_unlocked31_actuator_smoke_20261019_233013_157847
+g1plus_unlocked31_mjcf_diag_20261019_232720_157847
+g1plus_black192_zfight_fix_20261019_135444_3309439
+g1plus_replay65_prepare_20261019_124743_1247522
+```
+
+其中 actuator smoke 的小型 JSON、MJCF load/profile manifest 和 z-fight/prepare 错误日志若需保留
+证据，应先复制到归档目录；不能删除 `g1plus_asset_audit_20261019_024703` 或
+`g1plus_unlocked31_diag_20261019_160509_3309439`。`latent_distribution_kl2_kl4_recovered_*`
+与 G1+ 迁移无关，不能按本节清理规则处理。
