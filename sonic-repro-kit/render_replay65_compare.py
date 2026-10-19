@@ -82,6 +82,7 @@ def main(argv=None):
     p.add_argument("--model", type=Path, required=True)
     p.add_argument("--robot-profile", choices=("g1", "g1_plus_locked29"), default="g1")
     p.add_argument("--mesh-dir", type=Path)
+    p.add_argument("--ground-style", choices=("checker", "black"), default="checker")
     p.add_argument("--gl", default="egl", choices=("egl", "osmesa", "glfw"))
     p.add_argument("--layout", default="both", choices=("ghost", "grid", "both"))
     args = p.parse_args(argv)
@@ -102,14 +103,16 @@ def main(argv=None):
     provenance = frame_provenance(provenance_meta, horizon)
     frames_total, start = horizon + 1, int(manifest["window_start"])
     xml = output / "manifests/compare_render.xml"
-    xml_details = prepare_runtime_xml(args.model.resolve(), xml, *GHOST_SIZE, mesh_dir=args.mesh_dir)
+    xml_details = prepare_runtime_xml(args.model.resolve(), xml, *GHOST_SIZE, mesh_dir=args.mesh_dir,
+                                      ground_style=args.ground_style)
     model = mujoco.MjModel.from_xml_path(str(xml))
     profile_details = validate_model_profile(model, args.robot_profile)
     qposes, input_hashes = load_inputs(manifest, model=model, robot_profile=args.robot_profile)
     data = mujoco.MjData(model)
     camera = mujoco.MjvCamera(); mujoco.mjv_defaultCamera(camera)
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-    camera.azimuth, camera.elevation = 135, -15
+    camera.azimuth, camera.elevation = 135, -25
+    lookat_z = float(qposes[0][0, 2])
     plane, geom_obj = int(mujoco.mjtGeom.mjGEOM_PLANE), int(mujoco.mjtObj.mjOBJ_GEOM)
     geom_types = np.asarray(model.geom_type)
 
@@ -126,7 +129,7 @@ def main(argv=None):
             if segment:
                 renderer.disable_segmentation_rendering()
     def ghost_frame(renderer, t):
-        lookat = qposes[0][t, :3]
+        lookat = np.asarray([qposes[0][t, 0], qposes[0][t, 1], lookat_z])
         frame = draw(renderer, qposes[0][t], lookat)
         for route, qpos in zip(routes, qposes[1:]):
             layer = draw(renderer, qpos[t], lookat)

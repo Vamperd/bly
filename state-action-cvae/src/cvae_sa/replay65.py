@@ -1147,6 +1147,7 @@ def render(args):
     command.extend(["--robot-profile", getattr(args, "robot_profile", "g1")])
     if getattr(args, "mesh_dir", None) is not None:
         command.extend(["--mesh-dir", str(args.mesh_dir.resolve())])
+    command.extend(["--ground-style", getattr(args, "ground_style", "checker")])
     if getattr(args, "origin_only", False):
         command.append("--origin-only")
     launch(command, run / "logs/render.log")
@@ -1466,6 +1467,7 @@ def compare(args):
     launch([sys.executable, str(KIT / "render_replay65_compare.py"), "--manifest", str(output / "manifests/compare.json"),
             "--model", str(args.model.resolve()), "--gl", args.gl, "--layout", args.layout,
             "--robot-profile", getattr(args, "robot_profile", "g1"),
+            "--ground-style", getattr(args, "ground_style", "checker"),
             *(["--mesh-dir", str(args.mesh_dir.resolve())] if getattr(args, "mesh_dir", None) is not None else [])],
            output / "logs/render_compare.log")
     return manifest
@@ -1527,6 +1529,7 @@ def main(argv=None):
     r=sub.add_parser("render"); r.add_argument("--run",type=Path,required=True); r.add_argument("--model",type=Path,required=True); r.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
     r.add_argument("--robot-profile", choices=("g1", "g1_plus_locked29"), default="g1")
     r.add_argument("--mesh-dir", type=Path)
+    r.add_argument("--ground-style", choices=("checker", "black"), default="checker")
     r.add_argument("--origin-only",action="store_true",help="render only Source vs Origin Action repeatability")
     r.add_argument("--allow-render-code-change",action="store_true",
                    help="read-only renderer refresh after a renderer overlay change; preparation inputs remain sealed")
@@ -1556,6 +1559,7 @@ def main(argv=None):
     m.add_argument("--gl",choices=("egl","osmesa","glfw"),default="egl")
     m.add_argument("--robot-profile", choices=("g1", "g1_plus_locked29"), default="g1")
     m.add_argument("--mesh-dir", type=Path)
+    m.add_argument("--ground-style", choices=("checker", "black"), default="checker")
     m.add_argument("--skip-render",action="store_true")
     args=parser.parse_args(argv)
     if args.command == "prepare" and (args.sample_index < 0 or (args.window_index is not None and args.window_index < 0)):

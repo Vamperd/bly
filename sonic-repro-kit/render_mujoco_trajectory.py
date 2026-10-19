@@ -345,10 +345,13 @@ def prepare_runtime_xml(
     width: int,
     height: int,
     mesh_dir: Path | None = None,
+    ground_style: str = "checker",
 ) -> dict[str, Any]:
     """Create a run-local model with absolute meshes, a floor, and a sized framebuffer."""
     if width <= 0 or height <= 0:
         raise ValueError("Offscreen framebuffer width and height must be positive")
+    if ground_style not in {"checker", "black"}:
+        raise ValueError(f"unknown ground_style={ground_style!r}; choose checker or black")
 
     source_path = source_path.resolve(strict=True)
     tree = ET.parse(source_path)
@@ -394,30 +397,43 @@ def prepare_runtime_xml(
     replaced_ground = _remove_matching_children(root, "geom", "name", RUNTIME_GROUND_GEOM_NAME)
 
     asset = _find_or_create_top_level(root, "asset", before="worldbody")
-    ET.SubElement(
-        asset,
-        "texture",
-        {
-            "name": RUNTIME_GROUND_TEXTURE_NAME,
-            "type": "2d",
-            "builtin": "checker",
-            "width": "512",
-            "height": "512",
-            "rgb1": RUNTIME_GROUND_RGB1,
-            "rgb2": RUNTIME_GROUND_RGB2,
-        },
-    )
-    ET.SubElement(
-        asset,
-        "material",
-        {
-            "name": RUNTIME_GROUND_MATERIAL_NAME,
-            "texture": RUNTIME_GROUND_TEXTURE_NAME,
-            "texrepeat": "20 20",
-            "texuniform": "true",
-            "reflectance": "0.1",
-        },
-    )
+    if ground_style == "checker":
+        ET.SubElement(
+            asset,
+            "texture",
+            {
+                "name": RUNTIME_GROUND_TEXTURE_NAME,
+                "type": "2d",
+                "builtin": "checker",
+                "width": "512",
+                "height": "512",
+                "rgb1": RUNTIME_GROUND_RGB1,
+                "rgb2": RUNTIME_GROUND_RGB2,
+            },
+        )
+        ET.SubElement(
+            asset,
+            "material",
+            {
+                "name": RUNTIME_GROUND_MATERIAL_NAME,
+                "texture": RUNTIME_GROUND_TEXTURE_NAME,
+                # Lower spatial frequency avoids temporal aliasing when a
+                # free camera views the plane at a shallow angle.
+                "texrepeat": "8 8",
+                "texuniform": "true",
+                "reflectance": "0.0",
+            },
+        )
+    else:
+        ET.SubElement(
+            asset,
+            "material",
+            {
+                "name": RUNTIME_GROUND_MATERIAL_NAME,
+                "rgba": "0 0 0 1",
+                "reflectance": "0",
+            },
+        )
 
     worldbody = _find_or_create_top_level(root, "worldbody")
     worldbody.insert(
@@ -446,14 +462,14 @@ def prepare_runtime_xml(
         "removed_terrain_bodies": removed_bodies,
         "framebuffer": {"width": width, "height": height},
         "ground": {
-            "style": "checker",
+            "style": ground_style,
             "geom_name": RUNTIME_GROUND_GEOM_NAME,
-            "texture_name": RUNTIME_GROUND_TEXTURE_NAME,
+            "texture_name": RUNTIME_GROUND_TEXTURE_NAME if ground_style == "checker" else None,
             "material_name": RUNTIME_GROUND_MATERIAL_NAME,
             "position": [0.0, 0.0, 0.0],
             "size": [50.0, 50.0, 0.1],
-            "rgb1": [0.18, 0.18, 0.18],
-            "rgb2": [0.72, 0.72, 0.72],
+            "rgb1": [0.18, 0.18, 0.18] if ground_style == "checker" else [0.0, 0.0, 0.0],
+            "rgb2": [0.72, 0.72, 0.72] if ground_style == "checker" else [0.0, 0.0, 0.0],
         },
         "replaced_runtime_elements": {
             "textures": replaced_texture,
@@ -484,6 +500,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-elevation", type=float, default=-30.0)
     parser.add_argument("--robot-profile", choices=tuple(sorted(RENDER_ROBOT_PROFILES)), default="g1")
     parser.add_argument("--mesh-dir", type=Path)
+    parser.add_argument("--ground-style", choices=("checker", "black"), default="checker")
     return parser.parse_args()
 
 
@@ -520,6 +537,7 @@ def main() -> int:
         width=args.width,
         height=args.height,
         mesh_dir=args.mesh_dir,
+        ground_style=args.ground_style,
     )
 
     model = mujoco.MjModel.from_xml_path(str(runtime_xml))

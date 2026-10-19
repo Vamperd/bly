@@ -65,6 +65,7 @@ def main(argv=None):
     p.add_argument("--run",type=Path,required=True); p.add_argument("--model",type=Path,required=True)
     p.add_argument("--robot-profile", choices=("g1", "g1_plus_locked29"), default="g1")
     p.add_argument("--mesh-dir", type=Path)
+    p.add_argument("--ground-style", choices=("checker", "black"), default="checker")
     p.add_argument("--gl",default="egl",choices=("egl","osmesa","glfw"))
     p.add_argument("--origin-only",action="store_true",
                    help="render only the Source vs Origin Action repeatability video")
@@ -88,13 +89,17 @@ def main(argv=None):
             if tuple(archive["joint_names"].tolist())!=G1_ISAACLAB_JOINT_NAMES:
                 raise ValueError("recorded Isaac joint order does not match the renderer permutation")
         xml=window/"manifests/replay65_render.xml"
-        xml_details=prepare_runtime_xml(args.model.resolve(),xml,640,480,mesh_dir=args.mesh_dir)
+        xml_details=prepare_runtime_xml(args.model.resolve(),xml,640,480,mesh_dir=args.mesh_dir,
+                                        ground_style=args.ground_style)
         model=mujoco.MjModel.from_xml_path(str(xml))
         profile_details = validate_model_profile(model, args.robot_profile)
         data=mujoco.MjData(model); renderer=mujoco.Renderer(model,height=480,width=640)
         camera=mujoco.MjvCamera(); mujoco.mjv_defaultCamera(camera)
         camera.type=mujoco.mjtCamera.mjCAMERA_FREE
-        camera.azimuth=135; camera.elevation=-15; camera.distance=3.5
+        camera.azimuth=135
+        camera.elevation=-25
+        camera.distance=3.5
+        lookat_z = float(qposes[0][0, 2])
         try:
             horizon=int(meta.get("horizon_steps",64)); offset=int(meta.get("score_offset",0)); frames_total=horizon+1
             provenance=frame_provenance(meta,horizon)
@@ -123,7 +128,11 @@ def main(argv=None):
                         for qpos,label in zip(qposes,labels):
                             data.qpos[:]=qpos[t]; data.qvel[:]=0
                             mujoco.mj_forward(model,data)
-                            camera.lookat[:]=qposes[0][t,:3]
+                            # Follow horizontal root motion while keeping the
+                            # camera height fixed. Tracking root z makes the
+                            # ground plane change scale frame to frame.
+                            camera.lookat[0:2]=qposes[0][t,:2]
+                            camera.lookat[2]=lookat_z
                             renderer.update_scene(data,camera=camera)
                             frame=renderer.render().copy()
                             cv2.rectangle(frame,(0,0),(640,108),(25,25,25),-1)
