@@ -101,6 +101,57 @@ class BuildQposTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires fixed joints"):
             validate_model_profile(Model(), "g1_plus_locked29")
 
+    def test_unlocked31_profile_maps_body_and_extra_neck_by_name(self) -> None:
+        class Joint:
+            def __init__(self, name):
+                self.name = name
+
+        class Model:
+            njnt = 32
+            nq = 38
+            nv = 37
+            jnt_qposadr = list(range(7, 38)) + [0]
+
+            def joint(self, index):
+                names = list(G1_MUJOCO_JOINT_NAMES[:15]) + [
+                    "neck_pitch_joint",
+                    "neck_yaw_joint",
+                ] + list(G1_MUJOCO_JOINT_NAMES[15:]) + ["floating_base_joint"]
+                return Joint(names[index])
+
+        trajectory = {
+            "dof_pos": np.arange(58, dtype=np.float32).reshape(2, 29),
+            "root_pos_w": np.zeros((2, 3), dtype=np.float32),
+            "root_quat_w": np.asarray([[1, 0, 0, 0], [1, 0, 0, 0]], dtype=np.float32),
+        }
+        model = Model()
+        details = validate_model_profile(model, "g1_plus_unlocked31")
+        qpos = build_mujoco_qpos(
+            trajectory,
+            profile="g1_plus_unlocked31",
+            model=model,
+            extra_joint_values={
+                "neck_pitch_joint": np.asarray([0.1, 0.2]),
+                "neck_yaw_joint": np.asarray([-0.3, -0.4]),
+            },
+        )
+        self.assertEqual(details["profile"], "g1_plus_unlocked31")
+        self.assertEqual(details["model_nq"], 38)
+        self.assertEqual(details["model_to_policy_mapping"][15:17], [-1, -1])
+        self.assertEqual(qpos.shape, (2, 38))
+        np.testing.assert_array_equal(qpos[:, 7:22], trajectory["dof_pos"][:, G1_ISAACLAB_TO_MUJOCO_DOF[:15]])
+        np.testing.assert_allclose(qpos[:, 22], [0.1, 0.2])
+        np.testing.assert_allclose(qpos[:, 23], [-0.3, -0.4])
+
+    def test_unlocked31_profile_requires_extra_neck_values(self) -> None:
+        trajectory = {
+            "dof_pos": np.zeros((1, 29), dtype=np.float32),
+            "root_pos_w": np.zeros((1, 3), dtype=np.float32),
+            "root_quat_w": np.asarray([[1, 0, 0, 0]], dtype=np.float32),
+        }
+        with self.assertRaisesRegex(ValueError, "requires extra joints"):
+            build_mujoco_qpos(trajectory, profile="g1_plus_unlocked31")
+
 
 class RuntimeXmlTests(unittest.TestCase):
     def test_creates_run_local_model_without_terrain_reference(self) -> None:

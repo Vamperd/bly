@@ -97,6 +97,8 @@ class RenderRobotProfile:
     expected_nq: int
     expected_nv: int
     fixed_joint_names: tuple[str, ...] = ()
+    extra_joint_names: tuple[str, ...] = ()
+    expected_movable_joint_count: int = 29
 
 
 RENDER_ROBOT_PROFILES: Mapping[str, RenderRobotProfile] = {
@@ -114,6 +116,18 @@ RENDER_ROBOT_PROFILES: Mapping[str, RenderRobotProfile] = {
         expected_nq=36,
         expected_nv=35,
         fixed_joint_names=("neck_pitch_joint", "neck_yaw_joint"),
+    ),
+    "g1_plus_unlocked31": RenderRobotProfile(
+        name="g1_plus_unlocked31",
+        policy_joint_names=G1_ISAACLAB_JOINT_NAMES,
+        default_model_joint_names=G1_MUJOCO_JOINT_NAMES + (
+            "neck_pitch_joint",
+            "neck_yaw_joint",
+        ),
+        expected_nq=38,
+        expected_nv=37,
+        extra_joint_names=("neck_pitch_joint", "neck_yaw_joint"),
+        expected_movable_joint_count=31,
     ),
 }
 
@@ -149,7 +163,8 @@ def validate_model_profile(model: Any, profile: str | RenderRobotProfile) -> dic
     names = _model_joint_names(model)
     if len(names) != len(set(names)):
         raise ValueError(f"MuJoCo model contains duplicate movable joint names: {names}")
-    missing = [name for name in profile.policy_joint_names if name not in names]
+    required_names = (*profile.policy_joint_names, *profile.extra_joint_names)
+    missing = [name for name in required_names if name not in names]
     if missing:
         raise ValueError(f"MuJoCo model is missing checkpoint joints: {missing}")
     unexpected_fixed = [name for name in profile.fixed_joint_names if name in names]
@@ -166,20 +181,30 @@ def validate_model_profile(model: Any, profile: str | RenderRobotProfile) -> dic
         raise ValueError(
             f"robot profile {profile.name!r} expects nv={profile.expected_nv}, found {model.nv}"
         )
+    if len(names) != profile.expected_movable_joint_count:
+        raise ValueError(
+            f"robot profile {profile.name!r} expects "
+            f"{profile.expected_movable_joint_count} movable joints, found {len(names)}"
+        )
     free_joint_count = sum(_is_free_joint(model, index) for index in range(int(model.njnt)))
     if free_joint_count != 1:
         raise ValueError(f"robot profile {profile.name!r} requires exactly one free root joint, found {free_joint_count}")
+    model_to_policy = [
+        profile.policy_joint_names.index(name) if name in profile.policy_joint_names else -1
+        for name in names
+    ]
     return {
         "profile": profile.name,
         "model_nq": int(model.nq),
         "model_nv": int(model.nv),
         "model_joint_names": list(names),
         "policy_joint_names": list(profile.policy_joint_names),
+        "extra_joint_names": list(profile.extra_joint_names),
         "fixed_joint_names": list(profile.fixed_joint_names),
         # ``joint_mapping`` historically means model/MuJoCo order -> policy/
         # Isaac order.  Keep that meaning and expose the inverse explicitly.
-        "mapping": [profile.policy_joint_names.index(name) for name in names],
-        "model_to_policy_mapping": [profile.policy_joint_names.index(name) for name in names],
+        "mapping": model_to_policy,
+        "model_to_policy_mapping": model_to_policy,
         "policy_to_model_mapping": [names.index(name) for name in profile.policy_joint_names],
         "free_joint_count": free_joint_count,
     }
@@ -221,6 +246,7 @@ def build_mujoco_qpos(
     *,
     profile: str | RenderRobotProfile = "g1",
     model: Any | None = None,
+    extra_joint_values: Mapping[str, Any] | None = None,
 ) -> np.ndarray:
     """Map a 29-D Isaac trajectory into the selected model's qpos layout.
 
@@ -231,6 +257,14 @@ def build_mujoco_qpos(
     """
     if isinstance(profile, str):
         profile = get_render_profile(profile)
+    if extra_joint_values is None:
+        extra_joint_values = {}
+    unexpected_extra = sorted(set(extra_joint_values) - set(profile.extra_joint_names))
+    missing_extra = sorted(set(profile.extra_joint_names) - set(extra_joint_values))
+    if unexpected_extra:
+        raise ValueError(f"profile {profile.name!r} does not accept extra joints: {unexpected_extra}")
+    if missing_extra:
+        raise ValueError(f"profile {profile.name!r} requires extra joints: {missing_extra}")
     missing = [key for key in ("dof_pos", "root_pos_w", "root_quat_w") if key not in trajectory]
     if missing:
         raise ValueError(f"Trajectory is missing required fields: {', '.join(missing)}")
@@ -277,6 +311,16 @@ def build_mujoco_qpos(
         name: dof_pos[:, index]
         for index, name in enumerate(profile.policy_joint_names)
     }
+    extra_values = {}
+    for name in profile.extra_joint_names:
+        values = np.asarray(extra_joint_values[name], dtype=np.float64)
+        if values.shape != (dof_pos.shape[0],):
+            raise ValueError(
+                f"extra joint {name!r} must have shape {(dof_pos.shape[0],)}, found {values.shape}"
+            )
+        if not np.isfinite(values).all():
+            raise ValueError(f"extra joint {name!r} contains NaN or infinite values")
+        extra_values[name] = values
     if model is None:
         model_names = profile.default_model_joint_names
         model_nq = profile.expected_nq
@@ -297,6 +341,10 @@ def build_mujoco_qpos(
     for name, values in policy_values.items():
         if name not in addresses:
             raise ValueError(f"model has no qpos address for checkpoint joint {name!r}")
+        qpos[:, addresses[name]] = values
+    for name, values in extra_values.items():
+        if name not in addresses:
+            raise ValueError(f"model has no qpos address for extra joint {name!r}")
         qpos[:, addresses[name]] = values
     if qpos.shape != (dof_pos.shape[0], model_nq):
         raise RuntimeError(f"Internal qpos shape error: {qpos.shape}")

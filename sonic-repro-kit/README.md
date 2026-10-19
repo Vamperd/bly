@@ -391,6 +391,54 @@ MUJOCO_GL=egl python -m cvae_sa.replay65 render \
 profile、模型 joint order、`nq/nv`、固定 neck 关节和输入模型路径；该视频仍然只是
 replay65 的 kinematic rendering，不构成 G1+ 动力学或实机质量通过。
 
+### G1+ unlocked31 neck compatibility smoke
+
+要验证原始 G1+ 的两个 neck joint，不要复用 locked29 模型。先在 Ubuntu 的新 run 中复制
+并审计原始 URDF；该命令还会生成 visual/collision 配对和 basename 展平后的 converter URDF，
+原始 asset bundle 保持只读：
+
+```bash
+UNLOCKED_RUN=~/bly/runs/g1plus_unlocked31_$(date +%Y%m%d_%H%M%S)
+python sonic-repro-kit/prepare_g1_plus_unlocked31.py \
+  --asset-root ~/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus \
+  --run-root "$UNLOCKED_RUN"
+
+(
+  cd "$UNLOCKED_RUN/assets"
+  uvx --from urdf2mjcf==0.0.4 urdf2mjcf \
+    g1_pl_unlocked31_converter_flat.urdf \
+    --output g1_pl_unlocked31.xml \
+    --copy-meshes
+)
+```
+
+转换成功后，使用一个已验证 C replay 的 source trajectory 作为固定身体姿态；`--body-state`
+会自动选择第一个双脚接触且基座速度接近零的帧。视频会保持身体 29 个关节不动，只扫描
+`neck_yaw_joint` 和 `neck_pitch_joint`：
+
+```bash
+BODY_RUN=~/bly/runs/<verified_c_replay_run>
+SWEEP_RUN=~/bly/runs/g1plus_unlocked31_neck_sweep_$(date +%Y%m%d_%H%M%S)
+python sonic-repro-kit/render_g1_plus_neck_sweep.py \
+  --model "$UNLOCKED_RUN/assets/g1_pl_unlocked31.xml" \
+  --mesh-dir ~/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus/meshes \
+  --body-trajectory "$BODY_RUN/windows/<window>/data/source.trajectory.pkl" \
+  --body-state "$BODY_RUN/windows/<window>/data/source.replay.npz" \
+  --output-run "$SWEEP_RUN" \
+  --horizon-steps 192 \
+  --ground-style black \
+  --gl egl
+
+python sonic-repro-kit/test_g1_plus_neck_actuators.py \
+  --model "$UNLOCKED_RUN/assets/g1_pl_unlocked31.xml" \
+  --output-run "$SWEEP_RUN" \
+  --gl egl
+```
+
+该 smoke 输出 193 帧、50 Hz 视频和两个 manifest。它验证 MJCF 结构、29-D body mapping、
+neck qpos 地址、neck actuator 响应和 renderer 执行链路；它不把 29-D checkpoint 扩展成
+31-D policy，也不代表 G1+ sim-to-real 已通过。
+
 Windows 修改推送后，Ubuntu 执行端先记录实际状态；如果外层工作树不适合
 fast-forward，同步前停止并回传状态，不要 reset 或手工改源码：
 
