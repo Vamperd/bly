@@ -76,6 +76,23 @@ chmod +x sonic_repro.sh
 ./sonic_repro.sh render-offline
 ```
 
+Standalone DAgger smoke and pilot use a frozen SONIC release G1 teacher and a
+plain MLP student. The teacher checkpoint defaults to the pinned Ubuntu path
+`/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/sonic_release/last.pt`;
+override it explicitly when the checkpoint is stored elsewhere:
+
+```bash
+SONIC_TEACHER_CHECKPOINT=~/bly/sonic-repro/GR00T-WholeBodyControl/sonic_release/last.pt \
+  ./sonic_repro.sh dagger-smoke
+SONIC_TEACHER_CHECKPOINT=~/bly/sonic-repro/GR00T-WholeBodyControl/sonic_release/last.pt \
+  ./sonic_repro.sh dagger-pilot
+```
+
+`dagger-smoke` runs one 8-environment, 8-step engineering round. `dagger-pilot`
+runs one motion with 32 environments, 500 control steps, and four beta rounds
+`[1.0, 0.5, 0.2, 0.0]`. Both commands write only to a fresh directory under
+`~/bly/runs` and keep the PPO `ref_model` path unchanged.
+
 `collect-state-action` 使用 released checkpoint 的确定性 `action_mean`，强制 G1
 encoder，并在不启用 cameras/RTX 的情况下记录 50 Hz 单帧转移
 `(state_t, goal_t, actions, state_tp1)`。环境数不再写死，而是严格派生为

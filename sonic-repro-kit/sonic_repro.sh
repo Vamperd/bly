@@ -1514,6 +1514,71 @@ phase_smoke_train() {
   fi
 }
 
+phase_dagger() {
+  local mode="${1:-pilot}"
+  [[ "$mode" == "smoke" || "$mode" == "pilot" ]] \
+    || die "Unsupported DAgger mode: $mode"
+  activate_env
+  require_run_gpu_capacity
+  [[ -f "$SONIC_DIR/sonic_release/last.pt" ]] \
+    || die "SONIC release checkpoint missing: $SONIC_DIR/sonic_release/last.pt"
+  [[ -d "$SONIC_DIR/sample_data/robot_filtered" ]] \
+    || die "Sample motions missing; run download-sample first."
+
+  local run_dir envs stage
+  run_dir="$(new_run_dir "dagger_${mode}")"
+  write_run_manifest "$run_dir"
+  update_latest_run_pointer "$run_dir"
+  if [[ "$mode" == "smoke" ]]; then
+    envs=8
+    stage=dagger_smoke
+    if (
+      cd "$SONIC_DIR"
+      python gear_sonic/train_agent_dagger.py \
+        "experiment_dir=$run_dir" \
+        "num_envs=$envs" \
+        "hydra.run.dir=$run_dir/manifests/hydra_dagger" \
+        ++headless=True \
+        ++dagger.smoke=True \
+        ++dagger.num_rounds=1 \
+        ++dagger.beta_schedule='[1.0]' \
+        ++dagger.rollout_steps=8 \
+        ++dagger.train_steps_per_round=10 \
+        ++dagger.train_batch_size=32 \
+        ++manager_env.observations.policy.enable_corruption=False \
+        ++manager_env.observations.tokenizer.enable_corruption=False
+    ) 2>&1 | tee "$run_dir/logs/dagger_smoke.log"; then
+      record_exit_code "$run_dir" "$stage" 0
+      mark_stage "$run_dir" "$stage.ok"
+    else
+      local rc=$?
+      record_exit_code "$run_dir" "$stage" "$rc"
+      return "$rc"
+    fi
+  else
+    envs=32
+    stage=dagger_pilot
+    if (
+      cd "$SONIC_DIR"
+      python gear_sonic/train_agent_dagger.py \
+        "experiment_dir=$run_dir" \
+        "num_envs=$envs" \
+        "hydra.run.dir=$run_dir/manifests/hydra_dagger" \
+        ++headless=True \
+        ++dagger.smoke=False \
+        ++manager_env.observations.policy.enable_corruption=False \
+        ++manager_env.observations.tokenizer.enable_corruption=False
+    ) 2>&1 | tee "$run_dir/logs/dagger_pilot.log"; then
+      record_exit_code "$run_dir" "$stage" 0
+      mark_stage "$run_dir" "$stage.ok"
+    else
+      local rc=$?
+      record_exit_code "$run_dir" "$stage" "$rc"
+      return "$rc"
+    fi
+  fi
+}
+
 phase_verify_minimal() {
   prepare_dirs
   need_command python3
@@ -1589,6 +1654,8 @@ Phases:
   prepare-overfit-reference-subset
                   Link the exact selected 32 motions read-only for Physics v5 collection.
   smoke-train     Run five offline training iterations; SMOKE_ENVS defaults to 16.
+  dagger-smoke    Run the standalone release-teacher/MLP DAgger engineering smoke.
+  dagger-pilot    Run the 1-motion, 32-env, 4-round DAgger pilot.
   verify-minimal  Audit commits, logs, success markers, dependencies, and MP4 output.
   setup-minimal   Install dependencies and sample data; does not run Isaac Sim.
   status          Produce a fresh status report and show pinned revisions.
@@ -1606,7 +1673,7 @@ Environment overrides:
   ACTION_MASK_CAMERA_DISTANCE,
   STATE_MASK_RUN_DIR, STATE_MASK_GL, STATE_MASK_WIDTH, STATE_MASK_HEIGHT,
   STATE_MASK_CAMERA_DISTANCE,
-  MAX_RUN_GPU_USED_MIB, SONIC_COMMIT
+  MAX_RUN_GPU_USED_MIB, SONIC_COMMIT, SONIC_TEACHER_CHECKPOINT
 EOF
 }
 
@@ -1637,6 +1704,8 @@ main() {
     prepare-bones-subset) phase_prepare_bones_subset ;;
     prepare-overfit-reference-subset) phase_prepare_overfit_reference_subset ;;
     smoke-train) phase_smoke_train ;;
+    dagger-smoke) phase_dagger smoke ;;
+    dagger-pilot) phase_dagger pilot ;;
     verify-minimal) phase_verify_minimal ;;
     status) phase_status ;;
     setup-minimal)
