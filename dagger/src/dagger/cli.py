@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import pickle
+import shutil
 import subprocess
 import sys
 import time
@@ -802,6 +803,794 @@ def _run_cvae(config, run_dir: Path, device: torch.device, args_cli, prepared: d
     return env, manifest
 
 
+def _load_kl2_motion_manifest(config) -> dict:
+    raw = config.dagger.get("motion_manifest", None)
+    if raw is None:
+        raise ValueError("cvae_kl2 requires dagger.motion_manifest")
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        path = (Path(__file__).resolve().parents[2] / path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"CVAE KL2 motion manifest is missing: {path}")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    keys = [str(value) for value in manifest.get("motion_keys", [])]
+    groups = [
+        [str(value) for value in group]
+        for group in manifest.get("motion_groups", [])
+    ]
+    pilot = [str(value) for value in manifest.get("pilot_motion_keys", [])]
+    if len(keys) != 32:
+        raise ValueError(f"expected 32 aligned motion keys, found {len(keys)}")
+    if not groups or any(len(group) != 8 for group in groups):
+        raise ValueError("motion_groups must contain 8-key groups")
+    flattened = [key for group in groups for key in group]
+    if sorted(flattened) != sorted(keys):
+        raise ValueError("motion_groups do not partition the 32 motion keys")
+    if not pilot or not set(pilot).issubset(set(keys)):
+        raise ValueError("pilot_motion_keys must be a non-empty subset of motion_keys")
+    motion_file = config.dagger.get("motion_file", None)
+    if motion_file is not None:
+        motion_dir = Path(str(motion_file)).expanduser().resolve()
+        if motion_dir.is_dir():
+            missing = [
+                key for key in keys if not (motion_dir / f"{key}.pkl").is_file()
+            ]
+            if missing:
+                raise FileNotFoundError(
+                    f"motion files are missing from {motion_dir}: {missing}"
+                )
+            manifest["_motion_file"] = str(motion_dir)
+    manifest["_path"] = str(path)
+    return manifest
+
+
+def _kl2_keys_for_round(mode: str, manifest: dict, round_index: int) -> list[str]:
+    if "smoke" in mode:
+        return [str(manifest["pilot_motion_keys"][0])]
+    if "pilot" in mode:
+        return [str(value) for value in manifest["pilot_motion_keys"]]
+    groups = manifest["motion_groups"]
+    return [str(value) for value in groups[int(round_index) % len(groups)]]
+
+
+def _create_cvae_env_for_keys(
+    config,
+    prepared: dict,
+    run_dir: Path,
+    keys: list[str],
+    args_cli,
+    device: torch.device,
+):
+    motion = prepared["motion"]
+    release_config = compose_release_config(
+        prepared["sonic_root"],
+        num_envs=len(keys),
+        seed=int(config.seed),
+        motion_file=motion["motion_file"],
+        smpl_motion_file=motion["smpl_motion_file"],
+        motion_keys=keys,
+        max_unique_motions=len(keys),
+        sample_unique_motions=True,
+        observation_corruption=motion["observation_corruption"],
+        events=motion["events"],
+        terminations=motion["terminations"],
+    )
+    release_config.manager_env.config.experiment_dir = str(run_dir)
+    release_config.manager_env.config.save_rendering_dir = str(run_dir / "renderings")
+    args_cli.num_envs = len(keys)
+    env = create_release_env(
+        release_config,
+        device=str(device),
+        args_cli=args_cli,
+        reference_terms=prepared["reference_terms"],
+    )
+    if int(env.num_envs) != len(keys):
+        raise RuntimeError(
+            f"created env has {env.num_envs} envs, expected {len(keys)}"
+        )
+    contract = SonicActionContract(env)
+    teacher = SonicReleaseTeacher(
+        config=release_config,
+        env=env,
+        checkpoint=str(config.teacher_checkpoint),
+        device=device,
+    )
+    return env, contract, teacher
+
+
+def _close_cvae_env(env) -> None:
+    if env is None:
+        return
+    try:
+        close = getattr(env, "close", None)
+        if callable(close):
+            close()
+    except Exception:
+        pass
+
+
+def _cvae_kl2_resume_state(run_dir: Path):
+    data_dir = run_dir / "data" / "dagger"
+    checkpoint_dir = run_dir / "checkpoints"
+    completed = []
+    round_index = 0
+    while True:
+        data_path = data_dir / f"round_{round_index:02d}.pt"
+        checkpoint_path = checkpoint_dir / f"round_{round_index:02d}.pt"
+        if data_path.is_file() and checkpoint_path.is_file():
+            completed.append((round_index, data_path, checkpoint_path))
+            round_index += 1
+        else:
+            break
+    metrics_path = run_dir / "manifests" / "dagger_cvae_kl2_metrics.partial.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.is_file() else []
+    if len(metrics) < len(completed):
+        for round_index, _data_path, checkpoint_path in completed[len(metrics) :]:
+            payload = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=False
+            )
+            metrics.append(
+                {
+                    "round": int(round_index),
+                    "beta": payload.get("beta"),
+                    "motion_keys": list(payload.get("motion_keys") or []),
+                    "samples": payload.get("sample_count"),
+                    "teacher_executed_ratio": None,
+                    "student_executed_ratio": None,
+                    "history_steps_mean": None,
+                    "train": None,
+                    "student_only": payload.get("eval_metrics") or {},
+                    "motion_coverage": payload.get("motion_coverage") or {},
+                    "reconstructed_from_checkpoint": True,
+                }
+            )
+    return completed, metrics
+
+
+def _cvae_group_reference_rmse(
+    metrics: dict | None, keys: list[str]
+) -> float | None:
+    if not metrics:
+        return None
+    by_motion = metrics.get("teacher_action_rmse_by_motion", {})
+    values = []
+    for key in keys:
+        value = by_motion.get(str(key))
+        if value is None:
+            continue
+        score = float(value.get("teacher_action_rmse", 0.0))
+        if score > 0.0:
+            values.append(score)
+    if values:
+        return sum(values) / len(values)
+    overall = metrics.get("teacher_action_rmse")
+    return float(overall) if overall is not None and float(overall) > 0.0 else None
+
+
+def _cvae_motion_weights(eval_metrics: dict | None) -> dict[str, float] | None:
+    by_motion = (eval_metrics or {}).get("teacher_action_rmse_by_motion", {})
+    rates = {
+        str(key): float(value.get("termination_rate", 0.0))
+        for key, value in by_motion.items()
+    }
+    maximum = max(rates.values()) if rates else 0.0
+    if maximum <= 0.0:
+        return None
+    return {key: 1.0 + 3.0 * rate / maximum for key, rate in rates.items()}
+
+
+def _merge_cvae_eval_metrics(results: list[dict]) -> dict | None:
+    if not results:
+        return None
+    weights = [
+        float(result.get("steps", 0.0)) * max(1.0, float(result.get("num_envs", 1.0)))
+        for result in results
+    ]
+    total_weight = sum(weights) or 1.0
+    merged_by_motion: dict[str, dict] = {}
+    for result in results:
+        for key, value in result.get("teacher_action_rmse_by_motion", {}).items():
+            merged_by_motion[str(key)] = value
+
+    def weighted(key: str) -> float:
+        return sum(
+            float(result.get(key, 0.0)) * weight
+            for result, weight in zip(results, weights)
+        ) / total_weight
+
+    return {
+        "steps": max(float(result.get("steps", 0.0)) for result in results),
+        "num_envs": sum(int(result.get("num_envs", 0)) for result in results),
+        "done_count": sum(float(result.get("done_count", 0.0)) for result in results),
+        "mean_reward": weighted("mean_reward"),
+        "teacher_action_rmse": weighted("teacher_action_rmse"),
+        "teacher_action_rmse_raw": weighted("teacher_action_rmse_raw"),
+        "teacher_action_rmse_normalized": weighted("teacher_action_rmse_normalized"),
+        "teacher_action_rmse_by_motion": merged_by_motion,
+        "termination_rate": weighted("termination_rate"),
+        "mean_episode_length": weighted("mean_episode_length"),
+        "max_episode_length": max(
+            float(result.get("max_episode_length", 0.0)) for result in results
+        ),
+        "survival_ratio": weighted("survival_ratio"),
+        "action_saturation_ratio": weighted("action_saturation_ratio"),
+        "student_action_abs_max": max(
+            float(result.get("student_action_abs_max", 0.0)) for result in results
+        ),
+        "teacher_action_abs_max": max(
+            float(result.get("teacher_action_abs_max", 0.0)) for result in results
+        ),
+        "executed_action_abs_max": max(
+            float(result.get("executed_action_abs_max", 0.0)) for result in results
+        ),
+        "action_clip_error_max": max(
+            float(result.get("action_clip_error_max", 0.0)) for result in results
+        ),
+        "grouped_eval": True,
+        "group_count": len(results),
+    }
+
+
+def _cvae_imitation_gate(
+    baseline: dict | None,
+    final: dict | None,
+    *,
+    required_motions: int,
+) -> dict:
+    if not baseline or not final:
+        return {"pass": False, "reason": "missing baseline or final metrics"}
+    baseline_rmse = baseline.get("teacher_action_rmse")
+    final_rmse = final.get("teacher_action_rmse")
+    if baseline_rmse is None or final_rmse is None or float(baseline_rmse) <= 0.0:
+        return {"pass": False, "reason": "invalid teacher RMSE"}
+    overall_ratio = float(final_rmse) / float(baseline_rmse)
+    baseline_by = baseline.get("teacher_action_rmse_by_motion", {})
+    final_by = final.get("teacher_action_rmse_by_motion", {})
+    per_motion = {}
+    improved = 0
+    for key, baseline_value in baseline_by.items():
+        final_value = final_by.get(key)
+        if final_value is None:
+            continue
+        base = float(baseline_value.get("teacher_action_rmse", 0.0))
+        value = float(final_value.get("teacher_action_rmse", 0.0))
+        ratio = value / base if base > 0.0 else float("inf")
+        passed = bool(base > 0.0 and ratio <= 0.7)
+        if passed:
+            improved += 1
+        per_motion[key] = {
+            "baseline_teacher_action_rmse": base,
+            "final_teacher_action_rmse": value,
+            "ratio": ratio,
+            "pass": passed,
+        }
+    termination_ok = float(final.get("termination_rate", 1.0)) <= float(
+        baseline.get("termination_rate", 0.0)
+    ) + 1.0e-9
+    saturation_ok = float(final.get("action_saturation_ratio", 1.0)) < 0.05
+    passed = bool(
+        overall_ratio <= 0.5
+        and improved >= int(required_motions)
+        and termination_ok
+        and saturation_ok
+    )
+    return {
+        "pass": passed,
+        "overall_ratio": overall_ratio,
+        "overall_rule": "final <= 0.5 * baseline",
+        "required_motion_improvements": int(required_motions),
+        "motion_improvements": improved,
+        "per_motion_rule": "final <= 0.7 * baseline",
+        "termination_ok": termination_ok,
+        "saturation_ok": saturation_ok,
+        "per_motion": per_motion,
+    }
+
+
+def _is_oom(error: BaseException) -> bool:
+    return isinstance(error, torch.cuda.OutOfMemoryError) or "out of memory" in str(
+        error
+    ).lower()
+
+
+def _evaluate_cvae_full(
+    config,
+    prepared: dict,
+    run_dir: Path,
+    args_cli,
+    device: torch.device,
+    student,
+    manifest: dict,
+    dataset,
+    eval_steps: int,
+    *,
+    label: str,
+) -> dict:
+    from .core.cvae_loop import CvaeDaggerLoop
+
+    keys = [str(value) for value in manifest["motion_keys"]]
+
+    def evaluate(env, contract, teacher, motion_group: list[str]) -> dict:
+        student.action_contract = contract
+        student.set_action_clip_value(config.student.get("action_clip_value", 20.0))
+        loop = CvaeDaggerLoop(
+            env=env,
+            teacher=teacher,
+            student=student,
+            action_contract=contract,
+            num_envs=int(env.num_envs),
+            rollout_steps=int(eval_steps),
+            run_dir=run_dir,
+            seed=int(config.seed),
+            state_mean=student.state_mean,
+            state_std=student.state_std,
+            action_mean=student.action_mean,
+            action_std=student.action_std,
+            dataset=dataset,
+            motion_group=motion_group,
+        )
+        return loop.evaluate_student_only(
+            int(eval_steps), latent_mode="fixed_standard_normal"
+        )
+
+    try:
+        env, contract, teacher = _create_cvae_env_for_keys(
+            config, prepared, run_dir, keys, args_cli, device
+        )
+        try:
+            metrics = evaluate(env, contract, teacher, keys)
+            return {"label": label, "mode": "32env", "fallback": False, "metrics": metrics}
+        finally:
+            _close_cvae_env(env)
+    except Exception as error:
+        groups = []
+        for group in manifest["motion_groups"]:
+            motion_group = [str(value) for value in group]
+            env, contract, teacher = _create_cvae_env_for_keys(
+                config, prepared, run_dir, motion_group, args_cli, device
+            )
+            try:
+                groups.append(evaluate(env, contract, teacher, motion_group))
+            finally:
+                _close_cvae_env(env)
+        return {
+            "label": label,
+            "mode": "4x8_fallback",
+            "fallback": True,
+            "oom": _is_oom(error),
+            "reason": str(error),
+            "groups": groups,
+            "metrics": _merge_cvae_eval_metrics(groups),
+        }
+
+
+def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
+    from .adapters.cvae_student import CvaeStudentAdapter
+    from .core.cvae_dataset import CvaeDaggerDataset
+    from .core.cvae_loop import CvaeDaggerLoop
+
+    manifest = _load_kl2_motion_manifest(config)
+    mode = str(config.mode)
+    smoke = "smoke" in mode
+    pilot = "pilot" in mode
+    formal = not smoke and not pilot
+    beta_schedule = [float(value) for value in config.dagger.beta_schedule]
+    if not beta_schedule:
+        raise ValueError("beta_schedule must not be empty")
+    train_steps_per_round = int(config.student.train_steps_per_round)
+    eval_steps = int(config.dagger.get("eval_steps", 192))
+    rounds_per_process = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
+    resume = bool(os.environ.get("DAGGER_RESUME_RUN", "").strip())
+    completed, metrics = _cvae_kl2_resume_state(run_dir) if resume else ([], [])
+    start_round = len(completed)
+    total_rounds = len(beta_schedule)
+    if start_round > total_rounds:
+        raise ValueError("resume has more completed rounds than beta_schedule")
+    if start_round and len(metrics) < start_round:
+        raise RuntimeError(
+            "partial metrics are missing for completed rounds; refusing to resume "
+            "with an incomplete gate history"
+        )
+    metrics = metrics[:start_round]
+    if start_round >= total_rounds:
+        full_manifest = run_dir / "manifests" / "dagger_cvae_kl2_manifest.json"
+        if full_manifest.is_file():
+            return None, {
+                "marker": "dagger_cvae_kl2_execution.ok",
+                "complete": True,
+                "manifest": str(full_manifest),
+            }
+        raise RuntimeError("all rounds completed but final manifest is missing")
+    end_round = (
+        total_rounds
+        if rounds_per_process <= 0
+        else min(total_rounds, start_round + rounds_per_process)
+    )
+    dataset = (
+        CvaeDaggerDataset.load_rounds([item[1] for item in completed])
+        if completed
+        else CvaeDaggerDataset()
+    )
+    student = CvaeStudentAdapter(
+        checkpoint=config.student.checkpoint,
+        model_config=config.student.model_config,
+        normalization_run=config.student.normalization_run,
+        action_contract=None,
+        device=device,
+        cvae_root=config.student.get("cvae_root", None),
+        seed=int(config.seed),
+        learning_rate=float(config.student.learning_rate),
+        weight_decay=float(config.student.weight_decay),
+        train_steps=train_steps_per_round,
+        batch_size=int(config.student.micro_batch),
+        source_mix=float(config.student.source_mix),
+        source_mix_mode=str(config.student.get("source_mix_mode", "random")),
+        mask_seed=int(config.student.get("mask_seed", 20261024)),
+        kl_beta=float(config.student.kl_beta),
+        kl_warmup=int(config.student.kl_warmup),
+        source_dataset_run=config.student.get(
+            "source_dataset_run", config.student.normalization_run
+        ),
+        source_dataset_kind=str(
+            config.student.get("source_dataset_kind", "long_horizon")
+        ),
+        source_mask_mode=str(config.student.get("source_mask_mode", "fixed")),
+        source_causal_fraction=float(
+            config.student.get("source_causal_fraction", 0.25)
+        ),
+        teacher_mode=str(config.student.get("teacher_mode", "dual")),
+        source_identity=manifest,
+        state_weight=float(config.student.get("state_weight", 1.0)),
+        contact_weight=float(config.student.get("contact_weight", 0.1)),
+        teacher_sn_weight=float(config.student.get("teacher_sn_weight", 0.5)),
+        teacher_pm_weight=float(config.student.get("teacher_pm_weight", 0.5)),
+        action_clip_value=config.student.get("action_clip_value", 20.0),
+        lr_schedule=str(config.student.get("lr_schedule", "cosine")),
+        warmup_steps=int(config.student.get("warmup_steps", 500)),
+        min_lr_ratio=float(config.student.get("min_lr_ratio", 0.01)),
+        load_optimizer=False,
+        raise_on_clip_error=bool(
+            config.student.get("raise_on_clip_error", False)
+        ),
+    )
+    if completed:
+        student.load_round_checkpoint(completed[-1][2], load_optimizer=True)
+    if float(config.student.source_mix) > 0:
+        student._load_source_dataset()
+    total_train_steps = total_rounds * train_steps_per_round
+    global_step_offset = start_round * train_steps_per_round
+    partial_manifest_path = (
+        run_dir / "manifests" / "dagger_cvae_kl2_manifest.partial.json"
+    )
+    source_baseline_32 = None
+    best_teacher_rmse = None
+    best_survival = None
+    if partial_manifest_path.is_file():
+        try:
+            previous = json.loads(
+                partial_manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            previous = {}
+        source_baseline_32 = previous.get("source_baseline_32")
+        best_teacher_rmse = previous.get("best_teacher_rmse")
+        best_survival = previous.get("best_survival")
+    if formal and start_round == 0:
+        source_baseline_32 = _evaluate_cvae_full(
+            config,
+            prepared,
+            run_dir,
+            args_cli,
+            device,
+            student,
+            manifest,
+            dataset,
+            eval_steps,
+            label="source_baseline_32",
+        )
+        _write_json(
+            partial_manifest_path,
+            {
+                "status": "running",
+                "start_round": start_round,
+                "source_identity": student.source_identity,
+                "source_baseline_32": source_baseline_32,
+                "best_teacher_rmse": best_teacher_rmse,
+                "best_survival": best_survival,
+                "motion_manifest": manifest,
+            },
+        )
+    formal_reference_metrics = (
+        (source_baseline_32 or {}).get("metrics") if formal else None
+    )
+
+    for round_index in range(start_round, end_round):
+        keys = _kl2_keys_for_round(mode, manifest, round_index)
+        env, contract, teacher = _create_cvae_env_for_keys(
+            config, prepared, run_dir, keys, args_cli, device
+        )
+        try:
+            student.action_contract = contract
+            student.set_action_clip_value(
+                config.student.get("action_clip_value", 20.0)
+            )
+            loop = CvaeDaggerLoop(
+                env=env,
+                teacher=teacher,
+                student=student,
+                action_contract=contract,
+                num_envs=len(keys),
+                rollout_steps=int(config.dagger.rollout_steps),
+                run_dir=run_dir,
+                seed=int(config.seed),
+                state_mean=student.state_mean,
+                state_std=student.state_std,
+                action_mean=student.action_mean,
+                action_std=student.action_std,
+                dataset=dataset,
+                motion_group=keys,
+                mixture_mode=str(config.dagger.get("mixture_mode", "per_step")),
+            )
+            beta = beta_schedule[round_index]
+            round_data = loop.collect_round(round_index, beta)
+            if formal:
+                motion_weights = _cvae_motion_weights(
+                    (source_baseline_32 or {}).get("metrics")
+                )
+            else:
+                motion_weights = (
+                    _cvae_motion_weights(metrics[-1].get("student_only"))
+                    if metrics
+                    else None
+                )
+            train_metrics = student.train_on_dataset(
+                dataset,
+                round_index=round_index,
+                global_step_offset=global_step_offset,
+                total_training_steps=total_train_steps,
+                motion_weights=motion_weights,
+            )
+            eval_metrics = loop.evaluate_student_only(
+                eval_steps,
+                latent_mode="fixed_standard_normal",
+                round_index=round_index,
+            )
+            student.save(
+                run_dir / "checkpoints" / f"round_{round_index:02d}.pt",
+                round_index=round_index,
+                beta=beta,
+                motion_keys=keys,
+                eval_metrics=eval_metrics,
+                sample_count=int(round_data.count),
+                motion_coverage=dataset.motion_coverage(),
+            )
+            raw_teacher_score = float(
+                eval_metrics.get("teacher_action_rmse", float("inf"))
+            )
+            group_baseline = _cvae_group_reference_rmse(
+                formal_reference_metrics, keys
+            )
+            if formal and group_baseline is not None and group_baseline > 0.0:
+                teacher_score = raw_teacher_score / group_baseline
+                selection_scope = "source_baseline_group_relative"
+            else:
+                teacher_score = raw_teacher_score
+                selection_scope = (
+                    "same_motion_absolute" if not formal else "absolute_fallback"
+                )
+            if best_teacher_rmse is None or teacher_score < float(
+                best_teacher_rmse.get("score", float("inf"))
+            ):
+                best_teacher_rmse = {
+                    "round": round_index,
+                    "global_step": int(student.global_step),
+                    "score": teacher_score,
+                    "raw_teacher_action_rmse": raw_teacher_score,
+                    "group_baseline_rmse": group_baseline,
+                    "selection_scope": selection_scope,
+                    "metrics": eval_metrics,
+                }
+            survival_key = (
+                float(eval_metrics.get("survival_ratio", 0.0)),
+                float(eval_metrics.get("mean_episode_length", 0.0)),
+                -float(eval_metrics.get("termination_rate", 1.0)),
+            )
+            previous_survival_key = (
+                (
+                    float(best_survival.get("metrics", {}).get("survival_ratio", 0.0)),
+                    float(
+                        best_survival.get("metrics", {}).get(
+                            "mean_episode_length", 0.0
+                        )
+                    ),
+                    -float(
+                        best_survival.get("metrics", {}).get(
+                            "termination_rate", 1.0
+                        )
+                    ),
+                )
+                if best_survival
+                else None
+            )
+            if previous_survival_key is None or survival_key > previous_survival_key:
+                best_survival = {
+                    "round": round_index,
+                    "global_step": int(student.global_step),
+                    "survival_ratio": survival_key[0],
+                    "mean_episode_length": survival_key[1],
+                    "termination_rate": -survival_key[2],
+                    "metrics": eval_metrics,
+                }
+            teacher_ratio = float(
+                round_data.tensors["mixture_teacher"].float().mean()
+            )
+            history_mean = (
+                float(round_data.tensors["history_steps"].float().mean())
+                if "history_steps" in round_data.tensors
+                else None
+            )
+            metrics.append(
+                {
+                    "round": round_index,
+                    "beta": beta,
+                    "motion_keys": keys,
+                    "samples": int(round_data.count),
+                    "teacher_executed_ratio": teacher_ratio,
+                    "student_executed_ratio": 1.0 - teacher_ratio,
+                    "history_steps_mean": history_mean,
+                    "train": train_metrics,
+                    "student_only": eval_metrics,
+                    "motion_coverage": dataset.motion_coverage(),
+                }
+            )
+            global_step_offset += train_steps_per_round
+            _write_json(
+                run_dir / "manifests" / "dagger_cvae_kl2_metrics.partial.json",
+                metrics,
+            )
+            _write_json(
+                partial_manifest_path,
+                {
+                    "status": "running",
+                    "start_round": start_round,
+                    "completed_round": round_index,
+                    "source_identity": student.source_identity,
+                    "source_baseline_32": source_baseline_32,
+                    "best_teacher_rmse": best_teacher_rmse,
+                    "best_survival": best_survival,
+                    "motion_manifest": manifest,
+                },
+            )
+        finally:
+            _close_cvae_env(env)
+
+    complete = end_round >= total_rounds
+    final_32 = None
+    gate = None
+    if complete:
+        if formal:
+            final_32 = _evaluate_cvae_full(
+                config,
+                prepared,
+                run_dir,
+                args_cli,
+                device,
+                student,
+                manifest,
+                dataset,
+                eval_steps,
+                label="final_32",
+            )
+            gate = _cvae_imitation_gate(
+                (source_baseline_32 or {}).get("metrics"),
+                (final_32 or {}).get("metrics"),
+                required_motions=24,
+            )
+        else:
+            first = metrics[0].get("student_only") if metrics else None
+            last = metrics[-1].get("student_only") if metrics else None
+            gate = _cvae_imitation_gate(first, last, required_motions=3)
+    best_checkpoints: dict[str, str] = {}
+    if complete:
+        for name, info in (
+            ("best_teacher_rmse.pt", best_teacher_rmse),
+            ("best_survival.pt", best_survival),
+        ):
+            if not info:
+                continue
+            source = (
+                run_dir / "checkpoints" / f"round_{int(info['round']):02d}.pt"
+            )
+            if not source.is_file():
+                continue
+            destination = run_dir / "checkpoints" / name
+            shutil.copy2(source, destination)
+            best_checkpoints[name] = str(destination)
+    information_contract = (
+        estimate_teacher_identifiability(dataset)
+        if dataset.rounds
+        else {
+            "available": False,
+            "group_count": 0,
+            "repeated_group_count": 0,
+            "teacher_not_identifiable": None,
+            "note": "no DAgger samples",
+        }
+    )
+    information_contract_pass = (
+        None
+        if not information_contract.get("available")
+        else not bool(information_contract.get("teacher_not_identifiable"))
+    )
+    manifest_payload = {
+        "format_version": "dagger_cvae_kl2_manifest_v1",
+        "mode": mode,
+        "execution_pass": True,
+        "complete": bool(complete),
+        "quality_pass": bool(gate["pass"]) if gate else None,
+        "quality_scope": "same_motion_teacher_action_imitation",
+        "rounds_completed": [int(item["round"]) for item in metrics],
+        "beta_schedule": beta_schedule,
+        "motion_manifest": manifest,
+        "source_identity": student.source_identity,
+        "source_dataset_run": str(student.source_dataset_run),
+        "normalization_run": str(student.normalization_run),
+        "normalization_sha256": student.normalization_sha256,
+        "source_mix_exact": bool(student.source_mix_exact),
+        "source_hash_mismatch": student.source_hash_mismatch,
+        "student_checkpoint": str(student.checkpoint_path),
+        "student_checkpoint_sha256": student.checkpoint_sha256,
+        "teacher_checkpoint": str(
+            Path(str(config.teacher_checkpoint)).expanduser().resolve()
+        ),
+        "eval_steps": int(eval_steps),
+        "source_baseline_32": source_baseline_32,
+        "final_32": final_32,
+        "best_teacher_rmse": best_teacher_rmse,
+        "best_survival": best_survival,
+        "best_checkpoints": best_checkpoints,
+        "imitation_gate": gate,
+        "information_contract": information_contract,
+        "information_contract_pass": information_contract_pass,
+        "motion_coverage": dataset.motion_coverage(),
+        "rounds": metrics,
+        "quality_note": (
+            "No-reference CVAE; same-motion teacher-Action imitation only. "
+            "The 192-step Isaac survival metric is diagnostic."
+        ),
+    }
+    _write_json(
+        run_dir / "manifests" / "dagger_cvae_kl2_metrics.json", metrics
+    )
+    _write_json(
+        run_dir / "manifests" / "dagger_cvae_kl2_manifest.json", manifest_payload
+    )
+    if not complete:
+        (run_dir / "markers" / "dagger_cvae_kl2_shard.ok").write_text(
+            "execution_pass=true\n", encoding="utf-8"
+        )
+        return None, {
+            "marker": "dagger_cvae_kl2_shard.ok",
+            "complete": False,
+            "rounds_completed": [int(item["round"]) for item in metrics],
+        }
+    (run_dir / "markers" / "dagger_cvae_kl2_execution.ok").write_text(
+        "execution_pass=true\n", encoding="utf-8"
+    )
+    if gate and gate.get("pass"):
+        (run_dir / "markers" / "dagger_cvae_kl2_imitation.ok").write_text(
+            "quality_pass=true\n", encoding="utf-8"
+        )
+    return None, {
+        "marker": (
+            "dagger_cvae_kl2_smoke.ok" if smoke else "dagger_cvae_kl2_execution.ok"
+        ),
+        "complete": True,
+        "quality_pass": manifest_payload["quality_pass"],
+        "imitation_gate": gate,
+    }
+
+
 def main() -> None:
     import faulthandler
     import signal
@@ -851,7 +1640,10 @@ def main() -> None:
     env = None
     exit_code = 1
     try:
-        if str(config.mode).startswith("cvae"):
+        if str(config.mode).startswith("cvae_kl2"):
+            env, manifest = _run_cvae_kl2(config, run_dir, device, args_cli, prepared)
+            marker_name = manifest.get("marker", "dagger_cvae_kl2_execution.ok")
+        elif str(config.mode).startswith("cvae"):
             env, manifest = _run_cvae(config, run_dir, device, args_cli, prepared)
             marker_name = "dagger_cvae_smoke.ok" if str(config.mode) == "cvae_smoke" else "dagger_cvae_execution.ok"
         elif str(config.mode) == "mlp_render":

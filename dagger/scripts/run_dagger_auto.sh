@@ -4,9 +4,9 @@ set -u
 
 MODE="${1:-mlp-pilot}"
 case "$MODE" in
-  mlp-pilot|mlp-long|mlp-intensive) ;;
+  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-formal) ;;
   *)
-    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive" >&2
+    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-formal" >&2
     exit 2
     ;;
 esac
@@ -50,8 +50,13 @@ for ((shard = 1; shard <= MAX_SHARDS; shard++)); do
     exit 1
   fi
 
-  METRICS="$RUN/manifests/dagger_mlp_metrics.partial.json"
-  FINAL_MANIFEST="$RUN/manifests/dagger_mlp_manifest.json"
+  if [[ "$MODE" == cvae-kl2-* ]]; then
+    METRICS="$RUN/manifests/dagger_cvae_kl2_metrics.partial.json"
+    FINAL_MANIFEST="$RUN/manifests/dagger_cvae_kl2_manifest.json"
+  else
+    METRICS="$RUN/manifests/dagger_mlp_metrics.partial.json"
+    FINAL_MANIFEST="$RUN/manifests/dagger_mlp_manifest.json"
+  fi
   COMPLETED=0
   if [[ -f "$METRICS" ]]; then
     COMPLETED="$("$PYTHON" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$METRICS" 2>/dev/null || echo 0)"
@@ -61,7 +66,11 @@ for ((shard = 1; shard <= MAX_SHARDS; shard++)); do
     COMPLETE="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("complete", False))' "$FINAL_MANIFEST" 2>/dev/null || echo False)"
     if [[ "$COMPLETE" == "True" ]]; then
       echo "[auto] complete run=$RUN"
-      "$PYTHON" -c 'import json,sys; d=json.load(open(sys.argv[1])); print("memorization_pass=", d.get("memorization_pass")); print("rounds=", len(d.get("rounds", [])))' "$FINAL_MANIFEST"
+      if [[ "$MODE" == cvae-kl2-* ]]; then
+        "$PYTHON" -c 'import json,sys; d=json.load(open(sys.argv[1])); print("quality_pass=", d.get("quality_pass")); print("rounds=", len(d.get("rounds", [])))' "$FINAL_MANIFEST"
+      else
+        "$PYTHON" -c 'import json,sys; d=json.load(open(sys.argv[1])); print("memorization_pass=", d.get("memorization_pass")); print("rounds=", len(d.get("rounds", [])))' "$FINAL_MANIFEST"
+      fi
       exit 0
     fi
   fi

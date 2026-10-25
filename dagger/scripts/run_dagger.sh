@@ -7,6 +7,9 @@ case "$MODE" in
   smoke|pilot) CONFIG_MODE="$MODE" ;;
   cvae-smoke) CONFIG_MODE="cvae_smoke" ;;
   cvae-pilot) CONFIG_MODE="cvae_pilot" ;;
+  cvae-kl2-smoke) CONFIG_MODE="cvae_kl2_smoke" ;;
+  cvae-kl2-pilot) CONFIG_MODE="cvae_kl2_pilot" ;;
+  cvae-kl2-formal) CONFIG_MODE="cvae_kl2_formal" ;;
   mlp-smoke) CONFIG_MODE="mlp_smoke" ;;
   mlp-pilot) CONFIG_MODE="mlp_pilot" ;;
   mlp-debug) CONFIG_MODE="mlp_debug" ;;
@@ -14,9 +17,10 @@ case "$MODE" in
   mlp-repro) CONFIG_MODE="mlp_repro" ;;
   mlp-long) CONFIG_MODE="mlp_long" ;;
   mlp-intensive) CONFIG_MODE="mlp_intensive" ;;
+  mlp-dynamic2) CONFIG_MODE="mlp_dynamic2" ;;
   mlp-render) CONFIG_MODE="mlp_render" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-render" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-formal|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-render" >&2
   exit 2
     ;;
 esac
@@ -80,7 +84,7 @@ if ! flock -n 9; then
 fi
 echo "[run_dagger] acquired $LOCK_PATH"
 
-if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-render ]]; then
+if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-dynamic2 || "$MODE" == mlp-render ]]; then
   test -d "$DAGGER_MOTION_FILE" || {
     echo "DAGGER_MOTION_FILE is missing or not a directory: $DAGGER_MOTION_FILE" >&2
     exit 2
@@ -113,6 +117,31 @@ if [[ "$MODE" == cvae-smoke || "$MODE" == cvae-pilot ]]; then
     echo "CVAE base dataset run is missing: $CVAE_BASE_DATASET_RUN" >&2
     exit 2
   }
+fi
+
+if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-kl2-formal ]]; then
+  export CVAE_KL2_MOTION_FILE="${CVAE_KL2_MOTION_FILE:-/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered}"
+  test -d "$CVAE_KL2_MOTION_FILE" || {
+    echo "CVAE KL2 motion directory is missing: $CVAE_KL2_MOTION_FILE" >&2
+    exit 2
+  }
+  export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest.json}"
+  test -s "$DAGGER_MOTION_MANIFEST" || {
+    echo "CVAE KL2 motion manifest is missing: $DAGGER_MOTION_MANIFEST" >&2
+    exit 2
+  }
+  if [[ -n "${CVAE_STUDENT_CHECKPOINT:-}" ]]; then
+    test -s "$CVAE_STUDENT_CHECKPOINT" || {
+      echo "CVAE student checkpoint is missing or empty: $CVAE_STUDENT_CHECKPOINT" >&2
+      exit 2
+    }
+  fi
+  if [[ -n "${CVAE_KL2_DATASET_RUN:-}" ]]; then
+    test -d "$CVAE_KL2_DATASET_RUN" || {
+      echo "CVAE KL2 dataset run is missing: $CVAE_KL2_DATASET_RUN" >&2
+      exit 2
+    }
+  fi
 fi
 
 LOG_PATH="$SONIC_RUNS_ROOT/dagger_${MODE}_command_$(date +%Y%m%d_%H%M%S).log"
