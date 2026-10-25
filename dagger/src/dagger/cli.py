@@ -477,35 +477,63 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         clip_value = None
     elif clip_value is None:
         clip_value = 20.0
-    hidden_dims = tuple(
-        int(value)
-        for value in config.student.get("hidden_dims", (2048, 2048, 1024, 1024, 512, 512))
-    )
-    checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
-    if not checkpoint.is_file():
-        raise FileNotFoundError(f"render checkpoint is missing: {checkpoint}")
-    student = PlainMlpStudent(
-        observation_dim=observation_dim,
-        action_dim=action_dim,
-        device=device,
-        hidden_dims=hidden_dims,
-        train_steps=0,
-        batch_size=1,
-        seed=int(config.seed),
-        input_terms=input_terms,
-        freeze_normalization=True,
-        motion_keys=prepared["motion"]["loaded_keys"],
-    )
-    payload = student.load(checkpoint)
-    if payload.get("input_terms") and tuple(payload["input_terms"]) != input_terms:
-        raise ValueError("render checkpoint input_terms do not match current contract")
-    checkpoint_motions = set(payload.get("motion_keys") or [])
-    selected_motions = set(prepared["motion"]["loaded_keys"])
-    if checkpoint_motions and selected_motions and not selected_motions.issubset(checkpoint_motions):
-        raise ValueError(
-            "render motion is not among the checkpoint training motions: "
-            f"{sorted(selected_motions - checkpoint_motions)}"
+    policy_kind = str(config.dagger.get("render_policy", "mlp")).lower()
+    if policy_kind not in {"mlp", "sonic"}:
+        raise ValueError("render_policy must be mlp or sonic")
+    video_name = "sonic_policy.mp4" if policy_kind == "sonic" else "mlp_policy.mp4"
+    if policy_kind == "mlp":
+        hidden_dims = tuple(
+            int(value)
+            for value in config.student.get("hidden_dims", (2048, 2048, 1024, 1024, 512, 512))
         )
+        checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"render checkpoint is missing: {checkpoint}")
+        student = PlainMlpStudent(
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+            device=device,
+            hidden_dims=hidden_dims,
+            train_steps=0,
+            batch_size=1,
+            seed=int(config.seed),
+            input_terms=input_terms,
+            freeze_normalization=True,
+            motion_keys=prepared["motion"]["loaded_keys"],
+        )
+        payload = student.load(checkpoint)
+        if payload.get("input_terms") and tuple(payload["input_terms"]) != input_terms:
+            raise ValueError("render checkpoint input_terms do not match current contract")
+        checkpoint_motions = set(payload.get("motion_keys") or [])
+        selected_motions = set(prepared["motion"]["loaded_keys"])
+        if checkpoint_motions and selected_motions and not selected_motions.issubset(checkpoint_motions):
+            raise ValueError(
+                "render motion is not among the checkpoint training motions: "
+                f"{sorted(selected_motions - checkpoint_motions)}"
+            )
+
+        def policy_action(observation_value, done_value):
+            return student.act(student.observe(observation_value))
+
+        checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+        policy_source = "dagger_mlp_policy_rollout"
+    else:
+        checkpoint = Path(str(config.teacher_checkpoint)).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"SONIC teacher checkpoint is missing: {checkpoint}")
+        teacher = SonicReleaseTeacher(
+            config=prepared["release_config"],
+            env=env,
+            checkpoint=str(checkpoint),
+            device=device,
+        )
+        teacher.reset(env.num_envs)
+
+        def policy_action(observation_value, done_value):
+            return teacher.act(observation_value, done_value)
+
+        checkpoint_sha256 = teacher.checkpoint_sha256
+        policy_source = "sonic_release_policy_rollout"
 
     actual_env = getattr(env.env, "env", env.env)
     scene = actual_env.scene
@@ -535,8 +563,7 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         dof_frames.append(dof_pos)
         root_pos_frames.append(root_pos)
         root_quat_frames.append(root_quat)
-        student_input = student.observe(observation)
-        action = student.act(student_input)
+        action = policy_action(observation, done)
         if finite_bounds:
             low = action_low[..., : action.shape[-1]]
             high = action_high[..., : action.shape[-1]]
@@ -565,19 +592,20 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         "fps": fps,
         "num_joints": int(dof_frames[0].shape[0]),
         "total_frames": len(dof_frames),
-        "source": "dagger_mlp_policy_rollout",
+        "source": policy_source,
     }
     trajectory_path = run_dir / "data" / "000000.trajectory.pkl"
     trajectory_path.parent.mkdir(parents=True, exist_ok=True)
     with trajectory_path.open("wb") as handle:
         pickle.dump(trajectory, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    video_path = run_dir / "videos" / "mlp_policy.mp4"
+    video_path = run_dir / "videos" / video_name
     manifest = {
-        "format_version": "dagger_mlp_render_manifest_v1",
+        "format_version": "dagger_policy_render_manifest_v1",
         "mode": str(config.mode),
+        "policy_kind": policy_kind,
         "sonic_repo_root": str(prepared["sonic_root"]),
         "checkpoint": str(checkpoint),
-        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "checkpoint_sha256": checkpoint_sha256,
         "motion_keys": prepared["motion"]["loaded_keys"],
         "input_terms": list(input_terms),
         "observation_dim": observation_dim,
@@ -599,7 +627,7 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         "execution_pass": True,
         "quality_pass": None,
     }
-    _write_json(run_dir / "manifests" / "dagger_mlp_render_manifest.json", manifest)
+    _write_json(run_dir / "manifests" / "dagger_policy_render_manifest.json", manifest)
     print(
         f"[dagger] render rollout written trajectory={trajectory_path} "
         f"frames={len(dof_frames)} terminated={terminated} video={video_path}",

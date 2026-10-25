@@ -307,6 +307,41 @@ bash scripts/render_mlp_policy.sh "$CKPT" fishing_standing_start_R_001__A502 192
 视频是 **Isaac policy rollout 的 MuJoCo 运动学渲染**，不是 CVAE replay65，
 也不是 MuJoCo torque 物理重放。若 policy 在 rollout 中终止，视频会记录到终止前的帧。
 
+### SONIC 与 MLP 同动作对比
+
+`render_sonic_policy.sh` 用冻结 release teacher 在同一 motion 上闭环执行；
+`render_policy_compare.sh` 会先渲染 SONIC、再渲染 MLP，并用 ffmpeg 生成
+**左 SONIC、右 MLP** 的并排视频：
+
+```bash
+bash scripts/render_policy_compare.sh "$CKPT" <motion_key> 192
+```
+
+四个 motion 全部渲染：
+
+```bash
+RUN=/home/helloworld/bly/runs/dagger_mlp_long_20261026_014151
+CKPT="$RUN/checkpoints/round_09.pt"
+KEYS=$("$PYTHON" -c "import json; d=json.load(open('$RUN/manifests/dagger_mlp_manifest.json')); print('\n'.join(d['motion_keys_loaded']))")
+
+while read -r KEY; do
+  bash scripts/render_policy_compare.sh "$CKPT" "$KEY" 192
+done <<< "$KEYS"
+```
+
+每个对比 run 输出：
+
+```text
+~/bly/runs/dagger_mlp_render_<timestamp>/
+├── videos/mlp_policy.mp4
+├── compare/sonic_left_mlp_right.mp4
+├── compare/compare_manifest.json
+└── markers/render.ok / render_sonic.ok / compare.ok
+```
+
+SONIC 与 MLP 是两次独立 Isaac rollout，各自记录自己的实际状态；对比视频只做
+MuJoCo 运动学并排，不是同状态扭矩对比，也不是闭环物理一致性证明。
+
 ## 当前状态
 
 | 项目 | 状态 |
@@ -320,6 +355,7 @@ bash scripts/render_mlp_policy.sh "$CKPT" fishing_standing_start_R_001__A502 192
 | plain MLP auto sharding | `run_dagger_auto.sh` 已实现；自动 resume/重试 |
 | plain MLP 192-step survival | 已加入 `max_episode_length`/`survival_ratio` 诊断；尚无通过结论 |
 | plain MLP policy video | `mlp_render` + `render_mlp_policy.sh` 已实现，Isaac rollout 后 MuJoCo 运动学渲染 |
+| SONIC vs MLP compare video | `render_sonic_policy.sh` + `render_policy_compare.sh` 已实现，左 SONIC 右 MLP |
 | same-motion memorization 门禁 | 2 轮 repro 为 true；完整 pilot 仍待评估 |
 | CVAE rolling window | 已实现并通过 Windows 单元测试 |
 | CVAE 动态 shard | 已实现并通过 shape 测试 |

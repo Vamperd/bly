@@ -8,6 +8,7 @@ teacher_checkpoint: ${oc.env:SONIC_TEACHER_CHECKPOINT}
 dagger:
   num_envs: 1
   action_clip_value: 20.0
+  render_policy: ${oc.env:DAGGER_RENDER_POLICY,mlp}
   render_steps: ${oc.env:DAGGER_RENDER_STEPS,192}
   motion_file: ${oc.env:DAGGER_MOTION_FILE}
   motion_key: ${oc.env:DAGGER_RENDER_MOTION_KEY,}
@@ -22,7 +23,7 @@ dagger:
   smpl_motion_file: zeros
 
 student:
-  checkpoint: ${oc.env:DAGGER_RENDER_CHECKPOINT}
+  checkpoint: ${oc.env:DAGGER_RENDER_CHECKPOINT,}
   hidden_dims: [2048, 2048, 1024, 1024, 512, 512]
   micro_batch: 1
   freeze_normalization: true

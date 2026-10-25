@@ -49,6 +49,7 @@ MODEL="$SONIC_REPO_ROOT/decoupled_wbc/control/robot_model/model_data/g1/g1_29dof
 test -f "$MODEL" || { echo "G1 MuJoCo model is missing: $MODEL" >&2; exit 2; }
 
 export SONIC_REPO_ROOT SONIC_RUNS_ROOT DAGGER_MOTION_FILE SONIC_TEACHER_CHECKPOINT
+export DAGGER_RENDER_POLICY=mlp
 export DAGGER_RENDER_CHECKPOINT="$CHECKPOINT"
 export DAGGER_RENDER_STEPS="$STEPS"
 export DAGGER_RENDER_MOTION_KEY="$MOTION_KEY"
