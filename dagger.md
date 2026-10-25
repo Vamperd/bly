@@ -1,4 +1,4 @@
-# SONIC teacher + CVAE DAgger 实施进度
+﻿# SONIC teacher + CVAE DAgger 实施进度
 
 最后更新：2026-10-26
 
@@ -86,7 +86,7 @@ Windows 已完成：
 - same-motion memorization 门禁测试；
 - SONIC reference term selection 和 motion key contract 测试。
 
-当前共 21 个 Windows 单元测试通过。
+当前共 22 个 Windows 单元测试通过。
 
 当前测试命令：
 
@@ -342,6 +342,309 @@ done <<< "$KEYS"
 SONIC 与 MLP 是两次独立 Isaac rollout，各自记录自己的实际状态；对比视频只做
 MuJoCo 运动学并排，不是同状态扭矩对比，也不是闭环物理一致性证明。
 
+## 当前 DAgger 训练流程（通俗版）
+
+### 一句话概括
+
+当前 plain MLP 做的事情不是“学一个世界模型”，也不是“预测未来 State”，而是：
+
+> 在 SONIC teacher 实际执行过的同一批 4 个 motion 上，让学生 MLP 在自己会走到的状态上，
+> 尽量输出和 teacher 一样的 29 维 raw Action。
+
+所以它本质上是 **在线查询 teacher 标签的行为克隆（DAgger）**。
+它不接 CVAE latent，不接 65-token State/Action 序列，不使用 future-State loss。
+
+### 1. 输入、输出和标签分别是什么
+
+```text
+MLP 输入:
+  actor_obs                                  # SONIC policy 的当前观测/历史
+  command_multi_future_nonflat               # G1 reference future command
+  motion_anchor_ori_b_mf_nonflat             # G1 reference anchor orientation
+
+MLP 输出:
+  29 维 raw Action                            # 与 env.action_space 对齐
+
+监督标签:
+  teacher_action = SonicReleaseTeacher.act(observation, done)
+```
+
+关键点：
+
+- `teacher_action` 是冻结的 release teacher 在当前 observation 上现场算出来的 Action；
+- 它不是 HDF5 里回放的旧 Action，也不是学生实际执行的 Action；
+- 即使当前环境执行的是学生 Action，标签仍然保存 teacher Action；
+- plain MLP 没有 future-State 标签；future-State loss 只属于 CVAE 路径；
+- 输入不包含 motion ID、package、outcome 或 teacher 的 encoder 压缩特征。
+
+输入只做逐维标准化：第一轮用聚合数据拟合 mean/std，之后冻结并随 checkpoint 保存；
+输出 Action 不做标准化，也不加 Action residual，直接回归 teacher 的 raw Action。
+环境执行前再按 env action bounds 或 `action_clip_value=20.0` 裁剪。
+
+### 2. 一轮 DAgger 到底发生什么
+
+每一轮大致是：
+
+```text
+reset 4 个 env（固定 4 个 motion，每个 motion 1 个 env）
+↓
+for step in rollout_steps:
+    1. 学生看 observation，算出 student_action
+    2. teacher 看同一个 observation，算出 teacher_action（标签）
+    3. 采样 teacher_mask ~ Bernoulli(beta)
+    4. 环境执行 teacher_action 或 student_action
+    5. 保存 (student_obs, teacher_action, student_action, executed_action,
+             done, episode_id, timestep, motion_id, mixture_teacher)
+↓
+把本轮数据追加到所有历史 round 的数据集
+↓
+用聚合数据训练 MLP
+↓
+student-only 评测 192 步
+↓
+根据每个 motion 的终止率更新下一轮采样权重
+↓
+保存 round checkpoint
+```
+
+`beta` 的含义：
+
+- `beta=1.0`：全部执行 teacher，数据分布接近 teacher；
+- `beta=0.0`：全部执行 student，数据分布是学生自己的错误分布；
+- 中间值：每一步独立决定执行 teacher 还是 student。
+
+当前是 **per-step** mixture，不是整个 episode 固定。
+这样学生能保留一部分 teacher 的稳定轨迹，同时暴露自己的错误状态。
+
+### 3. 为什么标签会“从监督数据获取到参数更新”
+
+完整链路是：
+
+```text
+SONIC release checkpoint
+  → frozen teacher.act(observation, done)
+  → teacher_action（在线标签）
+  → 与 student_obs 配对存入 round
+  → 所有 round 聚合成训练集
+  → MLP forward
+  → MSE(student_action, teacher_action)
+  → backward
+  → AdamW 更新 MLP 参数
+```
+
+teacher 从不更新，只有 MLP 参数更新。
+这不是强化学习：没有 reward 最大化、没有 value function、没有 policy gradient。
+它也不是“先离线存一堆数据再监督”：每一轮都会用当前学生重新访问状态，再查询 teacher。
+
+### 4. 当前 MLP 和训练参数
+
+当前 `mlp-long` 基线：
+
+| 项目 | 当前基线 |
+|---|---|
+| motion 数 | 4 |
+| 每 motion env 数 | 1，共 4 env |
+| rollout | 每轮 1000 步 |
+| beta | `[1.0,0.9,0.8,0.7,0.6,0.5,0.4,0.3,0.2,0.0]` |
+| MLP hidden | `[2048,2048,1024,1024,512,512]` |
+| 激活 | SiLU |
+| LayerNorm | 无 |
+| Dropout | 无 |
+| 每轮训练 | 1500 step |
+| batch | 256 |
+| 学习率 | 固定 `1e-4` |
+| weight decay | `1e-4` |
+| gradient clip | `1.0` |
+| 评估 | student-only 192 步 |
+| checkpoint | 每轮 `round_XX.pt` |
+
+当前最终 10 轮 run 为：
+
+```text
+/home/helloworld/bly/runs/dagger_mlp_long_20261026_014151
+checkpoint: checkpoints/round_09.pt
+memorization_pass=true
+```
+
+但 round 9 的 `survival_ratio=0.25`，`mean_episode_length=31.2`，所以它只证明动作拟合，
+不证明 192 步连续生存。
+
+### 5. 新的大规模方案：`mlp-intensive`
+
+新增配置：
+
+```text
+dagger/configs/mlp_intensive.yaml
+```
+
+设计目标：**仍然固定 4 个 motion，预算约 1 小时，同时增加数据量、模型容量和训练技巧。**
+
+| 项目 | `mlp-intensive` |
+|---|---|
+| motion 数 | 4 |
+| env | 4，每 motion 1 个 |
+| round | 16 |
+| 每轮 rollout | 2000 步 |
+| 每轮训练 | 2000 step |
+| 总 transition | 16 × 4 × 2000 = 128,000 |
+| 总 optimizer step | 16 × 2000 = 32,000 |
+| 等效 batch 采样 | 32,000 × 512 = 16.4M 个样本 |
+| MLP hidden | `[3072,3072,2048,1024,512,512]` |
+| LayerNorm | 开启 |
+| Dropout | 0.0（先不加；过拟合时再试 0.05） |
+| batch | 512 |
+| 学习率 | peak `1e-4`，cosine 衰减到 `1e-6` |
+| warmup | 2000 step |
+| weight decay | `1e-4` |
+| gradient clip | `1.0` |
+| beta | `[1.0,1.0,0.95,0.9,0.85,0.8,0.75,0.7,0.6,0.5,0.4,0.3,0.2,0.1,0.0,0.0]` |
+| 评估 | 每轮 student-only 192 步 |
+
+相对当前基线：
+
+- MLP 参数量约增加 2 倍多（取决于实际输入维度）；
+- 每轮 rollout 翻倍；
+- 训练步数、batch、round 数都增加；
+- 学习率从固定值改为 warmup + cosine；
+- 增加 LayerNorm，改善宽 MLP 的优化稳定性；
+- 保留 gradient clip 和 weight decay；
+- 仍然不接 future State、不接 CVAE latent、不改 teacher。
+
+时间预算不是硬编码保证。按当前 `mlp-long` 每轮约 100–120 秒、rollout 翻倍估算，
+16 轮加 8 个两轮 shard 的启动时间，大约 **55–70 分钟**；如果首两个 shard 明显更慢，
+优先减少 round 数，而不是降低 eval horizon。
+
+### 6. 对“跌倒多”的 motion 增加训练
+
+每轮 student-only 评估会得到每个 motion 的：
+
+```text
+teacher_action_rmse
+terminations
+termination_rate = terminations / steps
+```
+
+下一轮训练时，按终止率给 motion 加权：
+
+```text
+weight(motion) = 1 + 3 × termination_rate(motion) / max_termination_rate
+```
+
+效果：
+
+- 全部不摔：权重全为 1；
+- 某个 motion 摔得最多：它最多得到 4 倍采样权重；
+- 权重作用于**训练样本采样**，不是额外增加该 motion 的 env 数量；
+- 第 0 轮没有历史评估，使用均匀采样；
+- 第 1 轮开始使用第 0 轮评估得到的权重；
+- 权重和每轮样本数会写入 `metrics.partial.json`，便于检查。
+
+如果要做“额外 rollout 只给跌倒 motion”，那是另一种更重的 motion-balanced 环境分配方案；
+当前实现先采用更稳定的训练样本加权。
+
+### 7. 实时监督训练效果
+
+推荐用自动分片入口：
+
+```bash
+cd ~/bly/dagger
+export SONIC_REPO_ROOT=~/bly/sonic-repro/GR00T-WholeBodyControl
+export SONIC_TEACHER_CHECKPOINT=$SONIC_REPO_ROOT/sonic_release/last.pt
+export SONIC_RUNS_ROOT=~/bly/runs
+export DAGGER_MOTION_FILE=/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered
+export PYTHON=~/bly/sonic-repro/.venv-sonic/bin/python
+
+export DAGGER_SHARD_ROUNDS=2
+export DAGGER_MAX_RETRIES=3
+export DAGGER_TEE=1
+bash scripts/run_dagger_auto.sh mlp-intensive
+```
+
+另开一个终端看实时日志：
+
+```bash
+RUN=$(ls -dt ~/bly/runs/dagger_mlp_intensive_* | head -1)
+tail -f "$(ls -dt ~/bly/runs/dagger_mlp_intensive_command_*.log | head -1)"
+```
+
+训练每 100 step 打印一次：
+
+```text
+[dagger] train round=... step=.../2000 loss=... lr=... grad=...
+```
+
+重点看：
+
+- `loss` 是否总体下降；
+- `lr` 是否按 warmup/cosine 变化；
+- `grad` 是否突然爆炸；clip 后仍出现异常大值要停下检查；
+- 是否出现 `non-finite`；
+- 每轮 `eval_rmse` 是否下降；
+- 逐 motion 的 `termination_rate` 是否下降；
+- `survival_ratio` 是否改善；
+- `action_saturation_ratio` 是否过高。
+
+查看逐轮摘要：
+
+```bash
+python - <<'PY'
+import json, pathlib
+run = sorted(pathlib.Path.home().joinpath("bly/runs").glob("dagger_mlp_intensive_*"))[-1]
+p = run / "manifests" / "dagger_mlp_metrics.partial.json"
+data = json.loads(p.read_text())
+for r in data:
+    s = r["student_only"]
+    print(
+        f"round={r['round']:02d} beta={r['beta']:.2f} "
+        f"rmse={s['teacher_action_rmse']:.4f} "
+        f"term={s['termination_rate']:.4f} "
+        f"mean_ep={s['mean_episode_length']:.1f} "
+        f"max_ep={s.get('max_episode_length', -1):.0f} "
+        f"survival={s.get('survival_ratio', -1):.2f}"
+    )
+    for key, item in s["teacher_action_rmse_by_motion"].items():
+        print(
+            f"    {key}: rmse={item['teacher_action_rmse']:.4f} "
+            f"term={item['termination_rate']:.4f} "
+            f"weight={r.get('next_motion_weights', {}).get(key, 1.0):.2f}"
+        )
+PY
+```
+
+也可以定时刷新：
+
+```bash
+watch -n 10 "python -c \"import json,pathlib; p=sorted(pathlib.Path.home().joinpath('bly/runs').glob('dagger_mlp_intensive_*'))[-1]/'manifests'/'dagger_mlp_metrics.partial.json'; print(len(json.loads(p.read_text())))\""
+```
+
+判断原则：
+
+- **训练 loss 降、eval RMSE 也降**：方向正常；
+- **训练 loss 降、eval RMSE 不降**：更像过拟合、数据覆盖不足或观测-标签不匹配，不要只加步数；
+- **某个 motion 单独差**：先看加权是否生效，再看该 motion 的终止率和动作饱和；
+- **RMSE 低但 termination 高**：动作拟合和闭环稳定性不是一回事，可能需要更多 DAgger 状态覆盖；
+- **所有 motion 都高且 loss 不降**：检查学习率、归一化、输入维度、teacher 标签是否一致。
+
+### 8. 新模型渲染
+
+`mlp-intensive` 的 hidden 维度和 LayerNorm 与旧 `mlp-long` 不同，渲染必须使用匹配配置：
+
+```bash
+export DAGGER_RENDER_CONFIG=~/bly/dagger/configs/mlp_render_intensive.yaml
+bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
+```
+
+否则 checkpoint 的 `hidden_dims/layer_norm` 校验会拒绝加载。
+旧的 `mlp-long` checkpoint 继续使用 `mlp_render.yaml`。
+
+### 9. 边界
+
+- 只训练和评估同一批 4 个 motion；不是新 motion 泛化；
+- `memorization_pass` 是动作拟合门禁，不是 192 步生存门禁；
+- 192 步 survival 只有 4 个 env 的粗粒度值；
+- 当前 `mlp-intensive` 只是配置和代码方案，尚未在 Ubuntu 实际跑完；
+- 视频是 Isaac rollout 后的 MuJoCo 运动学渲染，不是扭矩物理重放。
+
 ## 当前状态
 
 | 项目 | 状态 |
@@ -351,12 +654,16 @@ MuJoCo 运动学并排，不是同状态扭矩对比，也不是闭环物理一�
 | plain MLP DAgger | 已实现，mixture 已改为 per-step |
 | plain MLP 4-motion smoke | 已通过（execution） |
 | plain MLP 4-motion pilot | 5/6 轮 partial 已通过 memorization；round 5 被 native SIGSEGV 阻塞 |
+| plain MLP 4-motion long | `dagger_mlp_long_20261026_014151` 10/10 轮完成，`memorization_pass=true` |
 | plain MLP 2-round sharding/resume | 已实现；中间 shard 只写 partial，最终 shard 写完整结果 |
 | plain MLP auto sharding | `run_dagger_auto.sh` 已实现；自动 resume/重试 |
-| plain MLP 192-step survival | 已加入 `max_episode_length`/`survival_ratio` 诊断；尚无通过结论 |
+| plain MLP 192-step survival | 已加入 `max_episode_length`/`survival_ratio` 诊断；long run final survival=0.25，尚无通过结论 |
+| `mlp-intensive` 16-round 1h 方案 | 配置/代码已实现，尚未 Ubuntu 执行 |
+| 跌倒 motion 加权采样 | 已实现；按 `termination_rate` 最多 4× 训练采样 |
+| cosine warmup / LayerNorm / 更大 MLP | 已实现；`mlp-intensive` 使用 |
 | plain MLP policy video | `mlp_render` + `render_mlp_policy.sh` 已实现，Isaac rollout 后 MuJoCo 运动学渲染 |
 | SONIC vs MLP compare video | `render_sonic_policy.sh` + `render_policy_compare.sh` 已实现，左 SONIC 右 MLP |
-| same-motion memorization 门禁 | 2 轮 repro 为 true；完整 pilot 仍待评估 |
+| same-motion memorization 门禁 | 10 轮 long run 为 true；2 轮/5 轮历史结果保留 |
 | CVAE rolling window | 已实现并通过 Windows 单元测试 |
 | CVAE 动态 shard | 已实现并通过 shape 测试 |
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |

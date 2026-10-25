@@ -12,7 +12,9 @@ from dagger.core.metrics import same_motion_memorization_pass
 from dagger.core.motion_selection import select_motion_keys
 
 
-def _round(observations: torch.Tensor, actions: torch.Tensor) -> DaggerRound:
+def _round(
+    observations: torch.Tensor, actions: torch.Tensor, motion_id: int = 0
+) -> DaggerRound:
     count = int(observations.shape[0])
     return DaggerRound(
         student_obs=observations,
@@ -22,7 +24,7 @@ def _round(observations: torch.Tensor, actions: torch.Tensor) -> DaggerRound:
         done=torch.zeros(count, dtype=torch.bool),
         episode_id=torch.arange(count),
         timestep=torch.zeros(count, dtype=torch.long),
-        motion_id=torch.zeros(count, dtype=torch.long),
+        motion_id=torch.full((count,), int(motion_id), dtype=torch.long),
         mixture_teacher=torch.ones(count, dtype=torch.bool),
     )
 
@@ -84,6 +86,46 @@ class PlainMlpContractTest(unittest.TestCase):
         student.train_on_dataset(dataset)
         self.assertTrue(torch.equal(student._mean, mean_before))
         self.assertTrue(torch.equal(student._std, std_before))
+
+    def test_weighted_training_uses_motion_ids_and_cosine_lr(self):
+        student = PlainMlpStudent(
+            observation_dim=3,
+            action_dim=2,
+            device=torch.device("cpu"),
+            hidden_dims=(8, 4),
+            train_steps=4,
+            batch_size=2,
+            motion_keys=["motion_a", "motion_b"],
+            layer_norm=True,
+            lr_schedule="cosine",
+            warmup_steps=1,
+        )
+        dataset = AggregatedDataset()
+        dataset.append(_round(torch.ones(2, 3), torch.zeros(2, 2), motion_id=0))
+        dataset.append(_round(torch.ones(2, 3), torch.zeros(2, 2), motion_id=1))
+        self.assertTrue(torch.equal(dataset.motion_ids(), torch.tensor([0, 0, 1, 1])))
+        first_metrics = student.train_on_dataset(
+            dataset,
+            motion_weights={"motion_a": 1.0, "motion_b": 4.0},
+            total_training_steps=8,
+        )
+        self.assertTrue(first_metrics["motion_weighting"])
+        self.assertTrue(0.0 < first_metrics["final_learning_rate"] <= student.peak_learning_rate)
+        student.motion_keys = ["motion_a", "motion_b"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "student.pt"
+            student.save(str(path))
+            restored = PlainMlpStudent(
+                observation_dim=3,
+                action_dim=2,
+                device=torch.device("cpu"),
+                hidden_dims=(8, 4),
+                train_steps=0,
+                batch_size=2,
+                layer_norm=True,
+            )
+            restored.load(path)
+        self.assertTrue(restored.layer_norm)
 
     def test_dataset_shard_round_trip(self):
         dataset = AggregatedDataset()

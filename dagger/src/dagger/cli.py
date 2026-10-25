@@ -186,6 +186,22 @@ def _create_release_env(prepared: dict, device: torch.device, args_cli) -> objec
     return env
 
 
+def _motion_weights_from_eval(eval_metrics: dict, keys: list[str]) -> dict[str, float] | None:
+    by_motion = eval_metrics.get("student_only", {}).get(
+        "teacher_action_rmse_by_motion", {}
+    )
+    termination_rates = [
+        float(by_motion.get(key, {}).get("termination_rate", 0.0)) for key in keys
+    ]
+    maximum = max(termination_rates) if termination_rates else 0.0
+    if maximum <= 0.0:
+        return None
+    return {
+        key: 1.0 + 3.0 * rate / maximum
+        for key, rate in zip(keys, termination_rates)
+    }
+
+
 def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
     sonic_root = prepared["sonic_root"]
     release_config = prepared["release_config"]
@@ -256,10 +272,16 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         input_terms=input_terms,
         freeze_normalization=bool(config.student.get("freeze_normalization", False)),
         motion_keys=motion_info["loaded_keys"],
+        layer_norm=bool(config.student.get("layer_norm", False)),
+        dropout=float(config.student.get("dropout", 0.0)),
+        lr_schedule=str(config.student.get("lr_schedule", "constant")),
+        warmup_steps=int(config.student.get("warmup_steps", 0)),
+        min_lr_ratio=float(config.student.get("min_lr_ratio", 0.01)),
     )
     print(
         f"[dagger] student ready params={sum(p.numel() for p in student.model.parameters())} "
-        f"normalization_mode={'frozen' if student.freeze_normalization else 'recomputed'}",
+        f"normalization_mode={'frozen' if student.freeze_normalization else 'recomputed'} "
+        f"layer_norm={student.layer_norm} lr_schedule={student.lr_schedule}",
         flush=True,
     )
     loop = DaggerLoop(
@@ -276,6 +298,9 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     )
     eval_steps = int(config.dagger.get("eval_steps", config.dagger.rollout_steps) or config.dagger.rollout_steps)
     beta_schedule = [float(value) for value in config.dagger.beta_schedule]
+    train_steps_per_round = int(config.student.train_steps_per_round)
+    total_training_steps = len(beta_schedule) * train_steps_per_round
+    motion_weights: dict[str, float] | None = None
     data_paths: list[Path] = []
     for index in range(len(beta_schedule)):
         data_path = run_dir / "data" / "dagger" / f"round_{index:02d}.pt"
@@ -315,6 +340,10 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
             f"dataset_samples={loop.dataset.count}",
             flush=True,
         )
+    if metrics:
+        motion_weights = _motion_weights_from_eval(
+            metrics[-1], motion_info["loaded_keys"]
+        )
     rounds_per_process = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
     processed = 0
     for round_index, beta in enumerate(beta_schedule):
@@ -329,10 +358,16 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         collect_seconds = time.perf_counter() - collect_started
         print(f"[dagger] round={round_index} collected samples={round_data.count}", flush=True)
         train_started = time.perf_counter()
-        round_metrics = loop.train_student(round_index=round_index)
+        round_metrics = loop.train_student(
+            round_index=round_index,
+            motion_weights=motion_weights,
+            global_step_offset=round_index * train_steps_per_round,
+            total_training_steps=total_training_steps,
+        )
         train_seconds = time.perf_counter() - train_started
         round_metrics["collect_seconds"] = collect_seconds
         round_metrics["train_seconds"] = train_seconds
+        round_metrics["motion_sample_weights"] = motion_weights
         print(f"[dagger] round={round_index} trained", flush=True)
         round_metrics["teacher_action_rmse_rollout"] = float(
             torch.sqrt(
@@ -361,6 +396,10 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
             eval_steps, round_index=round_index
         )
         round_metrics["eval_seconds"] = time.perf_counter() - eval_started
+        motion_weights = _motion_weights_from_eval(
+            round_metrics, motion_info["loaded_keys"]
+        )
+        round_metrics["next_motion_weights"] = motion_weights
         print(
             f"[dagger] round={round_index} eval_rmse="
             f"{round_metrics['student_only'].get('teacher_action_rmse')}",
@@ -400,6 +439,13 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         "teacher_action_dim": teacher.action_dim,
         "student_architecture": "plain_mlp",
         "student_hidden_dims": list(student.hidden_dims),
+        "student_layer_norm": student.layer_norm,
+        "student_dropout": student.dropout,
+        "student_lr_schedule": student.lr_schedule,
+        "student_warmup_steps": student.warmup_steps,
+        "student_peak_learning_rate": student.peak_learning_rate,
+        "student_minimum_learning_rate": student.minimum_learning_rate,
+        "motion_weighting": "termination_rate",
         "student_parameter_count": sum(parameter.numel() for parameter in student.model.parameters()),
         "student_observation_dim": observation_dim,
         "input_terms": list(input_terms),
@@ -419,6 +465,8 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         "beta_schedule": [float(value) for value in config.dagger.beta_schedule],
         "num_envs": int(config.dagger.num_envs),
         "rollout_steps": int(config.dagger.rollout_steps),
+        "train_steps_per_round": train_steps_per_round,
+        "total_training_steps": total_training_steps,
         "eval_steps": eval_steps,
         "seed": int(config.seed),
         "resume_run": os.environ.get("DAGGER_RESUME_RUN") or None,
@@ -500,6 +548,8 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
             input_terms=input_terms,
             freeze_normalization=True,
             motion_keys=prepared["motion"]["loaded_keys"],
+            layer_norm=bool(config.student.get("layer_norm", False)),
+            dropout=float(config.student.get("dropout", 0.0)),
         )
         payload = student.load(checkpoint)
         if payload.get("input_terms") and tuple(payload["input_terms"]) != input_terms:

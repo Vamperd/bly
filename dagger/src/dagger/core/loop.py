@@ -157,9 +157,22 @@ class DaggerLoop:
         self.dataset.save_round(round_index, self.run_dir)
         return result
 
-    def train_student(self, *, round_index: int | None = None) -> dict[str, float]:
+    def train_student(
+        self,
+        *,
+        round_index: int | None = None,
+        motion_weights: dict[str, float] | None = None,
+        global_step_offset: int = 0,
+        total_training_steps: int = 0,
+    ) -> dict[str, float]:
         label = f"round={round_index}" if round_index is not None else ""
-        metrics = self.student.train_on_dataset(self.dataset, label=label)
+        metrics = self.student.train_on_dataset(
+            self.dataset,
+            label=label,
+            motion_weights=motion_weights,
+            global_step_offset=global_step_offset,
+            total_training_steps=total_training_steps,
+        )
         metrics["dataset_samples"] = float(self.dataset.count)
         return metrics
 

@@ -13,9 +13,10 @@ case "$MODE" in
   mlp-scale) CONFIG_MODE="mlp_scale" ;;
   mlp-repro) CONFIG_MODE="mlp_repro" ;;
   mlp-long) CONFIG_MODE="mlp_long" ;;
+  mlp-intensive) CONFIG_MODE="mlp_intensive" ;;
   mlp-render) CONFIG_MODE="mlp_render" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-render" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-render" >&2
   exit 2
     ;;
 esac
@@ -32,8 +33,9 @@ DAGGER_RENDER_CHECKPOINT="${DAGGER_RENDER_CHECKPOINT:-}"
 DAGGER_RENDER_STEPS="${DAGGER_RENDER_STEPS:-192}"
 DAGGER_RENDER_MOTION_KEY="${DAGGER_RENDER_MOTION_KEY:-}"
 DAGGER_RENDER_POLICY="${DAGGER_RENDER_POLICY:-mlp}"
+DAGGER_RENDER_CONFIG="${DAGGER_RENDER_CONFIG:-}"
 
-export DAGGER_ROOT SONIC_REPO_ROOT SONIC_TEACHER_CHECKPOINT SONIC_RUNS_ROOT STATE_ACTION_CVAE_ROOT DAGGER_MOTION_FILE DAGGER_RESUME_RUN DAGGER_ROUNDS_PER_PROCESS DAGGER_RENDER_CHECKPOINT DAGGER_RENDER_STEPS DAGGER_RENDER_MOTION_KEY DAGGER_RENDER_POLICY
+export DAGGER_ROOT SONIC_REPO_ROOT SONIC_TEACHER_CHECKPOINT SONIC_RUNS_ROOT STATE_ACTION_CVAE_ROOT DAGGER_MOTION_FILE DAGGER_RESUME_RUN DAGGER_ROUNDS_PER_PROCESS DAGGER_RENDER_CHECKPOINT DAGGER_RENDER_STEPS DAGGER_RENDER_MOTION_KEY DAGGER_RENDER_POLICY DAGGER_RENDER_CONFIG
 export PYTHONPATH="$DAGGER_ROOT/src:$STATE_ACTION_CVAE_ROOT/src:$SONIC_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 PYTHON="${PYTHON:-$HOME/bly/sonic-repro/.venv-sonic/bin/python}"
@@ -53,6 +55,9 @@ test -s "$SONIC_TEACHER_CHECKPOINT" || {
 }
 
 CONFIG="$DAGGER_ROOT/configs/${CONFIG_MODE}.yaml"
+if [[ "$MODE" == "mlp-render" && -n "$DAGGER_RENDER_CONFIG" ]]; then
+  CONFIG="$DAGGER_RENDER_CONFIG"
+fi
 test -f "$CONFIG" || {
   echo "DAgger config is missing: $CONFIG" >&2
   exit 2
@@ -75,7 +80,7 @@ if ! flock -n 9; then
 fi
 echo "[run_dagger] acquired $LOCK_PATH"
 
-if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-render ]]; then
+if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-render ]]; then
   test -d "$DAGGER_MOTION_FILE" || {
     echo "DAGGER_MOTION_FILE is missing or not a directory: $DAGGER_MOTION_FILE" >&2
     exit 2
@@ -119,6 +124,7 @@ echo "[run_dagger] DAGGER_RENDER_CHECKPOINT=$DAGGER_RENDER_CHECKPOINT" >> "$LOG_
 echo "[run_dagger] DAGGER_RENDER_STEPS=$DAGGER_RENDER_STEPS" >> "$LOG_PATH"
 echo "[run_dagger] DAGGER_RENDER_MOTION_KEY=$DAGGER_RENDER_MOTION_KEY" >> "$LOG_PATH"
 echo "[run_dagger] DAGGER_RENDER_POLICY=$DAGGER_RENDER_POLICY" >> "$LOG_PATH"
+echo "[run_dagger] DAGGER_RENDER_CONFIG=$DAGGER_RENDER_CONFIG" >> "$LOG_PATH"
 echo "[run_dagger] SONIC_TEACHER_CHECKPOINT=$SONIC_TEACHER_CHECKPOINT" >> "$LOG_PATH"
 set +e
 if [[ "${DAGGER_TEE:-0}" == "1" ]]; then

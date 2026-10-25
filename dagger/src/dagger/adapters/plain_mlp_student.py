@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import torch
@@ -26,6 +27,11 @@ class PlainMlpStudent:
         input_mean: torch.Tensor | None = None,
         input_std: torch.Tensor | None = None,
         motion_keys: list[str] | None = None,
+        layer_norm: bool = False,
+        dropout: float = 0.0,
+        lr_schedule: str = "constant",
+        warmup_steps: int = 0,
+        min_lr_ratio: float = 0.01,
     ) -> None:
         self.device = device
         self.input_dim = int(observation_dim)
@@ -34,13 +40,27 @@ class PlainMlpStudent:
         self.input_terms = tuple(input_terms) if input_terms is not None else ()
         self.motion_keys = list(motion_keys) if motion_keys is not None else []
         self.freeze_normalization = bool(freeze_normalization)
+        self.layer_norm = bool(layer_norm)
+        self.dropout = float(dropout)
+        self.lr_schedule = str(lr_schedule)
+        self.warmup_steps = max(0, int(warmup_steps))
+        self.min_lr_ratio = float(min_lr_ratio)
+        if self.lr_schedule not in {"constant", "cosine"}:
+            raise ValueError("lr_schedule must be constant or cosine")
         layers: list[nn.Module] = []
         previous = self.input_dim
         for width in self.hidden_dims:
-            layers.extend([nn.Linear(previous, width), nn.SiLU()])
+            layers.append(nn.Linear(previous, width))
+            if self.layer_norm:
+                layers.append(nn.LayerNorm(width))
+            layers.append(nn.SiLU())
+            if self.dropout > 0:
+                layers.append(nn.Dropout(self.dropout))
             previous = width
         layers.append(nn.Linear(previous, self.action_dim))
         self.model = nn.Sequential(*layers).to(device)
+        self.peak_learning_rate = float(learning_rate)
+        self.minimum_learning_rate = self.peak_learning_rate * self.min_lr_ratio
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=learning_rate, weight_decay=weight_decay
         )
@@ -91,7 +111,15 @@ class PlainMlpStudent:
             raise FloatingPointError("non-finite student action")
         return output
 
-    def train_on_dataset(self, dataset, *, label: str = "") -> dict[str, float]:
+    def train_on_dataset(
+        self,
+        dataset,
+        *,
+        label: str = "",
+        motion_weights: dict[str, float] | None = None,
+        global_step_offset: int = 0,
+        total_training_steps: int = 0,
+    ) -> dict[str, float]:
         observations, actions = dataset.tensors()
         observations = observations.float()
         actions = actions.float()
@@ -102,16 +130,53 @@ class PlainMlpStudent:
             self._std = observations.std(dim=0).clamp_min(1.0e-4).to(self.device)
             self._normalization_fitted = True
         normalized = (observations - self._mean.cpu()) / self._std.cpu().clamp_min(1.0e-6)
+        motion_ids = dataset.motion_ids()
+        if motion_weights and self.motion_keys:
+            weights = torch.ones(motion_ids.shape[0], dtype=torch.float32)
+            for index, motion_id in enumerate(motion_ids.tolist()):
+                if 0 <= int(motion_id) < len(self.motion_keys):
+                    weights[index] = float(
+                        motion_weights.get(self.motion_keys[int(motion_id)], 1.0)
+                    )
+            weights = weights.clamp_min(1.0e-6)
+        else:
+            weights = None
         generator = torch.Generator(device="cpu")
         generator.manual_seed(self.seed + len(dataset.rounds))
         losses: list[float] = []
+        learning_rates: list[float] = []
         self.model.train()
         for step_index in range(self.train_steps):
-            indices = torch.randint(
-                normalized.shape[0],
-                (min(self.batch_size, normalized.shape[0]),),
-                generator=generator,
-            )
+            global_step = int(global_step_offset) + step_index
+            total_steps = max(int(total_training_steps), int(global_step_offset) + self.train_steps)
+            if self.lr_schedule == "cosine":
+                if self.warmup_steps > 0 and global_step < self.warmup_steps:
+                    learning_rate = self.peak_learning_rate * float(global_step + 1) / self.warmup_steps
+                else:
+                    progress = min(
+                        1.0,
+                        max(
+                            0.0,
+                            (global_step - self.warmup_steps)
+                            / max(1, total_steps - self.warmup_steps),
+                        ),
+                    )
+                    learning_rate = self.minimum_learning_rate + 0.5 * (
+                        self.peak_learning_rate - self.minimum_learning_rate
+                    ) * (1.0 + math.cos(math.pi * progress))
+            else:
+                learning_rate = self.peak_learning_rate
+            for group in self.optimizer.param_groups:
+                group["lr"] = learning_rate
+            batch_count = min(self.batch_size, normalized.shape[0])
+            if weights is not None:
+                indices = torch.multinomial(
+                    weights, batch_count, replacement=True, generator=generator
+                )
+            else:
+                indices = torch.randint(
+                    normalized.shape[0], (batch_count,), generator=generator
+                )
             prediction = self.model(normalized[indices].to(self.device))
             target = actions[indices].to(self.device)
             loss = torch.mean(torch.square(prediction - target))
@@ -119,14 +184,18 @@ class PlainMlpStudent:
                 raise FloatingPointError("non-finite student prediction or loss")
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), 1.0, error_if_nonfinite=True)
+            gradient_norm = nn.utils.clip_grad_norm_(
+                self.model.parameters(), 1.0, error_if_nonfinite=True
+            )
             self.optimizer.step()
             losses.append(float(loss.detach().cpu()))
+            learning_rates.append(learning_rate)
             if self.train_steps >= 100 and (step_index + 1) % 100 == 0:
                 prefix = f"{label} " if label else ""
                 print(
                     f"[dagger] train {prefix}step={step_index + 1}/{self.train_steps} "
-                    f"loss={losses[-1]:.6g}",
+                    f"loss={losses[-1]:.6g} lr={learning_rate:.3g} "
+                    f"grad={float(gradient_norm):.3g}",
                     flush=True,
                 )
         for parameter in self.model.parameters():
@@ -145,6 +214,9 @@ class PlainMlpStudent:
         return {
             "train_loss": losses[-1] if losses else float("nan"),
             "teacher_action_rmse": float(rmse),
+            "mean_learning_rate": float(sum(learning_rates) / max(1, len(learning_rates))),
+            "final_learning_rate": float(learning_rates[-1]) if learning_rates else 0.0,
+            "motion_weighting": bool(weights is not None),
         }
 
     def save(self, path: str, *, extra_metadata: dict | None = None) -> None:
@@ -159,6 +231,11 @@ class PlainMlpStudent:
             "input_dim": self.input_dim,
             "input_terms": list(self.input_terms),
             "hidden_dims": list(self.hidden_dims),
+            "layer_norm": self.layer_norm,
+            "dropout": self.dropout,
+            "lr_schedule": self.lr_schedule,
+            "warmup_steps": self.warmup_steps,
+            "min_lr_ratio": self.min_lr_ratio,
             "action_dim": self.action_dim,
             "normalization_mode": "frozen" if self.freeze_normalization else "recomputed_per_round",
             "motion_keys": list(self.motion_keys),
@@ -177,6 +254,10 @@ class PlainMlpStudent:
             raise ValueError("checkpoint action_dim does not match student")
         if tuple(int(value) for value in payload.get("hidden_dims", ())) != self.hidden_dims:
             raise ValueError("checkpoint hidden_dims do not match student")
+        if "layer_norm" in payload and bool(payload["layer_norm"]) != self.layer_norm:
+            raise ValueError("checkpoint layer_norm does not match student")
+        if "dropout" in payload and abs(float(payload["dropout"]) - self.dropout) > 1.0e-9:
+            raise ValueError("checkpoint dropout does not match student")
         self.model.load_state_dict(payload["model_state_dict"], strict=True)
         if isinstance(payload.get("optimizer_state_dict"), dict):
             self.optimizer.load_state_dict(payload["optimizer_state_dict"])

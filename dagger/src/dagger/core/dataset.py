@@ -28,6 +28,11 @@ class AggregatedDataset:
         actions = torch.cat([item.teacher_action for item in self.rounds], dim=0)
         return observations, actions
 
+    def motion_ids(self) -> torch.Tensor:
+        if not self.rounds:
+            raise RuntimeError("cannot read an empty DAgger dataset")
+        return torch.cat([item.motion_id for item in self.rounds], dim=0)
+
     def save_round(self, round_index: int, run_dir: str | Path) -> Path:
         path = Path(run_dir) / "data" / "dagger" / f"round_{round_index:02d}.pt"
         path.parent.mkdir(parents=True, exist_ok=True)

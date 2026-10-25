@@ -4,9 +4,9 @@ set -u
 
 MODE="${1:-mlp-pilot}"
 case "$MODE" in
-  mlp-pilot|mlp-long) ;;
+  mlp-pilot|mlp-long|mlp-intensive) ;;
   *)
-    echo "Usage: $0 mlp-pilot|mlp-long" >&2
+    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive" >&2
     exit 2
     ;;
 esac
