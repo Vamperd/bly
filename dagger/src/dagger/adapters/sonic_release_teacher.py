@@ -27,6 +27,7 @@ class SonicReleaseTeacher:
         self.env = env
         self.motion = env.command_manager.get_term("motion")
         self._validate_g1()
+        print("[dagger] Teacher: instantiating actor", flush=True)
         self.model = custom_instantiate(
             config.algo.config.actor,
             env_config=env.config,
@@ -34,12 +35,17 @@ class SonicReleaseTeacher:
             module_dim_dict=getattr(config.algo.config, "module_dim", {}),
             _resolve=False,
         ).to(device)
+        print("[dagger] Teacher: materializing lazy params", flush=True)
         materialize_lazy_params(self.model, env.env)
+        print("[dagger] Teacher: lazy params materialized", flush=True)
         checkpoint_path = Path(checkpoint).expanduser().resolve()
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"teacher checkpoint is missing: {checkpoint_path}")
+        print(f"[dagger] Teacher: hashing checkpoint {checkpoint_path}", flush=True)
         self.checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        print("[dagger] Teacher: loading checkpoint tensors", flush=True)
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        print("[dagger] Teacher: checkpoint tensors loaded", flush=True)
         state_dict = _load_state_dict(state)
         model_state = self.model.state_dict()
         if "std" in model_state and "log_std" in state_dict and "std" not in state_dict:
@@ -48,7 +54,9 @@ class SonicReleaseTeacher:
         elif "log_std" in model_state and "std" in state_dict and "log_std" not in state_dict:
             state_dict = dict(state_dict)
             state_dict["log_std"] = torch.log(state_dict.pop("std"))
+        print("[dagger] Teacher: loading state dict", flush=True)
         self.model.load_state_dict(state_dict, strict=True)
+        print("[dagger] Teacher: state dict loaded", flush=True)
         self.model.eval()
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
