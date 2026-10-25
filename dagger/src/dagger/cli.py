@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import traceback
 
 import torch
 from omegaconf import OmegaConf
@@ -504,6 +505,7 @@ def main() -> None:
     launcher, args_cli = _launch_app(config)
     print("[dagger] Isaac app ready", flush=True)
     env = None
+    exit_code = 1
     try:
         if str(config.mode).startswith("cvae"):
             env, manifest = _run_cvae(config, run_dir, device, args_cli, prepared)
@@ -517,12 +519,14 @@ def main() -> None:
         (run_dir / "markers" / marker_name).write_text("execution_pass=true\n", encoding="utf-8")
         (run_dir / marker_name).write_text("execution_pass=true\n", encoding="utf-8")
         print(json.dumps({"run_dir": str(run_dir), "manifest": manifest}, indent=2, default=str))
+        exit_code = 0
+    except BaseException:
+        traceback.print_exc()
+        exit_code = 1
     finally:
-        try:
-            if env is not None:
-                env.close()
-        finally:
-            launcher.app.close()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(exit_code)
 
 
 if __name__ == "__main__":
