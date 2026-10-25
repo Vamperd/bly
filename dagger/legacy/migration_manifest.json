@@ -1,0 +1,57 @@
+{
+  "purpose": "Track DAgger files moved out of the SONIC nested repository.",
+  "source_repository": "sonic-repro/GR00T-WholeBodyControl",
+  "destination_root": "dagger",
+  "files": [
+    {
+      "source": "gear_sonic/train_agent_dagger.py",
+      "sha256": "e2cb6d70a2a429907bd50f2285ff87caeb85bff56c08efc7277a600ccdc82b10",
+      "destination": "dagger/src/dagger/cli.py"
+    },
+    {
+      "source": "gear_sonic/trl/trainer/dagger_trainer.py",
+      "sha256": "7bfa8cde83f835af3fdaef60e8e62b9008b993d7b1bb058fcf46a459b3123e2b",
+      "destination": "dagger/src/dagger/core/loop.py"
+    },
+    {
+      "source": "gear_sonic/tests/test_dagger_trainer.py",
+      "sha256": "08d3319f99aa1f2aa6870af5893545c25a6c538b27c3abe7568e4f67731b9217",
+      "destination": "dagger/tests/test_core.py"
+    },
+    {
+      "source": "gear_sonic/config/actor_critic/teacher_release.yaml",
+      "sha256": "530d763c2b43f5b08a16007f059eac0845fde5701094323c299f5e3d2dd50a41",
+      "destination": "dagger/configs/teacher/sonic_release.yaml"
+    },
+    {
+      "source": "gear_sonic/config/actor_critic/universal_token/teacher_release.yaml",
+      "sha256": "887f910d5040182b1c3c07b30b6a2fa2f85a7f22cb89e02c50014ca79929ba2c",
+      "destination": "dagger/configs/teacher/sonic_release.yaml"
+    },
+    {
+      "source": "gear_sonic/config/teacher/release.yaml",
+      "sha256": "903b2f8e86f9213bea0c1e37a8dc20d487e3081bc3f586391f63f80cd0fa7de0",
+      "destination": "dagger/configs/teacher/sonic_release.yaml"
+    },
+    {
+      "source": "gear_sonic/config/manager_env/observations/teacher_release.yaml",
+      "sha256": "c6ece03e8b65fc61f36aa5b61dce2c2f42f70c8657d9eaed9b07e7785b658380",
+      "destination": "dagger/src/dagger/adapters/sonic_release_teacher.py"
+    },
+    {
+      "source": "gear_sonic/config/manager_env/observations/teacher/teacher_release.yaml",
+      "sha256": "e241dde027704f0a8f26f67a0d4c4e8329f79e9c274476d9e2764a5ed467af97e",
+      "destination": "dagger/src/dagger/runtime/sonic_env.py"
+    },
+    {
+      "source": "gear_sonic/config/manager_env/observations/policy/g1_reference_mlp.yaml",
+      "sha256": "78943bea5c114727429d3f44fb6d71ba71dc65ce4987fac9846ffcd22522e57a",
+      "destination": "dagger/src/dagger/adapters/plain_mlp_student.py"
+    },
+    {
+      "source": "gear_sonic/config/exp/manager/universal_token/all_modes/sonic_release_dagger_mlp.yaml",
+      "sha256": "cc481c2c3a2079c75f914211c5e99253bf0971c2578f4e1daea4c9f7fc55609d",
+      "destination": "dagger/configs/smoke.yaml and dagger/configs/pilot.yaml"
+    }
+  ]
+}

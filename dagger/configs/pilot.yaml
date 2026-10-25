@@ -1,0 +1,18 @@
+mode: pilot
+seed: 20261024
+device: cuda:0
+run_root: ${oc.env:SONIC_RUNS_ROOT,/home/helloworld/bly/runs}
+sonic_repo_root: ${oc.env:SONIC_REPO_ROOT,/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl}
+teacher_checkpoint: ${oc.env:SONIC_TEACHER_CHECKPOINT}
+
+dagger:
+  beta_schedule: [1.0, 0.5, 0.2, 0.0]
+  rollout_steps: 500
+  num_envs: 32
+  action_clip_value: 20.0
+
+student:
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  train_steps_per_round: 2000
+  batch_size: 512

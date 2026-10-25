@@ -1,0 +1,25 @@
+mode: cvae_smoke
+seed: 20261024
+device: cuda:0
+run_root: ${oc.env:SONIC_RUNS_ROOT,/home/helloworld/bly/runs}
+sonic_repo_root: ${oc.env:SONIC_REPO_ROOT,/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl}
+teacher_checkpoint: ${oc.env:SONIC_TEACHER_CHECKPOINT}
+
+dagger:
+  beta_schedule: [1.0]
+  rollout_steps: 8
+  num_envs: 8
+
+student:
+  checkpoint: ${oc.env:CVAE_STUDENT_CHECKPOINT}
+  cvae_root: ${oc.env:STATE_ACTION_CVAE_ROOT,/home/helloworld/bly/state-action-cvae}
+  model_config: ${oc.env:CVAE_MODEL_CONFIG,/home/helloworld/bly/state-action-cvae/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json}
+  normalization_run: ${oc.env:CVAE_BASE_DATASET_RUN}
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+  train_steps_per_round: 2
+  micro_batch: 2
+  source_mix: 0.5
+  mask_seed: 20261024
+  kl_beta: 1.0e-3
+  kl_warmup: 500
