@@ -250,13 +250,14 @@ def compose_release_config(
     config_dir = sonic_root / "gear_sonic" / "config"
     with initialize_config_dir(version_base="1.1", config_dir=str(config_dir)):
         config = compose(
-            config_name="exp/manager/universal_token/all_modes/sonic_release",
+            config_name="base",
             overrides=[
+                "+exp=manager/universal_token/all_modes/sonic_release",
                 f"num_envs={int(num_envs)}",
                 f"seed={int(seed)}",
                 "headless=True",
                 "manager_env.commands.motion.encoder_sample_probs={g1:1.0,teleop:0.0,smpl:0.0}",
-                "manager_env.commands.motion.motion_lib_cfg.deterministic_motion_order=True",
+                "+manager_env.commands.motion.motion_lib_cfg.deterministic_motion_order=True",
                 f"manager_env/terminations={terminations}",
                 f"manager_env/events={events}",
             ],
