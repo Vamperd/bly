@@ -62,10 +62,10 @@ class SonicReleaseTeacher:
             parameter.requires_grad_(False)
         self.parameter_count = sum(parameter.numel() for parameter in self.model.parameters())
         self.action_dim = int(getattr(self.model, "num_actions", getattr(env.config.robot, "actions_dim", 29)))
-        if self.action_dim != int(env.env.action_space.shape[-1]):
+        if self.action_dim != int(env.action_space.shape[-1]):
             raise ValueError(
                 f"teacher action dimension {self.action_dim} does not match environment "
-                f"dimension {env.env.action_space.shape[-1]}"
+                f"dimension {env.action_space.shape[-1]}"
             )
         if any(parameter.requires_grad for parameter in self.model.parameters()):
             raise RuntimeError("SONIC teacher parameters were not fully frozen")

@@ -122,13 +122,18 @@ class SonicDaggerEnv:
         return [value.decode() if isinstance(value, bytes) else str(value) for value in keys]
 
     @property
+    def action_space(self):
+        actual_env = getattr(self.env, "env", self.env)
+        return actual_env.action_space
+
+    @property
     def action_low(self) -> torch.Tensor:
-        value = torch.as_tensor(self.env.action_space.low, device=self.device, dtype=torch.float32)
+        value = torch.as_tensor(self.action_space.low, device=self.device, dtype=torch.float32)
         return value.reshape(1, -1)
 
     @property
     def action_high(self) -> torch.Tensor:
-        value = torch.as_tensor(self.env.action_space.high, device=self.device, dtype=torch.float32)
+        value = torch.as_tensor(self.action_space.high, device=self.device, dtype=torch.float32)
         return value.reshape(1, -1)
 
 
@@ -155,7 +160,7 @@ class SonicActionContract:
         self.term = term
         self.device = env.device
         self.num_envs = env.num_envs
-        action_space = env.env.action_space
+        action_space = env.action_space
         self.raw_low = torch.as_tensor(action_space.low, device=self.device, dtype=torch.float32).reshape(1, -1)
         self.raw_high = torch.as_tensor(action_space.high, device=self.device, dtype=torch.float32).reshape(1, -1)
         if tuple(self.raw_low.shape) != (1, ACTION_DIM) or tuple(self.raw_high.shape) != (1, ACTION_DIM):
