@@ -9,6 +9,7 @@ dagger:
   beta_schedule: [1.0, 0.5]
   rollout_steps: 2
   num_envs: 4
+  action_clip_value: 20.0
   motion_file: ${oc.env:DAGGER_MOTION_FILE}
   motion_keys: []
   motion_count: 4

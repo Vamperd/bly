@@ -198,10 +198,19 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     )
     observation_dim = int(actor_obs.shape[-1] + reference_features.shape[-1])
     action_dim = int(env.action_space.shape[-1])
+    action_low = env.action_low
+    action_high = env.action_high
+    finite_bounds = bool(torch.isfinite(action_low).all() and torch.isfinite(action_high).all())
+    clip_value = config.dagger.get("action_clip_value", None)
+    if finite_bounds:
+        clip_value = None
+    elif clip_value is None:
+        clip_value = 20.0
     print(
         f"[dagger] action_space shape={tuple(env.action_space.shape)} "
-        f"action_low shape={tuple(env.action_low.shape)} "
-        f"action_high shape={tuple(env.action_high.shape)}",
+        f"action_low shape={tuple(action_low.shape)} "
+        f"action_high shape={tuple(action_high.shape)} finite_bounds={finite_bounds} "
+        f"clip_value={clip_value}",
         flush=True,
     )
     input_terms = ("actor_obs", *reference_terms)
@@ -252,11 +261,11 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         student=student,
         num_envs=int(config.dagger.num_envs),
         rollout_steps=int(config.dagger.rollout_steps),
-        action_clip_value=config.dagger.get("action_clip_value", None),
+        action_clip_value=clip_value,
         run_dir=run_dir,
         seed=int(config.seed),
-        action_low=env.action_low,
-        action_high=env.action_high,
+        action_low=action_low if finite_bounds else None,
+        action_high=action_high if finite_bounds else None,
     )
     eval_steps = int(config.dagger.get("eval_steps", config.dagger.rollout_steps) or config.dagger.rollout_steps)
     metrics = []
@@ -323,8 +332,10 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         "action_dim": action_dim,
         "action_space": "raw",
         "action_bounds": {
-            "low": env.action_low.cpu().reshape(-1).tolist(),
-            "high": env.action_high.cpu().reshape(-1).tolist(),
+            "finite": finite_bounds,
+            "clip_value": clip_value,
+            "low": action_low.cpu().reshape(-1).tolist() if finite_bounds else None,
+            "high": action_high.cpu().reshape(-1).tolist() if finite_bounds else None,
         },
         "normalization_mode": "frozen" if student.freeze_normalization else "recomputed_per_round",
         "motion": motion_info,
