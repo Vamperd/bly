@@ -1,0 +1,31 @@
+mode: mlp_long
+seed: 20261024
+device: cuda:0
+run_root: ${oc.env:SONIC_RUNS_ROOT,/home/helloworld/bly/runs}
+sonic_repo_root: ${oc.env:SONIC_REPO_ROOT,/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl}
+teacher_checkpoint: ${oc.env:SONIC_TEACHER_CHECKPOINT}
+
+dagger:
+  beta_schedule: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.0]
+  rollout_steps: 1000
+  num_envs: 4
+  action_clip_value: 20.0
+  motion_file: ${oc.env:DAGGER_MOTION_FILE}
+  motion_keys: []
+  motion_count: 4
+  motion_seed: 20261024
+  max_unique_motions: 4
+  sample_unique_motions: true
+  observation_corruption: false
+  events: tracking/level0_4
+  terminations: tracking/base_adaptive_strict_ori_foot_xyz
+  smpl_motion_file: zeros
+  eval_steps: 192
+
+student:
+  hidden_dims: [2048, 2048, 1024, 1024, 512, 512]
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  train_steps_per_round: 1500
+  micro_batch: 256
+  freeze_normalization: true

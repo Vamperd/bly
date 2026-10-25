@@ -227,6 +227,51 @@ bash scripts/run_dagger.sh mlp-pilot
   和（若通过）`dagger_mlp_memorization.ok`；
 - 同一时间只允许一个 runner（脚本有 `flock` 和 `pgrep` 检查）。
 
+### 长时 192 步与自动分片
+
+新增 `mlp-long`：10 轮、beta
+`[1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.0]`、T1000、每轮 1500 training
+step、eval 192。评估现在额外报告：
+
+- `max_episode_length`
+- `survived_full_horizon`
+- `survival_ratio`
+
+这些是 192 步连续生存的诊断；`memorization_pass` 仍然只代表 same-motion 动作拟合，
+不是长时 survival gate。
+
+自动 2 轮分片、失败重试、自动 resume 的入口：
+
+```bash
+cd ~/bly/dagger
+export SONIC_REPO_ROOT=~/bly/sonic-repro/GR00T-WholeBodyControl
+export SONIC_TEACHER_CHECKPOINT=$SONIC_REPO_ROOT/sonic_release/last.pt
+export SONIC_RUNS_ROOT=~/bly/runs
+export DAGGER_MOTION_FILE=$SONIC_REPO_ROOT/data/motion_lib_bones_seed/robot_filtered
+export PYTHON=~/bly/sonic-repro/.venv-sonic/bin/python
+export PYTHONPATH="$PWD/src:$HOME/bly/state-action-cvae/src:$SONIC_REPO_ROOT"
+
+export DAGGER_SHARD_ROUNDS=2
+export DAGGER_MAX_RETRIES=3
+bash scripts/run_dagger_auto.sh mlp-long
+```
+
+行为：
+
+- 第一个 shard 创建新 run；后续 shard 自动设置 `DAGGER_RESUME_RUN`；
+- 每个 shard 只跑 2 轮；
+- 若 shard 崩溃但 completed round 增加，默认继续下一个 shard；
+- 若连续 `DAGGER_MAX_RETRIES` 次没有新增 completed round，停止并保留 partial；
+- `DAGGER_MAX_SHARDS` 是硬上限；
+- 默认不因单次崩溃停止；设置 `DAGGER_STOP_ON_CRASH=1` 后，任何 non-zero shard
+  退出都会立即停止；
+- 全部 round 完成后自动退出并打印 `memorization_pass`。
+
+历史 5/6 pilot partial（run `011239`）已完成 rounds 0–4；round 4 为
+`beta=0`、student 4000/4000、RMSE `0.3705`、termination `0.0125`、
+mean episode `38.2`。round 5 纯 student collect 触发 Isaac native SIGSEGV，
+因此完整 6 轮未完成；5 轮 partial 的 `same_motion_memorization_pass` 为 true。
+
 ## 当前状态
 
 | 项目 | 状态 |
@@ -235,8 +280,10 @@ bash scripts/run_dagger.sh mlp-pilot
 | SONIC frozen teacher | 已实现，Ubuntu smoke 已通过 |
 | plain MLP DAgger | 已实现，mixture 已改为 per-step |
 | plain MLP 4-motion smoke | 已通过（execution） |
-| plain MLP 4-motion pilot | `mlp-repro` 2 轮通过（memorization）；完整 6 轮待执行 |
+| plain MLP 4-motion pilot | 5/6 轮 partial 已通过 memorization；round 5 被 native SIGSEGV 阻塞 |
 | plain MLP 2-round sharding/resume | 已实现；中间 shard 只写 partial，最终 shard 写完整结果 |
+| plain MLP auto sharding | `run_dagger_auto.sh` 已实现；自动 resume/重试 |
+| plain MLP 192-step survival | 已加入 `max_episode_length`/`survival_ratio` 诊断；尚无通过结论 |
 | same-motion memorization 门禁 | 2 轮 repro 为 true；完整 pilot 仍待评估 |
 | CVAE rolling window | 已实现并通过 Windows 单元测试 |
 | CVAE 动态 shard | 已实现并通过 shape 测试 |

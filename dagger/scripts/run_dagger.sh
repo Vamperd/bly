@@ -12,8 +12,9 @@ case "$MODE" in
   mlp-debug) CONFIG_MODE="mlp_debug" ;;
   mlp-scale) CONFIG_MODE="mlp_scale" ;;
   mlp-repro) CONFIG_MODE="mlp_repro" ;;
+  mlp-long) CONFIG_MODE="mlp_long" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long" >&2
   exit 2
     ;;
 esac
@@ -69,7 +70,7 @@ if ! flock -n 9; then
 fi
 echo "[run_dagger] acquired $LOCK_PATH"
 
-if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro ]]; then
+if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long ]]; then
   test -d "$DAGGER_MOTION_FILE" || {
     echo "DAGGER_MOTION_FILE is missing or not a directory: $DAGGER_MOTION_FILE" >&2
     exit 2

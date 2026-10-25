@@ -204,6 +204,9 @@ class EvaluationLoopTest(unittest.TestCase):
         self.assertIsNotNone(metrics["teacher_action_rmse"])
         self.assertEqual(set(metrics["teacher_action_rmse_by_motion"]), {"motion_a", "motion_b"})
         self.assertEqual(metrics["num_envs"], 2.0)
+        self.assertEqual(metrics["survived_full_horizon"], 2)
+        self.assertEqual(metrics["survival_ratio"], 1.0)
+        self.assertEqual(metrics["max_episode_length"], 2.0)
 
 
 class MixtureTest(unittest.TestCase):

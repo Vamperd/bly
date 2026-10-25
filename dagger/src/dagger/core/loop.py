@@ -238,6 +238,19 @@ class DaggerLoop:
                 if episode_lengths
                 else float(steps)
             ),
+            "max_episode_length": max(
+                episode_lengths
+                + [float(episode_steps[index].item()) for index in range(self.num_envs)]
+            )
+            if (episode_lengths or self.num_envs)
+            else float(steps),
+            "survived_full_horizon": int(
+                (episode_steps >= float(steps)).sum().item()
+            ),
+            "survival_ratio": float(
+                (episode_steps >= float(steps)).sum().item()
+            )
+            / max(1, self.num_envs),
             "action_saturation_ratio": saturation_count / max(1, action_count),
             "student_action_abs_max": student_abs_max,
             "teacher_action_abs_max": teacher_abs_max,
