@@ -187,11 +187,18 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     print("[dagger] resetting env for rollout", flush=True)
     observation = env.reset()
     print("[dagger] env reset returned", flush=True)
-    observation_dim = int(
-        observation["actor_obs"].shape[-1] + observation["student_reference_features"].shape[-1]
+    print(f"[dagger] observation keys={list(observation.keys())}", flush=True)
+    actor_obs = observation["actor_obs"]
+    reference_features = observation["student_reference_features"]
+    print(
+        f"[dagger] actor_obs shape={tuple(actor_obs.shape)} "
+        f"reference shape={tuple(reference_features.shape)}",
+        flush=True,
     )
+    observation_dim = int(actor_obs.shape[-1] + reference_features.shape[-1])
     action_dim = int(env.env.action_space.shape[-1])
     input_terms = ("actor_obs", *reference_terms)
+    print("[dagger] resolving hidden dims", flush=True)
     hidden_dims = tuple(
         int(value)
         for value in config.student.get("hidden_dims", (2048, 2048, 1024, 1024, 512, 512))
