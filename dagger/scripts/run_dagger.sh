@@ -70,12 +70,19 @@ if [[ "$MODE" == cvae-smoke || "$MODE" == cvae-pilot ]]; then
 fi
 
 LOG_PATH="$SONIC_RUNS_ROOT/dagger_${MODE}_command_$(date +%Y%m%d_%H%M%S).log"
-echo "[run_dagger] CONFIG=$CONFIG" | tee "$LOG_PATH"
-echo "[run_dagger] DAGGER_MOTION_FILE=$DAGGER_MOTION_FILE" | tee -a "$LOG_PATH"
-echo "[run_dagger] SONIC_TEACHER_CHECKPOINT=$SONIC_TEACHER_CHECKPOINT" | tee -a "$LOG_PATH"
+echo "[run_dagger] CONFIG=$CONFIG" >> "$LOG_PATH"
+echo "[run_dagger] DAGGER_MOTION_FILE=$DAGGER_MOTION_FILE" >> "$LOG_PATH"
+echo "[run_dagger] SONIC_TEACHER_CHECKPOINT=$SONIC_TEACHER_CHECKPOINT" >> "$LOG_PATH"
 set +e
-"$PYTHON" -m dagger.cli --config "$CONFIG" 2>&1 | tee -a "$LOG_PATH"
-STATUS=${PIPESTATUS[0]}
+if [[ "${DAGGER_TEE:-0}" == "1" ]]; then
+  "$PYTHON" -m dagger.cli --config "$CONFIG" 2>&1 | tee -a "$LOG_PATH"
+  STATUS=${PIPESTATUS[0]}
+else
+  "$PYTHON" -m dagger.cli --config "$CONFIG" >> "$LOG_PATH" 2>&1
+  STATUS=$?
+fi
 set -e
-echo "[run_dagger] dagger_exit_code=$STATUS" | tee -a "$LOG_PATH"
+echo "[run_dagger] dagger_exit_code=$STATUS" >> "$LOG_PATH"
+echo "[run_dagger] log=$LOG_PATH"
+echo "[run_dagger] dagger_exit_code=$STATUS"
 exit "$STATUS"
