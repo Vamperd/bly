@@ -184,7 +184,9 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     motion_info = prepared["motion"]
     reference_terms = prepared["reference_terms"]
     env = _create_release_env(prepared, device, args_cli)
+    print("[dagger] resetting env for rollout", flush=True)
     observation = env.reset()
+    print("[dagger] env reset returned", flush=True)
     observation_dim = int(
         observation["actor_obs"].shape[-1] + observation["student_reference_features"].shape[-1]
     )
@@ -348,7 +350,9 @@ def _run_cvae(config, run_dir: Path, device: torch.device, args_cli, prepared: d
     sonic_root = prepared["sonic_root"]
     release_config = prepared["release_config"]
     env = _create_release_env(prepared, device, args_cli)
+    print("[dagger] resetting CVAE env for rollout", flush=True)
     observation = env.reset()
+    print("[dagger] CVAE env reset returned", flush=True)
     del observation
     contract = SonicActionContract(env)
     student_checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
