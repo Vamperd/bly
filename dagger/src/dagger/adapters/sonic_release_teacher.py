@@ -3,10 +3,49 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
+import pickle
 from typing import Any
 
 import torch
+
+
+class _CompatUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str):
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ModuleNotFoundError):
+            if module.startswith("trl"):
+                return type(name, (), {})
+            raise
+
+
+class _CompatPickleModule:
+    Unpickler = _CompatUnpickler
+
+    @staticmethod
+    def load(file, **kwargs):
+        return _CompatUnpickler(file, **kwargs).load()
+
+    @staticmethod
+    def loads(data, **kwargs):
+        return _CompatUnpickler(io.BytesIO(data), **kwargs).load()
+
+    @staticmethod
+    def dumps(value, **kwargs):
+        return pickle.dumps(value, **kwargs)
+
+    HIGHEST_PROTOCOL = pickle.HIGHEST_PROTOCOL
+
+
+def _load_checkpoint_compat(path: Path, device: torch.device) -> Any:
+    return torch.load(
+        path,
+        map_location=device,
+        weights_only=False,
+        pickle_module=_CompatPickleModule,
+    )
 
 
 def _load_state_dict(checkpoint: Any) -> dict[str, torch.Tensor]:
@@ -44,7 +83,7 @@ class SonicReleaseTeacher:
         print(f"[dagger] Teacher: hashing checkpoint {checkpoint_path}", flush=True)
         self.checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
         print("[dagger] Teacher: loading checkpoint tensors", flush=True)
-        state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        state = _load_checkpoint_compat(checkpoint_path, device)
         print("[dagger] Teacher: checkpoint tensors loaded", flush=True)
         state_dict = _load_state_dict(state)
         model_state = self.model.state_dict()
