@@ -129,12 +129,12 @@ class SonicDaggerEnv:
     @property
     def action_low(self) -> torch.Tensor:
         value = torch.as_tensor(self.action_space.low, device=self.device, dtype=torch.float32)
-        return value.reshape(1, -1)
+        return value.reshape(1, -1)[..., :ACTION_DIM]
 
     @property
     def action_high(self) -> torch.Tensor:
         value = torch.as_tensor(self.action_space.high, device=self.device, dtype=torch.float32)
-        return value.reshape(1, -1)
+        return value.reshape(1, -1)[..., :ACTION_DIM]
 
 
 class SonicActionContract:
@@ -160,9 +160,8 @@ class SonicActionContract:
         self.term = term
         self.device = env.device
         self.num_envs = env.num_envs
-        action_space = env.action_space
-        self.raw_low = torch.as_tensor(action_space.low, device=self.device, dtype=torch.float32).reshape(1, -1)
-        self.raw_high = torch.as_tensor(action_space.high, device=self.device, dtype=torch.float32).reshape(1, -1)
+        self.raw_low = env.action_low.to(self.device, dtype=torch.float32).reshape(1, -1)
+        self.raw_high = env.action_high.to(self.device, dtype=torch.float32).reshape(1, -1)
         if tuple(self.raw_low.shape) != (1, ACTION_DIM) or tuple(self.raw_high.shape) != (1, ACTION_DIM):
             raise ValueError("SONIC direct action space must have shape [29]")
         self.scale = torch.as_tensor(getattr(term, "_scale", 1.0), device=self.device, dtype=torch.float32)

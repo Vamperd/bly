@@ -219,7 +219,12 @@ class DaggerLoop:
 
     def _clip(self, action: torch.Tensor) -> torch.Tensor:
         if self.action_low is not None and self.action_high is not None:
-            return torch.maximum(torch.minimum(action, self.action_high), self.action_low)
+            low = self.action_low
+            high = self.action_high
+            if low.shape[-1] != action.shape[-1]:
+                low = low[..., : action.shape[-1]]
+                high = high[..., : action.shape[-1]]
+            return torch.maximum(torch.minimum(action, high), low)
         if self.action_clip_value is None or self.action_clip_value <= 0:
             return action
         return torch.clamp(action, -self.action_clip_value, self.action_clip_value)

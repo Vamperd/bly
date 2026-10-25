@@ -198,6 +198,12 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     )
     observation_dim = int(actor_obs.shape[-1] + reference_features.shape[-1])
     action_dim = int(env.action_space.shape[-1])
+    print(
+        f"[dagger] action_space shape={tuple(env.action_space.shape)} "
+        f"action_low shape={tuple(env.action_low.shape)} "
+        f"action_high shape={tuple(env.action_high.shape)}",
+        flush=True,
+    )
     input_terms = ("actor_obs", *reference_terms)
     print("[dagger] resolving hidden dims", flush=True)
     hidden_dims = tuple(
