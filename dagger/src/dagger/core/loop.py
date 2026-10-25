@@ -45,7 +45,6 @@ class DaggerLoop:
         observation = self.env.reset()
         self.teacher.reset(self.num_envs)
         self.student.reset(self.num_envs)
-        teacher_mask = torch.rand(self.num_envs, device=self.env.device) < float(beta)
         done = torch.zeros(self.num_envs, device=self.env.device, dtype=torch.bool)
         episode_id = torch.arange(self.num_envs, device=self.env.device, dtype=torch.long)
         next_episode_id = self.num_envs
@@ -65,9 +64,6 @@ class DaggerLoop:
         for _ in range(self.rollout_steps):
             if done.any():
                 done_ids = done.nonzero(as_tuple=False).flatten()
-                teacher_mask[done_ids] = torch.rand(
-                    len(done_ids), device=self.env.device
-                ) < float(beta)
                 episode_id[done_ids] = torch.arange(
                     next_episode_id,
                     next_episode_id + len(done_ids),
@@ -76,6 +72,9 @@ class DaggerLoop:
                 next_episode_id += len(done_ids)
                 timestep[done_ids] = 0
 
+            teacher_mask = (
+                torch.rand(self.num_envs, device=self.env.device) < float(beta)
+            )
             student_obs = self.student.observe(observation)
             teacher_action = self.teacher.act(observation, done)
             student_action = self.student.act(student_obs)

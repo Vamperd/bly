@@ -194,6 +194,31 @@ class EvaluationLoopTest(unittest.TestCase):
         self.assertEqual(metrics["num_envs"], 2.0)
 
 
+class MixtureTest(unittest.TestCase):
+    def test_collect_round_uses_per_step_beta_fraction(self):
+        torch.manual_seed(0)
+        with tempfile.TemporaryDirectory() as directory:
+            loop = DaggerLoop(
+                env=_FakeEnv(),
+                teacher=_FakeTeacher(),
+                student=PlainMlpStudent(
+                    observation_dim=3,
+                    action_dim=1,
+                    device=torch.device("cpu"),
+                    hidden_dims=(4,),
+                ),
+                num_envs=2,
+                rollout_steps=20,
+                action_clip_value=None,
+                run_dir=directory,
+                seed=0,
+            )
+            data = loop.collect_round(0, 0.5)
+        teacher_count = int(data.mixture_teacher.sum().item())
+        self.assertGreater(teacher_count, int(0.2 * data.count))
+        self.assertLess(teacher_count, int(0.8 * data.count))
+
+
 class MotionSelectionTest(unittest.TestCase):
     def test_selection_is_deterministic_and_excludes_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
