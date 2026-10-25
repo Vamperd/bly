@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pickle
 import subprocess
 import sys
 import time
@@ -81,7 +82,11 @@ def _motion_info(config, sonic_root: Path) -> dict:
         if not motion_path.is_absolute():
             motion_path = sonic_root / motion_path
         motion_path = motion_path.resolve()
-    requested = [str(value) for value in (config.dagger.get("motion_keys", []) or [])]
+    motion_key = config.dagger.get("motion_key", None)
+    if motion_key:
+        requested = [str(motion_key)]
+    else:
+        requested = [str(value) for value in (config.dagger.get("motion_keys", []) or [])]
     explicit = bool(requested)
     motion_count = int(config.dagger.get("motion_count", 0) or 0)
     motion_seed = int(config.dagger.get("motion_seed", int(config.seed)))
@@ -452,6 +457,157 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     return env, manifest
 
 
+def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
+    import numpy as np
+
+    from gear_sonic.envs.env_utils.joint_utils import get_body_joint_indices
+
+    env = _create_release_env(prepared, device, args_cli)
+    observation = env.reset()
+    actor_obs = observation["actor_obs"]
+    reference_features = observation["student_reference_features"]
+    observation_dim = int(actor_obs.shape[-1] + reference_features.shape[-1])
+    action_dim = int(env.action_space.shape[-1])
+    input_terms = ("actor_obs", *prepared["reference_terms"])
+    action_low = env.action_low
+    action_high = env.action_high
+    finite_bounds = bool(torch.isfinite(action_low).all() and torch.isfinite(action_high).all())
+    clip_value = config.dagger.get("action_clip_value", None)
+    if finite_bounds:
+        clip_value = None
+    elif clip_value is None:
+        clip_value = 20.0
+    hidden_dims = tuple(
+        int(value)
+        for value in config.student.get("hidden_dims", (2048, 2048, 1024, 1024, 512, 512))
+    )
+    checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"render checkpoint is missing: {checkpoint}")
+    student = PlainMlpStudent(
+        observation_dim=observation_dim,
+        action_dim=action_dim,
+        device=device,
+        hidden_dims=hidden_dims,
+        train_steps=0,
+        batch_size=1,
+        seed=int(config.seed),
+        input_terms=input_terms,
+        freeze_normalization=True,
+        motion_keys=prepared["motion"]["loaded_keys"],
+    )
+    payload = student.load(checkpoint)
+    if payload.get("input_terms") and tuple(payload["input_terms"]) != input_terms:
+        raise ValueError("render checkpoint input_terms do not match current contract")
+    checkpoint_motions = set(payload.get("motion_keys") or [])
+    selected_motions = set(prepared["motion"]["loaded_keys"])
+    if checkpoint_motions and selected_motions and not selected_motions.issubset(checkpoint_motions):
+        raise ValueError(
+            "render motion is not among the checkpoint training motions: "
+            f"{sorted(selected_motions - checkpoint_motions)}"
+        )
+
+    actual_env = getattr(env.env, "env", env.env)
+    scene = actual_env.scene
+    robot = scene["robot"]
+    joint_ids = get_body_joint_indices(robot)
+    if len(joint_ids) != action_dim:
+        raise ValueError(f"expected {action_dim} body joints for rendering, found {len(joint_ids)}")
+    fps = 1.0 / float(getattr(actual_env, "step_dt", 0.02))
+    steps = int(config.dagger.get("render_steps", 192))
+
+    def frame() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        dof_pos = robot.data.joint_pos[:, joint_ids][0].detach().cpu().numpy().copy()
+        root_pos = (
+            (robot.data.root_pos_w[0] - scene.env_origins[0]).detach().cpu().numpy().copy()
+        )
+        root_quat = robot.data.root_quat_w[0].detach().cpu().numpy().copy()
+        return dof_pos, root_pos, root_quat
+
+    dof_frames: list[np.ndarray] = []
+    root_pos_frames: list[np.ndarray] = []
+    root_quat_frames: list[np.ndarray] = []
+    terminated = False
+    done = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    executed_max = 0.0
+    for _ in range(steps):
+        dof_pos, root_pos, root_quat = frame()
+        dof_frames.append(dof_pos)
+        root_pos_frames.append(root_pos)
+        root_quat_frames.append(root_quat)
+        student_input = student.observe(observation)
+        action = student.act(student_input)
+        if finite_bounds:
+            low = action_low[..., : action.shape[-1]]
+            high = action_high[..., : action.shape[-1]]
+            action = torch.maximum(torch.minimum(action, high), low)
+        elif clip_value is not None and clip_value > 0:
+            action = torch.clamp(action, -float(clip_value), float(clip_value))
+        if not torch.isfinite(action).all():
+            raise FloatingPointError("non-finite render action")
+        executed_max = max(executed_max, float(action.abs().max().item()))
+        observation, _reward, next_done, _info = env.step({"actions": action})
+        done = next_done.to(device=env.device).bool()
+        if bool(done.any()):
+            terminated = True
+            break
+    if not terminated:
+        dof_pos, root_pos, root_quat = frame()
+        dof_frames.append(dof_pos)
+        root_pos_frames.append(root_pos)
+        root_quat_frames.append(root_quat)
+
+    trajectory = {
+        "dof_pos": np.stack(dof_frames, axis=0),
+        "root_pos_w": np.stack(root_pos_frames, axis=0),
+        "root_quat_w": np.stack(root_quat_frames, axis=0),
+        "quat_format": "wxyz",
+        "fps": fps,
+        "num_joints": int(dof_frames[0].shape[0]),
+        "total_frames": len(dof_frames),
+        "source": "dagger_mlp_policy_rollout",
+    }
+    trajectory_path = run_dir / "data" / "000000.trajectory.pkl"
+    trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+    with trajectory_path.open("wb") as handle:
+        pickle.dump(trajectory, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    video_path = run_dir / "videos" / "mlp_policy.mp4"
+    manifest = {
+        "format_version": "dagger_mlp_render_manifest_v1",
+        "mode": str(config.mode),
+        "sonic_repo_root": str(prepared["sonic_root"]),
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "motion_keys": prepared["motion"]["loaded_keys"],
+        "input_terms": list(input_terms),
+        "observation_dim": observation_dim,
+        "action_dim": action_dim,
+        "action_bounds": {
+            "finite": finite_bounds,
+            "clip_value": clip_value,
+            "low": action_low.cpu().reshape(-1).tolist() if finite_bounds else None,
+            "high": action_high.cpu().reshape(-1).tolist() if finite_bounds else None,
+        },
+        "requested_steps": steps,
+        "frames": len(dof_frames),
+        "fps": fps,
+        "terminated": terminated,
+        "executed_action_abs_max": executed_max,
+        "trajectory": str(trajectory_path),
+        "video": str(video_path),
+        "render_kind": "isaac_rollout_then_mujoco_kinematic_render",
+        "execution_pass": True,
+        "quality_pass": None,
+    }
+    _write_json(run_dir / "manifests" / "dagger_mlp_render_manifest.json", manifest)
+    print(
+        f"[dagger] render rollout written trajectory={trajectory_path} "
+        f"frames={len(dof_frames)} terminated={terminated} video={video_path}",
+        flush=True,
+    )
+    return env, manifest
+
+
 def _run_cvae(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
     from .adapters.cvae_student import CvaeStudentAdapter
     from .core.cvae_loop import CvaeDaggerLoop
@@ -620,6 +776,9 @@ def main() -> None:
         if str(config.mode).startswith("cvae"):
             env, manifest = _run_cvae(config, run_dir, device, args_cli, prepared)
             marker_name = "dagger_cvae_smoke.ok" if str(config.mode) == "cvae_smoke" else "dagger_cvae_execution.ok"
+        elif str(config.mode) == "mlp_render":
+            env, manifest = _run_mlp_render(config, run_dir, device, args_cli, prepared)
+            marker_name = "dagger_mlp_render.ok"
         elif str(config.mode).startswith("mlp"):
             env, manifest = _run_plain(config, run_dir, device, args_cli, prepared)
             if manifest.get("complete", True):

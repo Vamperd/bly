@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+import time
 from typing import Any
 
 import torch
@@ -60,6 +63,10 @@ class DaggerLoop:
             "motion_id",
             "mixture_teacher",
         )}
+        trace_collect = os.environ.get("DAGGER_COLLECT_TRACE", "1") == "1"
+        trace_path = self.run_dir / "logs" / "collect_trace.jsonl"
+        if trace_collect:
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
 
         for step_index in range(self.rollout_steps):
             if done.any():
@@ -92,6 +99,25 @@ class DaggerLoop:
             if not torch.isfinite(executed_action).all():
                 raise FloatingPointError("non-finite executed DAgger action")
             motion_id = self._motion_ids()
+            if trace_collect:
+                trace = {
+                    "timestamp": time.time(),
+                    "pid": os.getpid(),
+                    "round": int(round_index),
+                    "beta": float(beta),
+                    "step": int(step_index + 1),
+                    "motion_ids": motion_id.cpu().tolist(),
+                    "teacher_mask": teacher_mask.cpu().tolist(),
+                    "teacher_action": teacher_action.detach().cpu().tolist(),
+                    "student_action": student_action.detach().cpu().tolist(),
+                    "executed_action": executed_action.detach().cpu().tolist(),
+                    "teacher_abs_max": float(teacher_action.abs().max().item()),
+                    "student_abs_max": float(student_action.abs().max().item()),
+                    "executed_abs_max": float(executed_action.abs().max().item()),
+                }
+                with trace_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(trace) + "\n")
+                    handle.flush()
             next_observation, _reward, next_done, _info = self.env.step(
                 {"actions": executed_action}
             )

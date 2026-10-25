@@ -272,6 +272,41 @@ bash scripts/run_dagger_auto.sh mlp-long
 mean episode `38.2`。round 5 纯 student collect 触发 Isaac native SIGSEGV，
 因此完整 6 轮未完成；5 轮 partial 的 `same_motion_memorization_pass` 为 true。
 
+### MLP policy 视频回放
+
+`mlp_render` 新增为独立入口：
+
+- 创建 1 个 env、1 个训练 motion；
+- 加载 `checkpoints/round_09.pt` 等 MLP checkpoint；
+- 在 Isaac 中闭环执行 student policy；
+- 记录 `dof_pos`、`root_pos_w`、`root_quat_w` 为
+  `data/000000.trajectory.pkl`；
+- 使用 `sonic-repro-kit/render_mujoco_trajectory.py` 生成
+  `videos/mlp_policy.mp4`。
+
+```bash
+cd ~/bly/dagger
+
+export SONIC_REPO_ROOT=~/bly/sonic-repro/GR00T-WholeBodyControl
+export SONIC_TEACHER_CHECKPOINT=$SONIC_REPO_ROOT/sonic_release/last.pt
+export SONIC_RUNS_ROOT=~/bly/runs
+export DAGGER_MOTION_FILE=/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered
+export PYTHON=~/bly/sonic-repro/.venv-sonic/bin/python
+
+CKPT=/home/helloworld/bly/runs/dagger_mlp_long_20261026_014151/checkpoints/round_09.pt
+bash scripts/render_mlp_policy.sh "$CKPT" 192
+```
+
+第二个参数是 motion key，可省略；省略时使用训练 manifest 的第一个
+`motion_keys_loaded`。每个 motion 单独渲染，例如：
+
+```bash
+bash scripts/render_mlp_policy.sh "$CKPT" fishing_standing_start_R_001__A502 192
+```
+
+视频是 **Isaac policy rollout 的 MuJoCo 运动学渲染**，不是 CVAE replay65，
+也不是 MuJoCo torque 物理重放。若 policy 在 rollout 中终止，视频会记录到终止前的帧。
+
 ## 当前状态
 
 | 项目 | 状态 |
@@ -284,6 +319,7 @@ mean episode `38.2`。round 5 纯 student collect 触发 Isaac native SIGSEGV，
 | plain MLP 2-round sharding/resume | 已实现；中间 shard 只写 partial，最终 shard 写完整结果 |
 | plain MLP auto sharding | `run_dagger_auto.sh` 已实现；自动 resume/重试 |
 | plain MLP 192-step survival | 已加入 `max_episode_length`/`survival_ratio` 诊断；尚无通过结论 |
+| plain MLP policy video | `mlp_render` + `render_mlp_policy.sh` 已实现，Isaac rollout 后 MuJoCo 运动学渲染 |
 | same-motion memorization 门禁 | 2 轮 repro 为 true；完整 pilot 仍待评估 |
 | CVAE rolling window | 已实现并通过 Windows 单元测试 |
 | CVAE 动态 shard | 已实现并通过 shape 测试 |
