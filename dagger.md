@@ -171,6 +171,31 @@ smoke marker 为 `markers/dagger_mlp_smoke.ok`，pilot execution marker 为
 `markers/dagger_mlp_execution.ok`；只有满足记忆门禁时才额外写
 `markers/dagger_mlp_memorization.ok`。
 
+### 2 轮 repro 结果（2026-10-26）
+
+run：
+
+```text
+/home/helloworld/bly/runs/dagger_mlp_repro_20261026_005350
+```
+
+合同为 4 env、4 motion、T1000、eval 100、2 轮、per-step mixture、beta `[1.0, 0.5]`。
+round 0 为 teacher-only，round 1 的 `student_action_count` 为 `1977/4000`（49.4%），
+说明 per-step mixture 生效；4 个 motion 在训练和评估中均有覆盖。
+
+| 指标 | round 0 | round 1 |
+|---|---:|---:|
+| `student_only.teacher_action_rmse` | 0.8633 | 0.4023 |
+| `termination_rate` | 0.0475 | 0.0100 |
+| `action_saturation_ratio` | 0.0 | 0.0 |
+
+manifest 为 `memorization_pass=true`，marker
+`markers/dagger_mlp_memorization.ok` 存在。4 个 motion 中 3 个的 final RMSE 达到
+`<=0.7 × round0`；`looking_by_binoculars_003__A100` 略高于该阈值。
+
+证据边界：这是 **2 轮短 schedule** 的 same-motion 记忆结果，不是完整 6 轮 pilot，
+也不是新 motion 泛化。完整 `mlp-pilot` 仍待执行。
+
 ## 当前状态
 
 | 项目 | 状态 |
@@ -179,8 +204,8 @@ smoke marker 为 `markers/dagger_mlp_smoke.ok`，pilot execution marker 为
 | SONIC frozen teacher | 已实现，Ubuntu smoke 已通过 |
 | plain MLP DAgger | 已实现，mixture 已改为 per-step |
 | plain MLP 4-motion smoke | 已通过（execution） |
-| plain MLP 4-motion pilot | `mlp-repro` 2 轮通过；完整 6 轮待执行 |
-| same-motion memorization 门禁 | 已实现，待完整 pilot 评估 |
+| plain MLP 4-motion pilot | `mlp-repro` 2 轮通过（memorization）；完整 6 轮待执行 |
+| same-motion memorization 门禁 | 2 轮 repro 为 true；完整 pilot 仍待评估 |
 | CVAE rolling window | 已实现并通过 Windows 单元测试 |
 | CVAE 动态 shard | 已实现并通过 shape 测试 |
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |

@@ -52,6 +52,21 @@ test -f "$CONFIG" || {
 
 mkdir -p "$SONIC_RUNS_ROOT"
 
+if pgrep -f 'python -m dagger.cli' >/dev/null; then
+  echo "Another dagger.cli process is already running:" >&2
+  pgrep -af 'python -m dagger.cli' >&2
+  echo "Stop it before starting a new run." >&2
+  exit 2
+fi
+
+LOCK_PATH="$SONIC_RUNS_ROOT/.dagger_active.lock"
+exec 9>"$LOCK_PATH"
+if ! flock -n 9; then
+  echo "Another DAgger runner holds the lock: $LOCK_PATH" >&2
+  exit 2
+fi
+echo "[run_dagger] acquired $LOCK_PATH"
+
 if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro ]]; then
   test -d "$DAGGER_MOTION_FILE" || {
     echo "DAGGER_MOTION_FILE is missing or not a directory: $DAGGER_MOTION_FILE" >&2

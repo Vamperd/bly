@@ -143,6 +143,9 @@ class DaggerLoop:
         action_count = 0
         sse = 0.0
         element_count = 0
+        student_abs_max = 0.0
+        teacher_abs_max = 0.0
+        executed_abs_max = 0.0
         per_motion: dict[str, dict[str, float]] = {}
         for _ in range(int(steps)):
             motion_ids = self._motion_ids()
@@ -155,6 +158,8 @@ class DaggerLoop:
                     f"teacher={tuple(teacher_action.shape)}, "
                     f"student={tuple(student_action.shape)}"
                 )
+            student_abs_max = max(student_abs_max, float(student_action.abs().max().item()))
+            teacher_abs_max = max(teacher_abs_max, float(teacher_action.abs().max().item()))
             error = student_action.float() - teacher_action.float()
             squared = error.square()
             sse += float(squared.sum().item())
@@ -171,6 +176,7 @@ class DaggerLoop:
             action = self._clip(student_action)
             if not torch.isfinite(action).all():
                 raise FloatingPointError("non-finite evaluation action")
+            executed_abs_max = max(executed_abs_max, float(action.abs().max().item()))
             next_observation, reward, next_done, _info = self.env.step({"actions": action})
             next_done = next_done.to(device=self.env.device).bool()
             episode_steps += 1.0
@@ -218,6 +224,9 @@ class DaggerLoop:
                 else float(steps)
             ),
             "action_saturation_ratio": saturation_count / max(1, action_count),
+            "student_action_abs_max": student_abs_max,
+            "teacher_action_abs_max": teacher_abs_max,
+            "executed_action_abs_max": executed_abs_max,
         }
 
     def _clip(self, action: torch.Tensor) -> torch.Tensor:

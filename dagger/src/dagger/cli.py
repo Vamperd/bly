@@ -284,6 +284,9 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         )
         round_metrics["teacher_action_count"] = int(round_data.mixture_teacher.sum().item())
         round_metrics["student_action_count"] = int((~round_data.mixture_teacher).sum().item())
+        round_metrics["teacher_action_abs_max"] = float(round_data.teacher_action.abs().max().item())
+        round_metrics["student_action_abs_max"] = float(round_data.student_action.abs().max().item())
+        round_metrics["executed_action_abs_max"] = float(round_data.executed_action.abs().max().item())
         ids = round_data.motion_id.cpu()
         per_motion_samples = {}
         keys = motion_info["loaded_keys"]
@@ -310,6 +313,12 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
                 "checkpoint": str(checkpoint),
                 **round_metrics,
             }
+        )
+        _write_json(run_dir / "manifests" / "dagger_mlp_metrics.partial.json", metrics)
+        _write_json(run_dir / "logs" / f"round_{round_index:02d}.json", metrics[-1])
+        print(
+            f"[dagger] round={round_index} partial metrics written",
+            flush=True,
         )
     memorization_pass = same_motion_memorization_pass(metrics)
     manifest = {
