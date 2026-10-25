@@ -91,7 +91,7 @@ class PlainMlpStudent:
             raise FloatingPointError("non-finite student action")
         return output
 
-    def train_on_dataset(self, dataset) -> dict[str, float]:
+    def train_on_dataset(self, dataset, *, label: str = "") -> dict[str, float]:
         observations, actions = dataset.tensors()
         observations = observations.float()
         actions = actions.float()
@@ -123,8 +123,9 @@ class PlainMlpStudent:
             self.optimizer.step()
             losses.append(float(loss.detach().cpu()))
             if self.train_steps >= 100 and (step_index + 1) % 100 == 0:
+                prefix = f"{label} " if label else ""
                 print(
-                    f"[dagger] train step={step_index + 1}/{self.train_steps} "
+                    f"[dagger] train {prefix}step={step_index + 1}/{self.train_steps} "
                     f"loss={losses[-1]:.6g}",
                     flush=True,
                 )

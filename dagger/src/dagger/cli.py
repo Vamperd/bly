@@ -324,7 +324,7 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         collect_seconds = time.perf_counter() - collect_started
         print(f"[dagger] round={round_index} collected samples={round_data.count}", flush=True)
         train_started = time.perf_counter()
-        round_metrics = loop.train_student()
+        round_metrics = loop.train_student(round_index=round_index)
         train_seconds = time.perf_counter() - train_started
         round_metrics["collect_seconds"] = collect_seconds
         round_metrics["train_seconds"] = train_seconds
@@ -352,7 +352,9 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         round_metrics["per_motion_samples"] = per_motion_samples
         print(f"[dagger] round={round_index} evaluating steps={eval_steps}", flush=True)
         eval_started = time.perf_counter()
-        round_metrics["student_only"] = loop.evaluate_student_only(eval_steps)
+        round_metrics["student_only"] = loop.evaluate_student_only(
+            eval_steps, round_index=round_index
+        )
         round_metrics["eval_seconds"] = time.perf_counter() - eval_started
         print(
             f"[dagger] round={round_index} eval_rmse="

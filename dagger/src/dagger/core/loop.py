@@ -131,12 +131,15 @@ class DaggerLoop:
         self.dataset.save_round(round_index, self.run_dir)
         return result
 
-    def train_student(self) -> dict[str, float]:
-        metrics = self.student.train_on_dataset(self.dataset)
+    def train_student(self, *, round_index: int | None = None) -> dict[str, float]:
+        label = f"round={round_index}" if round_index is not None else ""
+        metrics = self.student.train_on_dataset(self.dataset, label=label)
         metrics["dataset_samples"] = float(self.dataset.count)
         return metrics
 
-    def evaluate_student_only(self, steps: int) -> dict[str, Any]:
+    def evaluate_student_only(
+        self, steps: int, *, round_index: int | None = None
+    ) -> dict[str, Any]:
         observation = self.env.reset()
         self.student.reset(self.num_envs)
         self.teacher.reset(self.num_envs)
@@ -208,8 +211,9 @@ class DaggerLoop:
             observation = next_observation
             done = next_done
             if (step_index + 1) % 50 == 0 or step_index + 1 == int(steps):
+                prefix = f"round={round_index} " if round_index is not None else ""
                 print(
-                    f"[dagger] eval step={step_index + 1}/{int(steps)}",
+                    f"[dagger] eval {prefix}step={step_index + 1}/{int(steps)}",
                     flush=True,
                 )
         by_motion = {}
