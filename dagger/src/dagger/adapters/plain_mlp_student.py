@@ -75,19 +75,28 @@ class PlainMlpStudent:
                 f"student input dimension mismatch: expected {self.input_dim}, "
                 f"found {value.shape[-1]}"
             )
+        if not torch.isfinite(value).all():
+            raise FloatingPointError("non-finite student observation")
         return value
 
     def act(self, student_input: torch.Tensor) -> torch.Tensor:
         value = student_input.to(self.device, dtype=torch.float32)
+        if not torch.isfinite(value).all():
+            raise FloatingPointError("non-finite student input")
         value = (value - self._mean) / self._std.clamp_min(1.0e-6)
         self.model.eval()
         with torch.no_grad():
-            return self.model(value)
+            output = self.model(value)
+        if not torch.isfinite(output).all():
+            raise FloatingPointError("non-finite student action")
+        return output
 
     def train_on_dataset(self, dataset) -> dict[str, float]:
         observations, actions = dataset.tensors()
         observations = observations.float()
         actions = actions.float()
+        if not torch.isfinite(observations).all() or not torch.isfinite(actions).all():
+            raise FloatingPointError("non-finite DAgger observations or actions")
         if not self.freeze_normalization or not self._normalization_fitted:
             self._mean = observations.mean(dim=0).to(self.device)
             self._std = observations.std(dim=0).clamp_min(1.0e-4).to(self.device)
@@ -106,11 +115,16 @@ class PlainMlpStudent:
             prediction = self.model(normalized[indices].to(self.device))
             target = actions[indices].to(self.device)
             loss = torch.mean(torch.square(prediction - target))
+            if not torch.isfinite(prediction).all() or not torch.isfinite(loss):
+                raise FloatingPointError("non-finite student prediction or loss")
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(self.model.parameters(), 1.0, error_if_nonfinite=True)
             self.optimizer.step()
             losses.append(float(loss.detach().cpu()))
+        for parameter in self.model.parameters():
+            if not torch.isfinite(parameter).all():
+                raise FloatingPointError("non-finite student parameter after training")
         self.model.eval()
         predictions: list[torch.Tensor] = []
         with torch.no_grad():
@@ -118,6 +132,8 @@ class PlainMlpStudent:
                 chunk = normalized[start : start + max(self.batch_size, 256)].to(self.device)
                 predictions.append(self.model(chunk).cpu())
         prediction = torch.cat(predictions, dim=0)
+        if not torch.isfinite(prediction).all():
+            raise FloatingPointError("non-finite student evaluation prediction")
         rmse = torch.sqrt(torch.mean(torch.square(prediction - actions))).item()
         return {
             "train_loss": losses[-1] if losses else float("nan"),

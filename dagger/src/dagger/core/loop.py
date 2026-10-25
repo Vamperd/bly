@@ -90,6 +90,8 @@ class DaggerLoop:
                 self._clip(teacher_action),
                 self._clip(student_action),
             )
+            if not torch.isfinite(executed_action).all():
+                raise FloatingPointError("non-finite executed DAgger action")
             motion_id = self._motion_ids()
             next_observation, _reward, next_done, _info = self.env.step(
                 {"actions": executed_action}
@@ -168,6 +170,8 @@ class DaggerLoop:
                 record["elements"] += 1.0
                 record["steps"] += 1.0
             action = self._clip(student_action)
+            if not torch.isfinite(action).all():
+                raise FloatingPointError("non-finite evaluation action")
             next_observation, reward, next_done, _info = self.env.step({"actions": action})
             next_done = next_done.to(device=self.env.device).bool()
             episode_steps += 1.0
