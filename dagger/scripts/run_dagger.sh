@@ -24,6 +24,7 @@ DAGGER_MOTION_FILE="${DAGGER_MOTION_FILE:-$SONIC_REPO_ROOT/data/motion_lib_bones
 
 export DAGGER_ROOT SONIC_REPO_ROOT SONIC_TEACHER_CHECKPOINT SONIC_RUNS_ROOT STATE_ACTION_CVAE_ROOT DAGGER_MOTION_FILE
 export PYTHONPATH="$DAGGER_ROOT/src:$STATE_ACTION_CVAE_ROOT/src:$SONIC_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUNBUFFERED=1
 PYTHON="${PYTHON:-$HOME/bly/sonic-repro/.venv-sonic/bin/python}"
 [[ -x "$PYTHON" ]] || {
   echo "Python executable is missing or not executable: $PYTHON" >&2
@@ -68,5 +69,13 @@ if [[ "$MODE" == cvae-smoke || "$MODE" == cvae-pilot ]]; then
   }
 fi
 
-"$PYTHON" -m dagger.cli --config "$CONFIG" 2>&1 | tee \
-  "$SONIC_RUNS_ROOT/dagger_${MODE}_command_$(date +%Y%m%d_%H%M%S).log"
+LOG_PATH="$SONIC_RUNS_ROOT/dagger_${MODE}_command_$(date +%Y%m%d_%H%M%S).log"
+echo "[run_dagger] CONFIG=$CONFIG" | tee "$LOG_PATH"
+echo "[run_dagger] DAGGER_MOTION_FILE=$DAGGER_MOTION_FILE" | tee -a "$LOG_PATH"
+echo "[run_dagger] SONIC_TEACHER_CHECKPOINT=$SONIC_TEACHER_CHECKPOINT" | tee -a "$LOG_PATH"
+set +e
+"$PYTHON" -m dagger.cli --config "$CONFIG" 2>&1 | tee -a "$LOG_PATH"
+STATUS=${PIPESTATUS[0]}
+set -e
+echo "[run_dagger] dagger_exit_code=$STATUS" | tee -a "$LOG_PATH"
+exit "$STATUS"

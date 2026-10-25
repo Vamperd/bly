@@ -38,8 +38,11 @@ def _launch_app(config):
     args_cli.kit_args = "--/log/level=error --/log/fileLogLevel=error --/log/outputStreamLevel=error"
     from filelock import FileLock
 
+    print("[dagger] waiting for Isaac app launcher lock", flush=True)
     with FileLock("/tmp/isaaclab_app_launcher.lock"):
+        print("[dagger] Isaac app launcher lock acquired", flush=True)
         launcher = AppLauncher(args_cli)
+    print("[dagger] AppLauncher returned", flush=True)
     return launcher, args_cli
 
 
@@ -115,6 +118,11 @@ def _motion_info(config, sonic_root: Path) -> dict:
 def _make_release_env(config, run_dir: Path, device: torch.device, args_cli):
     sonic_root = Path(str(config.sonic_repo_root)).expanduser().resolve()
     motion = _motion_info(config, sonic_root)
+    print(
+        f"[dagger] motion method={motion['selection_method']} file={motion['motion_file']} "
+        f"requested={motion['requested_keys']}",
+        flush=True,
+    )
     release_config = compose_release_config(
         sonic_root,
         num_envs=int(config.dagger.num_envs),
@@ -140,6 +148,11 @@ def _make_release_env(config, run_dir: Path, device: torch.device, args_cli):
         reference_terms=reference_terms,
     )
     motion["loaded_keys"] = env.motion_keys
+    print(
+        f"[dagger] env ready loaded_motion_keys={motion['loaded_keys']} "
+        f"reference_terms={reference_terms}",
+        flush=True,
+    )
     if motion["requested_keys"]:
         missing = [key for key in motion["requested_keys"] if key not in motion["loaded_keys"]]
         if missing:
@@ -161,11 +174,22 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli):
         int(value)
         for value in config.student.get("hidden_dims", (2048, 2048, 1024, 1024, 512, 512))
     )
+    print(
+        f"[dagger] observation_dim={observation_dim} action_dim={action_dim} "
+        f"input_terms={input_terms} hidden_dims={hidden_dims}",
+        flush=True,
+    )
+    print("[dagger] loading SONIC release teacher", flush=True)
     teacher = SonicReleaseTeacher(
         config=release_config,
         env=env,
         checkpoint=str(config.teacher_checkpoint),
         device=device,
+    )
+    print(
+        f"[dagger] teacher ready params={teacher.parameter_count} "
+        f"action_dim={teacher.action_dim}",
+        flush=True,
     )
     student = PlainMlpStudent(
         observation_dim=observation_dim,
@@ -180,6 +204,11 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli):
         input_terms=input_terms,
         freeze_normalization=bool(config.student.get("freeze_normalization", False)),
         motion_keys=motion_info["loaded_keys"],
+    )
+    print(
+        f"[dagger] student ready params={sum(p.numel() for p in student.model.parameters())} "
+        f"normalization_mode={'frozen' if student.freeze_normalization else 'recomputed'}",
+        flush=True,
     )
     loop = DaggerLoop(
         env=env,
@@ -196,8 +225,11 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli):
     eval_steps = int(config.dagger.get("eval_steps", config.dagger.rollout_steps) or config.dagger.rollout_steps)
     metrics = []
     for round_index, beta in enumerate(config.dagger.beta_schedule):
+        print(f"[dagger] round={round_index} beta={float(beta)} collecting", flush=True)
         round_data = loop.collect_round(round_index, float(beta))
+        print(f"[dagger] round={round_index} collected samples={round_data.count}", flush=True)
         round_metrics = loop.train_student()
+        print(f"[dagger] round={round_index} trained", flush=True)
         round_metrics["teacher_action_rmse_rollout"] = float(
             torch.sqrt(
                 torch.mean(
@@ -216,7 +248,13 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli):
             for value in sorted(set(int(item) for item in ids.tolist())):
                 per_motion_samples[f"motion_{value}"] = int((ids == value).sum().item())
         round_metrics["per_motion_samples"] = per_motion_samples
+        print(f"[dagger] round={round_index} evaluating steps={eval_steps}", flush=True)
         round_metrics["student_only"] = loop.evaluate_student_only(eval_steps)
+        print(
+            f"[dagger] round={round_index} eval_rmse="
+            f"{round_metrics['student_only'].get('teacher_action_rmse')}",
+            flush=True,
+        )
         checkpoint = run_dir / "checkpoints" / f"round_{round_index:02d}.pt"
         student.save(str(checkpoint), extra_metadata={"round_index": round_index})
         metrics.append(
@@ -272,6 +310,10 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli):
     _write_json(run_dir / "manifests" / "dagger_mlp_metrics.json", metrics)
     _write_json(run_dir / "manifests" / "dagger_manifest.json", manifest)
     _write_json(run_dir / "manifests" / "dagger_metrics.json", metrics)
+    print(
+        f"[dagger] manifest written memorization_pass={memorization_pass}",
+        flush=True,
+    )
     if memorization_pass:
         (run_dir / "markers" / "dagger_mlp_memorization.ok").write_text(
             "memorization_pass=true\n", encoding="utf-8"
@@ -404,7 +446,14 @@ def main() -> None:
     if not sonic_root.is_dir():
         raise FileNotFoundError(f"SONIC_REPO_ROOT does not exist: {sonic_root}")
     os.chdir(sonic_root)
+    print(
+        f"[dagger] mode={config.mode} run_dir={run_dir} sonic_root={sonic_root} "
+        f"device={device}",
+        flush=True,
+    )
+    print("[dagger] launching Isaac app", flush=True)
     launcher, args_cli = _launch_app(config)
+    print("[dagger] Isaac app ready", flush=True)
     env = None
     try:
         if str(config.mode).startswith("cvae"):
