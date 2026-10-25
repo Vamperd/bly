@@ -467,6 +467,22 @@ def _run_cvae(config, run_dir: Path, device: torch.device, args_cli, prepared: d
 
 
 def main() -> None:
+    import faulthandler
+    import signal
+
+    faulthandler.enable()
+    try:
+        faulthandler.register(signal.SIGUSR1)
+    except (AttributeError, OSError, ValueError):
+        pass
+    faulthandler_seconds = int(os.environ.get("DAGGER_FAULTHANDLER_SECONDS", "120"))
+    if faulthandler_seconds > 0:
+        faulthandler.dump_traceback_later(faulthandler_seconds, repeat=True)
+    print(
+        f"[dagger] faulthandler enabled every {faulthandler_seconds}s "
+        f"(SIGUSR1 supported where available)",
+        flush=True,
+    )
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
