@@ -34,3 +34,13 @@ class AggregatedDataset:
         torch.save(self.rounds[-1].__dict__, path)
         return path
 
+    @classmethod
+    def load_rounds(cls, paths: Iterable[str | Path]) -> "AggregatedDataset":
+        result = cls()
+        for path in paths:
+            payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+            if not isinstance(payload, dict):
+                raise ValueError(f"DAgger round shard is not a tensor mapping: {path}")
+            result.append(DaggerRound(**payload))
+        return result
+

@@ -61,7 +61,7 @@ class DaggerLoop:
             "mixture_teacher",
         )}
 
-        for _ in range(self.rollout_steps):
+        for step_index in range(self.rollout_steps):
             if done.any():
                 done_ids = done.nonzero(as_tuple=False).flatten()
                 episode_id[done_ids] = torch.arange(
@@ -109,6 +109,12 @@ class DaggerLoop:
             timestep += 1
             done = next_done
             observation = next_observation
+            if (step_index + 1) % 100 == 0 or step_index + 1 == self.rollout_steps:
+                print(
+                    f"[dagger] collect round={round_index} "
+                    f"step={step_index + 1}/{self.rollout_steps}",
+                    flush=True,
+                )
 
         result = DaggerRound(
             student_obs=torch.cat(buffers["student_obs"]),
@@ -147,7 +153,7 @@ class DaggerLoop:
         teacher_abs_max = 0.0
         executed_abs_max = 0.0
         per_motion: dict[str, dict[str, float]] = {}
-        for _ in range(int(steps)):
+        for step_index in range(int(steps)):
             motion_ids = self._motion_ids()
             student_obs = self.student.observe(observation)
             student_action = self.student.act(student_obs)
@@ -201,6 +207,11 @@ class DaggerLoop:
                 action_count += int(action.numel())
             observation = next_observation
             done = next_done
+            if (step_index + 1) % 50 == 0 or step_index + 1 == int(steps):
+                print(
+                    f"[dagger] eval step={step_index + 1}/{int(steps)}",
+                    flush=True,
+                )
         by_motion = {}
         for key, record in per_motion.items():
             denominator = max(record["elements"], 1.0)

@@ -82,10 +82,11 @@ Windows 已完成：
 - checkpoint round-trip、action bounds clip、motion 选择测试；
 - DAgger student-only teacher RMSE/per-motion 测试；
 - per-step teacher/student mixture 比例测试；
+- DAgger data shard round-trip 测试；
 - same-motion memorization 门禁测试；
 - SONIC reference term selection 和 motion key contract 测试。
 
-当前共 20 个 Windows 单元测试通过。
+当前共 21 个 Windows 单元测试通过。
 
 当前测试命令：
 
@@ -196,6 +197,36 @@ manifest 为 `memorization_pass=true`，marker
 证据边界：这是 **2 轮短 schedule** 的 same-motion 记忆结果，不是完整 6 轮 pilot，
 也不是新 motion 泛化。完整 `mlp-pilot` 仍待执行。
 
+### 2 轮分片续训
+
+完整 pilot 可用 2 轮一个进程分片执行：
+
+```bash
+# 第一个 shard：rounds 0-1
+export DAGGER_ROUNDS_PER_PROCESS=2
+unset DAGGER_RESUME_RUN
+bash scripts/run_dagger.sh mlp-pilot
+RUN=$(ls -dt ~/bly/runs/dagger_mlp_pilot_* | head -1)
+
+# 第二个 shard：rounds 2-3
+export DAGGER_RESUME_RUN="$RUN"
+bash scripts/run_dagger.sh mlp-pilot
+
+# 第三个 shard：rounds 4-5，写最终 manifest 和质量 marker
+bash scripts/run_dagger.sh mlp-pilot
+```
+
+恢复规则：
+
+- 只从 `data/dagger/round_XX.pt` 与 `checkpoints/round_XX.pt` 同时存在的连续 round 继续；
+- 加载最后一次 round checkpoint 的 model/optimizer/input mean/std；
+- 加载已完成 round 的数据 shard 和 `metrics.partial.json`；
+- `DAGGER_ROUNDS_PER_PROCESS=2` 限制本次进程只跑 2 轮；
+- 中间 shard 只写 `dagger_mlp_manifest.partial.json`、`metrics.partial.json` 和
+  `dagger_mlp_shard.ok`；全部 round 完成后才写最终 manifest、`dagger_mlp_execution.ok`
+  和（若通过）`dagger_mlp_memorization.ok`；
+- 同一时间只允许一个 runner（脚本有 `flock` 和 `pgrep` 检查）。
+
 ## 当前状态
 
 | 项目 | 状态 |
@@ -205,6 +236,7 @@ manifest 为 `memorization_pass=true`，marker
 | plain MLP DAgger | 已实现，mixture 已改为 per-step |
 | plain MLP 4-motion smoke | 已通过（execution） |
 | plain MLP 4-motion pilot | `mlp-repro` 2 轮通过（memorization）；完整 6 轮待执行 |
+| plain MLP 2-round sharding/resume | 已实现；中间 shard 只写 partial，最终 shard 写完整结果 |
 | same-motion memorization 门禁 | 2 轮 repro 为 true；完整 pilot 仍待评估 |
 | CVAE rolling window | 已实现并通过 Windows 单元测试 |
 | CVAE 动态 shard | 已实现并通过 shape 测试 |

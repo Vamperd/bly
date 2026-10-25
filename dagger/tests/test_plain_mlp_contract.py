@@ -85,6 +85,18 @@ class PlainMlpContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(student._mean, mean_before))
         self.assertTrue(torch.equal(student._std, std_before))
 
+    def test_dataset_shard_round_trip(self):
+        dataset = AggregatedDataset()
+        observations = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        actions = torch.tensor([[0.1, 0.2], [0.3, 0.4]])
+        dataset.append(_round(observations, actions))
+        with tempfile.TemporaryDirectory() as directory:
+            path = dataset.save_round(0, directory)
+            restored = AggregatedDataset.load_rounds([path])
+        self.assertEqual(restored.count, 2)
+        self.assertTrue(torch.equal(restored.rounds[0].student_obs, observations))
+        self.assertTrue(torch.equal(restored.rounds[0].teacher_action, actions))
+
     def test_checkpoint_round_trip(self):
         student = self._student()
         dataset = AggregatedDataset()

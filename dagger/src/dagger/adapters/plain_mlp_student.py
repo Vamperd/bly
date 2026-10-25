@@ -106,7 +106,7 @@ class PlainMlpStudent:
         generator.manual_seed(self.seed + len(dataset.rounds))
         losses: list[float] = []
         self.model.train()
-        for _ in range(self.train_steps):
+        for step_index in range(self.train_steps):
             indices = torch.randint(
                 normalized.shape[0],
                 (min(self.batch_size, normalized.shape[0]),),
@@ -122,6 +122,12 @@ class PlainMlpStudent:
             nn.utils.clip_grad_norm_(self.model.parameters(), 1.0, error_if_nonfinite=True)
             self.optimizer.step()
             losses.append(float(loss.detach().cpu()))
+            if self.train_steps >= 100 and (step_index + 1) % 100 == 0:
+                print(
+                    f"[dagger] train step={step_index + 1}/{self.train_steps} "
+                    f"loss={losses[-1]:.6g}",
+                    flush=True,
+                )
         for parameter in self.model.parameters():
             if not torch.isfinite(parameter).all():
                 raise FloatingPointError("non-finite student parameter after training")

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import traceback
 
 import torch
@@ -17,6 +18,7 @@ from omegaconf import OmegaConf
 
 from .adapters.plain_mlp_student import PlainMlpStudent
 from .adapters.sonic_release_teacher import SonicReleaseTeacher
+from .core.dataset import AggregatedDataset
 from .core.loop import DaggerLoop
 from .core.metrics import estimate_teacher_identifiability, same_motion_memorization_pass
 from .core.motion_selection import select_motion_keys
@@ -268,12 +270,64 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         action_high=action_high if finite_bounds else None,
     )
     eval_steps = int(config.dagger.get("eval_steps", config.dagger.rollout_steps) or config.dagger.rollout_steps)
-    metrics = []
-    for round_index, beta in enumerate(config.dagger.beta_schedule):
+    beta_schedule = [float(value) for value in config.dagger.beta_schedule]
+    data_paths: list[Path] = []
+    for index in range(len(beta_schedule)):
+        data_path = run_dir / "data" / "dagger" / f"round_{index:02d}.pt"
+        checkpoint_path = run_dir / "checkpoints" / f"round_{index:02d}.pt"
+        if data_path.is_file() and checkpoint_path.is_file():
+            data_paths.append(data_path)
+        else:
+            break
+    start_round = len(data_paths)
+    metrics: list[dict] = []
+    if start_round:
+        partial_path = run_dir / "manifests" / "dagger_mlp_metrics.partial.json"
+        if partial_path.is_file():
+            loaded_metrics = json.loads(partial_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_metrics, list):
+                metrics = loaded_metrics[:start_round]
+        if len(metrics) != start_round:
+            metrics = []
+            for index in range(start_round):
+                log_path = run_dir / "logs" / f"round_{index:02d}.json"
+                if not log_path.is_file():
+                    raise RuntimeError(
+                        f"cannot resume: completed round {index} has no metrics record"
+                    )
+                metrics.append(json.loads(log_path.read_text(encoding="utf-8")))
+        if len(metrics) != start_round:
+            raise RuntimeError("cannot resume: metrics count does not match completed rounds")
+        loop.dataset = AggregatedDataset.load_rounds(data_paths)
+        last_checkpoint = run_dir / "checkpoints" / f"round_{start_round - 1:02d}.pt"
+        payload = student.load(last_checkpoint)
+        if payload.get("input_terms") and tuple(payload["input_terms"]) != input_terms:
+            raise ValueError("resume checkpoint input_terms do not match current contract")
+        if payload.get("motion_keys") and list(payload["motion_keys"]) != motion_info["loaded_keys"]:
+            raise ValueError("resume checkpoint motion_keys do not match current motion selection")
+        print(
+            f"[dagger] resumed from round={start_round - 1} "
+            f"dataset_samples={loop.dataset.count}",
+            flush=True,
+        )
+    rounds_per_process = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
+    processed = 0
+    for round_index, beta in enumerate(beta_schedule):
+        if round_index < start_round:
+            continue
+        if rounds_per_process > 0 and processed >= rounds_per_process:
+            break
+        round_started = time.perf_counter()
         print(f"[dagger] round={round_index} beta={float(beta)} collecting", flush=True)
+        collect_started = time.perf_counter()
         round_data = loop.collect_round(round_index, float(beta))
+        collect_seconds = time.perf_counter() - collect_started
         print(f"[dagger] round={round_index} collected samples={round_data.count}", flush=True)
+        train_started = time.perf_counter()
         round_metrics = loop.train_student()
+        train_seconds = time.perf_counter() - train_started
+        round_metrics["collect_seconds"] = collect_seconds
+        round_metrics["train_seconds"] = train_seconds
         print(f"[dagger] round={round_index} trained", flush=True)
         round_metrics["teacher_action_rmse_rollout"] = float(
             torch.sqrt(
@@ -297,7 +351,9 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
                 per_motion_samples[f"motion_{value}"] = int((ids == value).sum().item())
         round_metrics["per_motion_samples"] = per_motion_samples
         print(f"[dagger] round={round_index} evaluating steps={eval_steps}", flush=True)
+        eval_started = time.perf_counter()
         round_metrics["student_only"] = loop.evaluate_student_only(eval_steps)
+        round_metrics["eval_seconds"] = time.perf_counter() - eval_started
         print(
             f"[dagger] round={round_index} eval_rmse="
             f"{round_metrics['student_only'].get('teacher_action_rmse')}",
@@ -305,6 +361,7 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         )
         checkpoint = run_dir / "checkpoints" / f"round_{round_index:02d}.pt"
         student.save(str(checkpoint), extra_metadata={"round_index": round_index})
+        round_metrics["round_seconds"] = time.perf_counter() - round_started
         metrics.append(
             {
                 "round": round_index,
@@ -320,6 +377,8 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
             f"[dagger] round={round_index} partial metrics written",
             flush=True,
         )
+        processed += 1
+    all_rounds_complete = (start_round + processed) >= len(beta_schedule)
     memorization_pass = same_motion_memorization_pass(metrics)
     manifest = {
         "format_version": "dagger_mlp_manifest_v1",
@@ -355,6 +414,11 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         "rollout_steps": int(config.dagger.rollout_steps),
         "eval_steps": eval_steps,
         "seed": int(config.seed),
+        "resume_run": os.environ.get("DAGGER_RESUME_RUN") or None,
+        "start_round": start_round,
+        "rounds_per_process": rounds_per_process,
+        "completed_rounds": len(metrics),
+        "complete": all_rounds_complete,
         "rounds": metrics,
         "execution_pass": True,
         "quality_pass": None,
@@ -362,17 +426,26 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         "memorization_scope": "same_motion_set",
         "quality_note": "Same-motion DAgger memorization only; no held-out or new-motion generalization claim.",
     }
-    _write_json(run_dir / "manifests" / "dagger_mlp_manifest.json", manifest)
-    _write_json(run_dir / "manifests" / "dagger_mlp_metrics.json", metrics)
-    _write_json(run_dir / "manifests" / "dagger_manifest.json", manifest)
-    _write_json(run_dir / "manifests" / "dagger_metrics.json", metrics)
-    print(
-        f"[dagger] manifest written memorization_pass={memorization_pass}",
-        flush=True,
-    )
-    if memorization_pass:
-        (run_dir / "markers" / "dagger_mlp_memorization.ok").write_text(
-            "memorization_pass=true\n", encoding="utf-8"
+    _write_json(run_dir / "manifests" / "dagger_mlp_manifest.partial.json", manifest)
+    _write_json(run_dir / "manifests" / "dagger_mlp_metrics.partial.json", metrics)
+    if all_rounds_complete:
+        _write_json(run_dir / "manifests" / "dagger_mlp_manifest.json", manifest)
+        _write_json(run_dir / "manifests" / "dagger_mlp_metrics.json", metrics)
+        _write_json(run_dir / "manifests" / "dagger_manifest.json", manifest)
+        _write_json(run_dir / "manifests" / "dagger_metrics.json", metrics)
+        print(
+            f"[dagger] complete manifest written memorization_pass={memorization_pass}",
+            flush=True,
+        )
+        if memorization_pass:
+            (run_dir / "markers" / "dagger_mlp_memorization.ok").write_text(
+                "memorization_pass=true\n", encoding="utf-8"
+            )
+    else:
+        print(
+            f"[dagger] shard complete completed_rounds={len(metrics)}/{len(beta_schedule)}; "
+            "final manifest deferred",
+            flush=True,
         )
     return env, manifest
 
@@ -515,7 +588,16 @@ def main() -> None:
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
     sys.argv = [sys.argv[0]]
-    run_dir = _new_run_dir(config)
+    resume_run = os.environ.get("DAGGER_RESUME_RUN", "").strip()
+    if resume_run:
+        run_dir = Path(resume_run).expanduser().resolve()
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"DAGGER_RESUME_RUN does not exist: {run_dir}")
+        for child in ("logs", "manifests", "data/dagger", "checkpoints", "markers"):
+            (run_dir / child).mkdir(parents=True, exist_ok=True)
+        print(f"[dagger] resuming run_dir={run_dir}", flush=True)
+    else:
+        run_dir = _new_run_dir(config)
     device = torch.device(str(config.get("device", "cuda:0")))
     sonic_root = Path(str(config.sonic_repo_root)).expanduser().resolve()
     if not sonic_root.is_dir():
@@ -538,7 +620,10 @@ def main() -> None:
             marker_name = "dagger_cvae_smoke.ok" if str(config.mode) == "cvae_smoke" else "dagger_cvae_execution.ok"
         elif str(config.mode).startswith("mlp"):
             env, manifest = _run_plain(config, run_dir, device, args_cli, prepared)
-            marker_name = "dagger_mlp_smoke.ok" if str(config.mode) == "mlp_smoke" else "dagger_mlp_execution.ok"
+            if manifest.get("complete", True):
+                marker_name = "dagger_mlp_smoke.ok" if str(config.mode) == "mlp_smoke" else "dagger_mlp_execution.ok"
+            else:
+                marker_name = "dagger_mlp_shard.ok"
         else:
             env, manifest = _run_plain(config, run_dir, device, args_cli, prepared)
             marker_name = "dagger_smoke.ok" if str(config.mode) == "smoke" else "dagger_execution.ok"
