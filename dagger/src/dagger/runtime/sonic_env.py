@@ -350,9 +350,15 @@ def create_release_env(
     args_cli: Any,
     reference_terms: list[str] | tuple[str, ...] | None = None,
 ) -> SonicDaggerEnv:
+    print("[dagger] importing SONIC create_manager_env", flush=True)
     from gear_sonic.train_agent_trl import create_manager_env
 
+    print("[dagger] calling create_manager_env", flush=True)
     raw_env = create_manager_env(config, device, args_cli)
+    print("[dagger] create_manager_env returned", flush=True)
     prepare_env_dimensions(raw_env)
-    return SonicDaggerEnv(raw_env, reference_terms=reference_terms)
+    print("[dagger] prepare_env_dimensions returned", flush=True)
+    wrapped = SonicDaggerEnv(raw_env, reference_terms=reference_terms)
+    print("[dagger] SonicDaggerEnv wrapped", flush=True)
+    return wrapped
 

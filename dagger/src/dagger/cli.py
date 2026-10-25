@@ -115,7 +115,7 @@ def _motion_info(config, sonic_root: Path) -> dict:
     }
 
 
-def _make_release_env(config, run_dir: Path, device: torch.device, args_cli):
+def _prepare_release_env(config, run_dir: Path) -> dict:
     sonic_root = Path(str(config.sonic_repo_root)).expanduser().resolve()
     motion = _motion_info(config, sonic_root)
     print(
@@ -123,6 +123,7 @@ def _make_release_env(config, run_dir: Path, device: torch.device, args_cli):
         f"requested={motion['requested_keys']}",
         flush=True,
     )
+    print("[dagger] composing SONIC release config", flush=True)
     release_config = compose_release_config(
         sonic_root,
         num_envs=int(config.dagger.num_envs),
@@ -136,34 +137,53 @@ def _make_release_env(config, run_dir: Path, device: torch.device, args_cli):
         events=motion["events"],
         terminations=motion["terminations"],
     )
+    print("[dagger] SONIC release config composed", flush=True)
     release_config.manager_env.config.experiment_dir = str(run_dir)
     release_config.manager_env.config.save_rendering_dir = str(run_dir / "renderings")
     reference_terms = [
         str(value) for value in release_config.algo.config.actor.backbone.encoders.g1.inputs
     ]
+    print(
+        f"[dagger] release env prepared reference_terms={reference_terms}",
+        flush=True,
+    )
+    return {
+        "sonic_root": sonic_root,
+        "release_config": release_config,
+        "motion": motion,
+        "reference_terms": reference_terms,
+    }
+
+
+def _create_release_env(prepared: dict, device: torch.device, args_cli) -> object:
+    motion = prepared["motion"]
+    print("[dagger] creating env", flush=True)
     env = create_release_env(
-        release_config,
+        prepared["release_config"],
         device=str(device),
         args_cli=args_cli,
-        reference_terms=reference_terms,
+        reference_terms=prepared["reference_terms"],
     )
+    print("[dagger] create_release_env returned", flush=True)
     motion["loaded_keys"] = env.motion_keys
     print(
         f"[dagger] env ready loaded_motion_keys={motion['loaded_keys']} "
-        f"reference_terms={reference_terms}",
+        f"reference_terms={prepared['reference_terms']}",
         flush=True,
     )
     if motion["requested_keys"]:
         missing = [key for key in motion["requested_keys"] if key not in motion["loaded_keys"]]
         if missing:
             raise RuntimeError(f"requested motion keys were not loaded: {missing}")
-    return sonic_root, release_config, env, motion, reference_terms
+    return env
 
 
-def _run_plain(config, run_dir: Path, device: torch.device, args_cli):
-    sonic_root, release_config, env, motion_info, reference_terms = _make_release_env(
-        config, run_dir, device, args_cli
-    )
+def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
+    sonic_root = prepared["sonic_root"]
+    release_config = prepared["release_config"]
+    motion_info = prepared["motion"]
+    reference_terms = prepared["reference_terms"]
+    env = _create_release_env(prepared, device, args_cli)
     observation = env.reset()
     observation_dim = int(
         observation["actor_obs"].shape[-1] + observation["student_reference_features"].shape[-1]
@@ -321,13 +341,13 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli):
     return env, manifest
 
 
-def _run_cvae(config, run_dir: Path, device: torch.device, args_cli):
+def _run_cvae(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
     from .adapters.cvae_student import CvaeStudentAdapter
     from .core.cvae_loop import CvaeDaggerLoop
 
-    sonic_root, release_config, env, _motion_info, _reference_terms = _make_release_env(
-        config, run_dir, device, args_cli
-    )
+    sonic_root = prepared["sonic_root"]
+    release_config = prepared["release_config"]
+    env = _create_release_env(prepared, device, args_cli)
     observation = env.reset()
     del observation
     contract = SonicActionContract(env)
@@ -440,6 +460,7 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
+    sys.argv = [sys.argv[0]]
     run_dir = _new_run_dir(config)
     device = torch.device(str(config.get("device", "cuda:0")))
     sonic_root = Path(str(config.sonic_repo_root)).expanduser().resolve()
@@ -451,19 +472,20 @@ def main() -> None:
         f"device={device}",
         flush=True,
     )
+    prepared = _prepare_release_env(config, run_dir)
     print("[dagger] launching Isaac app", flush=True)
     launcher, args_cli = _launch_app(config)
     print("[dagger] Isaac app ready", flush=True)
     env = None
     try:
         if str(config.mode).startswith("cvae"):
-            env, manifest = _run_cvae(config, run_dir, device, args_cli)
+            env, manifest = _run_cvae(config, run_dir, device, args_cli, prepared)
             marker_name = "dagger_cvae_smoke.ok" if str(config.mode) == "cvae_smoke" else "dagger_cvae_execution.ok"
         elif str(config.mode).startswith("mlp"):
-            env, manifest = _run_plain(config, run_dir, device, args_cli)
+            env, manifest = _run_plain(config, run_dir, device, args_cli, prepared)
             marker_name = "dagger_mlp_smoke.ok" if str(config.mode) == "mlp_smoke" else "dagger_mlp_execution.ok"
         else:
-            env, manifest = _run_plain(config, run_dir, device, args_cli)
+            env, manifest = _run_plain(config, run_dir, device, args_cli, prepared)
             marker_name = "dagger_smoke.ok" if str(config.mode) == "smoke" else "dagger_execution.ok"
         (run_dir / "markers" / marker_name).write_text("execution_pass=true\n", encoding="utf-8")
         (run_dir / marker_name).write_text("execution_pass=true\n", encoding="utf-8")
