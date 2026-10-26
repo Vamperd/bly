@@ -898,6 +898,88 @@ def _create_cvae_env_for_keys(
     return env, contract, teacher
 
 
+def _check_cvae_action_mapping(student, contract) -> dict:
+    """Compare the live env Action mapping with the recorded CVAE dataset."""
+
+    dataset = getattr(student, "_source_dataset", None)
+    if dataset is None:
+        return {"available": False, "pass": None, "reason": "no source dataset"}
+    source = getattr(dataset, "source", dataset)
+    windows = getattr(dataset, "windows", None)
+    if windows:
+        episode_index = int(windows[0]["episode_index"])
+    else:
+        episodes = getattr(source, "episodes", None) or []
+        if not episodes:
+            return {"available": False, "pass": None, "reason": "no source episodes"}
+        episode_index = 0
+    if not hasattr(source, "physics_action_mapping"):
+        return {"available": False, "pass": None, "reason": "mapping API unavailable"}
+    mapping = source.physics_action_mapping(episode_index)
+    recorded = {
+        "nominal": torch.as_tensor(mapping["default"], dtype=torch.float32),
+        "scale": torch.as_tensor(mapping["scale"], dtype=torch.float32),
+        "offset": torch.as_tensor(mapping["offset"], dtype=torch.float32),
+    }
+    recorded_clip = mapping.get("clip")
+    live = {
+        "nominal": contract.nominal[0].detach().cpu().float(),
+        "scale": contract.scale[0].detach().cpu().float(),
+        "offset": contract.offset[0].detach().cpu().float(),
+    }
+    live_clip = None if contract.clip is None else contract.clip[0].detach().cpu().float()
+    checks: dict[str, dict] = {}
+    tolerances = {
+        # Startup adds a small per-episode default-joint offset; the live
+        # recorder and contract both use the live nominal.  Scale/offset/clip
+        # must still match the recorded data exactly.
+        "nominal": 5.0e-2,
+        "scale": 1.0e-6,
+        "offset": 1.0e-6,
+    }
+    for name in ("nominal", "scale", "offset"):
+        difference = float((recorded[name] - live[name]).abs().max().item())
+        tolerance = tolerances[name]
+        checks[name] = {
+            "max_abs": difference,
+            "tolerance": tolerance,
+            "pass": bool(difference <= tolerance),
+        }
+    if recorded_clip is None and live_clip is None:
+        checks["clip"] = {"max_abs": 0.0, "pass": True}
+    elif recorded_clip is not None and live_clip is not None:
+        difference = float(
+            (
+                torch.as_tensor(recorded_clip, dtype=torch.float32)
+                - live_clip
+            )
+            .abs()
+            .max()
+            .item()
+        )
+        checks["clip"] = {
+            "max_abs": difference,
+            "tolerance": 1.0e-6,
+            "pass": bool(difference <= 1.0e-6),
+        }
+    else:
+        checks["clip"] = {
+            "max_abs": None,
+            "pass": False,
+            "reason": "clip presence mismatch",
+        }
+    passed = all(bool(item.get("pass")) for item in checks.values())
+    result = {
+        "available": True,
+        "pass": passed,
+        "episode_index": episode_index,
+        "checks": checks,
+    }
+    if not passed:
+        raise ValueError(f"CVAE Action mapping mismatch: {checks}")
+    return result
+
+
 def _close_cvae_env(env) -> None:
     if env is None:
         return
@@ -1282,6 +1364,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
     source_baseline_32 = None
     best_teacher_rmse = None
     best_survival = None
+    action_mapping_check = None
     if partial_manifest_path.is_file():
         try:
             previous = json.loads(
@@ -1314,6 +1397,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                 "source_baseline_32": source_baseline_32,
                 "best_teacher_rmse": best_teacher_rmse,
                 "best_survival": best_survival,
+                "action_mapping_check": action_mapping_check,
                 "motion_manifest": manifest,
             },
         )
@@ -1331,6 +1415,8 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
             student.set_action_clip_value(
                 config.student.get("action_clip_value", 20.0)
             )
+            if action_mapping_check is None:
+                action_mapping_check = _check_cvae_action_mapping(student, contract)
             loop = CvaeDaggerLoop(
                 env=env,
                 teacher=teacher,
@@ -1475,6 +1561,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     "source_baseline_32": source_baseline_32,
                     "best_teacher_rmse": best_teacher_rmse,
                     "best_survival": best_survival,
+                    "action_mapping_check": action_mapping_check,
                     "motion_manifest": manifest,
                 },
             )
@@ -1563,6 +1650,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         "eval_steps": int(eval_steps),
         "source_baseline_32": source_baseline_32,
         "final_32": final_32,
+        "action_mapping_check": action_mapping_check,
         "best_teacher_rmse": best_teacher_rmse,
         "best_survival": best_survival,
         "best_checkpoints": best_checkpoints,

@@ -177,6 +177,10 @@ dagger/configs/cvae_kl2_motion_manifest.json
 配置继承 KL2 的 `fixed` Mask、`kl_beta=0.002`、`beta_warmup=10000` 和
 FP32 eager；不加载源 optimizer。
 
+smoke 会对照 recorded schema/context 与 live env 的 Action mapping：
+`scale` / `offset` / `clip` 要求严格一致，`nominal` 允许 startup 的
+小范围默认关节偏移。
+
 ### 一轮训练到底发生什么
 
 ```text
