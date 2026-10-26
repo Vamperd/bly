@@ -734,6 +734,16 @@ round4 门禁时 beta=0.4，round9 起为 0.0。前两轮 beta=1.0 与已完成�
 一致，可从中断点 resume；若中断发生在 round2 内部，partial checkpoint 仍会先
 完成旧 beta=0.95 的剩余 chunk，再从 round3 使用新 schedule。
 
+8h run 最终完成 18/18 rounds，`dagger_exit_code=0` 且存在
+`markers/dagger_cvae_kl2_execution.ok`，因此执行正常结束；但
+`quality_pass=false`。overall ratio 为 0.55424，未达到 `<=0.5` 的总体门禁；
+4 个 motion 均满足 `<=0.7` 的单 motion 门禁，termination 和 saturation 也通过。
+最终 teacher Action RMSE 与 ratio 分别为 big_heavy `0.11050/0.39704`、
+lift_crate `0.14361/0.48511`、dance_vouge `0.21525/0.65443`、
+cellphone `0.20287/0.69711`；整体只比 0.5 门禁高约 10.8% 的相对量。
+这不是执行失败，也不能写成质量通过；应先渲染定性复核，再决定是否另立
+短续训或调整总体聚合门禁。
+
 新增 `dagger.stepwise_prepare` 与 `dagger.stepwise_recursive_causal`。渲染评估路线
 从 recorded 192-step group 的 exact initialization 开始，每步重建 causal window，只执行
 Action[32]，重复 192 步；source 层使用 recorded HDF，original/fine-tuned C 使用同一 exact
@@ -741,5 +751,8 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 的 32-Action 开环块。
 
 新增 `sonic-repro-kit/render_three_way_ghost.py`：source opaque、original C 与 fine-tuned C
-半透明，同相机 193 帧、50 Hz 运动学 ghost。上述入口只在 Windows compile 和 35 tests 通过，
-尚未在 Ubuntu Isaac/MuJoCo 执行。
+半透明，同相机 193 帧、50 Hz 运动学 ghost。首次 Ubuntu prepare 在
+`replay65.prepare_window` 的 `args.masks` 处失败：wrapper 的 `SimpleNamespace`
+缺少 representative 字段。已补 `masks=[]` 并加入回归测试；这次失败发生在模型推理前，
+不构成数据或模型质量结论。Windows compile 和 39 tests 通过，Ubuntu Isaac/MuJoCo
+仍待执行。

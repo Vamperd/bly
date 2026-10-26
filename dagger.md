@@ -406,12 +406,14 @@ HDF，不是 live teacher。
 ### 三层 ghost 视频
 
 ```bash
-python sonic-repro-kit/render_three_way_ghost.py \
+python ../sonic-repro-kit/render_three_way_ghost.py \
   --manifest "$STEPWISE_OUT/manifests/stepwise_recursive_causal.json" \
   --model /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml \
-  --output-run "$STEPWISE_OUT/ghost" \
-  --layout ghost
+  --output-run "$STEPWISE_OUT/ghost"
 ```
+
+渲染脚本固定为 ghost 布局，没有 `--layout` 参数；`--output-run` 必须是新且
+空的目录。
 
 每个 motion 生成：
 
@@ -1014,7 +1016,7 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |
 | CVAE DAgger smoke | 待 Ubuntu 执行 |
 | CVAE DAgger pilot | smoke 成功后执行 |
-| CVAE KL2 32-motion 适配 | 已实现；Windows 38 tests 通过 |
+| CVAE KL2 32-motion 适配 | 已实现；Windows 39 tests 通过 |
 | CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
 | CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
 | CVAE KL2 smoke | Ubuntu execution PASS；quality 为单轮 smoke 预期 false |

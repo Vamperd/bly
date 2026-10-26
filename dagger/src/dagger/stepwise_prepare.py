@@ -37,6 +37,24 @@ def _write_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
+def _window_args(args: argparse.Namespace, mask_seed: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        route="C",
+        horizon_steps=int(args.horizon_steps),
+        simulation_seed=int(args.simulation_seed),
+        mask_seed=mask_seed,
+        sample_seed=int(args.sample_seed),
+        sample_index=0,
+        action_mode="masked-completion",
+        state_only_continuation=True,
+        source="dataset",
+        capture_run=None,
+        allow_recovered_dataset=False,
+        allow_recovered_identity=False,
+        masks=[],
+    )
+
+
 def prepare(args: argparse.Namespace) -> dict:
     cvae_root = Path(args.cvae_root).expanduser().resolve()
     _ensure_cvae_path(cvae_root)
@@ -85,20 +103,7 @@ def prepare(args: argparse.Namespace) -> dict:
     if len(set(requested)) != len(requested):
         raise ValueError("duplicate --motion-key values are not allowed")
 
-    window_args = SimpleNamespace(
-        route="C",
-        horizon_steps=int(args.horizon_steps),
-        simulation_seed=int(args.simulation_seed),
-        mask_seed=mask_seed,
-        sample_seed=int(args.sample_seed),
-        sample_index=0,
-        action_mode="masked-completion",
-        state_only_continuation=True,
-        source="dataset",
-        capture_run=None,
-        allow_recovered_dataset=False,
-        allow_recovered_identity=False,
-    )
+    window_args = _window_args(args, mask_seed)
     cases = []
     for motion_key in requested:
         row = next(
