@@ -753,6 +753,8 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 新增 `sonic-repro-kit/render_three_way_ghost.py`：source opaque、original C 与 fine-tuned C
 半透明，同相机 193 帧、50 Hz 运动学 ghost。首次 Ubuntu prepare 在
 `replay65.prepare_window` 的 `args.masks` 处失败：wrapper 的 `SimpleNamespace`
-缺少 representative 字段。已补 `masks=[]` 并加入回归测试；这次失败发生在模型推理前，
-不构成数据或模型质量结论。Windows compile 和 39 tests 通过，Ubuntu Isaac/MuJoCo
-仍待执行。
+缺少 representative 字段。已补 `masks=[]` 并加入回归测试。再次执行时 4 个 window
+都已准备完成，但写 manifest 处因 `timezone` 未导入在 `created_at` 失败；已补
+`datetime, timezone` 并增加 UTC helper 测试。两次都是模型推理后/写盘阶段的工程
+失败，不构成数据或模型质量结论。Windows compile 和 40 tests 通过，Ubuntu
+Isaac/MuJoCo 仍待执行。

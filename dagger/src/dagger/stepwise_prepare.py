@@ -9,7 +9,7 @@ for ``dagger.stepwise_recursive_causal``.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -35,6 +35,10 @@ def _write_json(path: Path, payload: object) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _window_args(args: argparse.Namespace, mask_seed: int) -> SimpleNamespace:
@@ -158,7 +162,7 @@ def prepare(args: argparse.Namespace) -> dict:
 
     manifest = {
         "format_version": "dagger_stepwise_prepare_v1",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": _utc_now_iso(),
         "dataset_run": str(dataset_run),
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": __import__("hashlib").sha256(

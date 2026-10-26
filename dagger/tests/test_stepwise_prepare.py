@@ -1,10 +1,13 @@
 import unittest
 from types import SimpleNamespace
 
-from dagger.stepwise_prepare import _window_args
+from dagger.stepwise_prepare import _utc_now_iso, _window_args
 
 
 class StepwisePrepareTest(unittest.TestCase):
+    def test_utc_timestamp_is_available(self):
+        self.assertIn("+00:00", _utc_now_iso())
+
     def test_window_args_match_replay65_contract(self):
         args = SimpleNamespace(
             horizon_steps=192,
