@@ -930,12 +930,13 @@ def _check_cvae_action_mapping(student, contract) -> dict:
     live_clip = None if contract.clip is None else contract.clip[0].detach().cpu().float()
     checks: dict[str, dict] = {}
     tolerances = {
-        # Startup adds a small per-episode default-joint offset; the live
-        # recorder and contract both use the live nominal.  Scale/offset/clip
-        # must still match the recorded data exactly.
-        "nominal": 5.0e-2,
+        # add_joint_default_pos samples the action-term offset again at startup.
+        # The model's canonical Action is relative to the original nominal, so
+        # the offset may differ per episode; two independent startup samples can
+        # differ by at most the configured [-0.01, 0.01] range.
+        "nominal": 1.0e-6,
         "scale": 1.0e-6,
-        "offset": 1.0e-6,
+        "offset": 3.0e-2,
     }
     for name in ("nominal", "scale", "offset"):
         difference = float((recorded[name] - live[name]).abs().max().item())
@@ -974,6 +975,11 @@ def _check_cvae_action_mapping(student, contract) -> dict:
         "pass": passed,
         "episode_index": episode_index,
         "checks": checks,
+        "note": (
+            "scale/nominal/clip are strict; action offset is resampled by the "
+            "startup default-joint event and does not change canonical Action "
+            "semantics."
+        ),
     }
     if not passed:
         raise ValueError(f"CVAE Action mapping mismatch: {checks}")

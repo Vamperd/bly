@@ -178,8 +178,9 @@ dagger/configs/cvae_kl2_motion_manifest.json
 FP32 eager；不加载源 optimizer。
 
 smoke 会对照 recorded schema/context 与 live env 的 Action mapping：
-`scale` / `offset` / `clip` 要求严格一致，`nominal` 允许 startup 的
-小范围默认关节偏移。
+`scale` / `nominal` / `clip` 要求严格一致；`offset` 由 startup 的
+默认关节随机化重新采样，允许其随机范围，但 canonical Action 仍相对
+原始 nominal，语义不变。
 
 ### 一轮训练到底发生什么
 
