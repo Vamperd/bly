@@ -41,10 +41,16 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _robot_mask(segmentation, geom_types, plane_type, geom_objtype):
+def _robot_mask(
+    segmentation, geom_types, geom_body_ids, plane_type, geom_objtype
+):
     ids, types = segmentation[..., 0], segmentation[..., 1]
     mask = (types == geom_objtype) & (ids >= 0)
-    mask[mask] = geom_types[ids[mask]] != plane_type
+    selected = ids[mask]
+    mask[mask] = (
+        (geom_types[selected] != plane_type)
+        & (geom_body_ids[selected] != 0)
+    )
     return mask
 
 
@@ -77,6 +83,7 @@ def render(args: argparse.Namespace) -> dict:
         *GHOST_SIZE,
         mesh_dir=args.mesh_dir,
         ground_style=args.ground_style,
+        ground_size_m=args.ground_size,
     )
     model = mujoco.MjModel.from_xml_path(str(xml))
     profile_details = validate_model_profile(model, args.robot_profile)
@@ -90,6 +97,7 @@ def render(args: argparse.Namespace) -> dict:
     plane_type = int(mujoco.mjtGeom.mjGEOM_PLANE)
     geom_objtype = int(mujoco.mjtObj.mjOBJ_GEOM)
     geom_types = np.asarray(model.geom_type)
+    geom_body_ids = np.asarray(model.geom_bodyid)
 
     def draw(qpos, lookat, segment=False):
         data.qpos[:] = qpos
@@ -250,7 +258,11 @@ def render(args: argparse.Namespace) -> dict:
                         )
                         segmentation = draw(qpos, policy_lookat, segment=True)
                         mask = _robot_mask(
-                            segmentation, geom_types, plane_type, geom_objtype
+                            segmentation,
+                            geom_types,
+                            geom_body_ids,
+                            plane_type,
+                            geom_objtype,
                         )
                         frame = _blend(frame, layer, mask, color)
                     source_text = (
@@ -376,6 +388,7 @@ def main(argv=None) -> int:
     parser.add_argument("--robot-profile", default="g1")
     parser.add_argument("--mesh-dir", type=Path)
     parser.add_argument("--ground-style", default="checker", choices=("checker", "black"))
+    parser.add_argument("--ground-size", type=float, default=10.0)
     parser.add_argument("--gl", default="egl", choices=("egl", "osmesa", "glfw"))
     args = parser.parse_args(argv)
     render(args)

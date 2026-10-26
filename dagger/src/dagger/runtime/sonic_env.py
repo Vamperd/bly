@@ -29,6 +29,12 @@ class SonicDaggerEnv:
         if callable(close):
             close()
 
+    def disable_auto_reset(self) -> None:
+        raw = getattr(self.env, "env", self.env)
+        if not hasattr(raw, "_reset_idx"):
+            raise AttributeError("raw environment has no _reset_idx")
+        raw._reset_idx = lambda env_ids: None
+
     def reset_motion_to_first_frame(self) -> None:
         motion = self.motion_term
         motion.set_motion_state(

@@ -788,5 +788,11 @@ segmentation tint，不是背景重复渲染。渲染器现为每个单独视频
 并在 ghost 中按初始 root xy 对齐后合成，同时记录 `raw_first_roots`。motion reset
 后又暴露 SONIC `set_motion_state` 把 `motion_num_steps` 设为 Int32、而原 buffer
 是 Long，首次 termination reset 会触发 dtype RuntimeError；wrapper 现把该字段
-cast 回 `time_steps` dtype，并在 fall 时打印实际 termination terms。Windows
-compile 和 45 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。
+cast 成 Int32，并在 fall 时打印实际 termination terms。Ubuntu case0 修复后
+original/fine-tuned 分别跑到 frame 36/41，termination 均为 `foot_pos_xyz`；
+这不再是 step0 reference 错位，而是 policy 动作误差累积。按用户要求，stepwise
+现在关闭 Isaac auto reset，首次 fall 只记录 `fall_frame`/`fall_terms`，随后继续
+每步推理和执行 Action[32] 直到 192 帧，因此 source/original/fine-tuned 轨迹
+都可完整渲染。ghost 默认 checker 地面从 50 m 缩到 10 m，并只 tint robot body
+geom（排除 worldbody/ground），以消除大块蓝色背景条纹。Windows compile 和
+46 tests 通过，Ubuntu 其余 case 与渲染仍待执行。

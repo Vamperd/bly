@@ -57,9 +57,13 @@ class _Env:
     action_space = _Space()
     command_manager = _CommandManager()
     closed = False
+    reset_called = False
 
     def close(self):
         self.closed = True
+
+    def _reset_idx(self, env_ids):
+        self.reset_called = True
 
 
 class _Wrapper:
@@ -102,6 +106,13 @@ class SonicEnvContractTest(unittest.TestCase):
         self.assertEqual(motion.time_steps.tolist(), [0])
         self.assertEqual(motion.motion_start_time_steps.tolist(), [0])
         self.assertEqual(motion.motion_num_steps.dtype, torch.int32)
+
+    def test_disable_auto_reset(self):
+        raw = _Env()
+        env = SonicDaggerEnv(raw, reference_terms=("term_b",))
+        env.disable_auto_reset()
+        raw._reset_idx([0])
+        self.assertFalse(raw.reset_called)
 
     def test_missing_reference_term_is_reported(self):
         with self.assertRaises(KeyError):

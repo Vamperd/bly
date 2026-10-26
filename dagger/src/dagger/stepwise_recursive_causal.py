@@ -173,6 +173,7 @@ def _run_policy(
 
     env.reset()
     env.reset_motion_to_first_frame()
+    env.disable_auto_reset()
     apply_exact_replay_initialization(env.env, exact_init, readback_path)
     current_state = env.physics_state()
     contract = SonicActionContract(env)
@@ -184,6 +185,7 @@ def _run_policy(
     frames = [_robot_frame(env, contract, current_state)]
     actions: list[np.ndarray] = []
     fall_frame = None
+    fall_terms: dict[str, bool] = {}
     for step in range(int(horizon)):
         rollout = adapter.observe()
         raw = rollout.action_raw
@@ -191,26 +193,25 @@ def _run_policy(
         _next_observation, _reward, done, _info = env.step({"actions": raw})
         done_value = bool(done.any().item())
         next_state = env.physics_state()
-        if done_value:
+        if done_value and fall_frame is None:
             fall_frame = len(frames) - 1
             raw_env = getattr(env.env, "env", env.env)
             manager = getattr(raw_env, "termination_manager", None)
-            terms = {}
             if manager is not None:
-                terms = {
+                fall_terms = {
                     name: bool(manager.get_term(name)[0].item())
                     for name in manager.active_terms
                 }
             print(
                 f"[stepwise] fall at frame {fall_frame} "
-                f"terms={terms}",
+                f"terms={fall_terms}; continuing to {horizon}",
                 flush=True,
             )
-            adapter.after_step(contract.raw_to_canonical(raw), next_state, done)
-            break
         frames.append(_robot_frame(env, contract, next_state))
         adapter.after_step(contract.raw_to_canonical(raw), next_state, done)
-    return _stack_frames(frames, actions), actions, fall_frame
+    trajectory = _stack_frames(frames, actions)
+    trajectory["fall_terms"] = fall_terms
+    return trajectory, actions, fall_frame
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -341,6 +342,7 @@ def run(args: argparse.Namespace) -> dict:
                     "trajectory": str(trajectory_path),
                     "metrics": _metrics(source, trajectory, fall_frame),
                     "readback": str(readback),
+                    "fall_terms": trajectory.get("fall_terms", {}),
                 }
         finally:
             _close_cvae_env(env)

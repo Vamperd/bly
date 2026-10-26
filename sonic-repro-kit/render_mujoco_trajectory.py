@@ -415,12 +415,20 @@ def prepare_runtime_xml(
     height: int,
     mesh_dir: Path | None = None,
     ground_style: str = "checker",
+    ground_size_m: float | None = None,
 ) -> dict[str, Any]:
     """Create a run-local model with absolute meshes, a floor, and a sized framebuffer."""
     if width <= 0 or height <= 0:
         raise ValueError("Offscreen framebuffer width and height must be positive")
     if ground_style not in {"checker", "black"}:
         raise ValueError(f"unknown ground_style={ground_style!r}; choose checker or black")
+    if ground_size_m is not None and ground_size_m <= 0:
+        raise ValueError("ground_size_m must be positive")
+    ground_size = (
+        RUNTIME_GROUND_SIZE
+        if ground_size_m is None
+        else f"{float(ground_size_m):g} {float(ground_size_m):g} 0.1"
+    )
 
     source_path = source_path.resolve(strict=True)
     tree = ET.parse(source_path)
@@ -513,7 +521,7 @@ def prepare_runtime_xml(
             {
                 "name": RUNTIME_GROUND_GEOM_NAME,
                 "type": "plane",
-                "size": RUNTIME_GROUND_SIZE,
+                "size": ground_size,
                 "pos": "0 0 0",
                 "material": RUNTIME_GROUND_MATERIAL_NAME,
                 "contype": "0",
@@ -537,7 +545,11 @@ def prepare_runtime_xml(
             "texture_name": RUNTIME_GROUND_TEXTURE_NAME if ground_style == "checker" else None,
             "material_name": RUNTIME_GROUND_MATERIAL_NAME,
             "position": [0.0, 0.0, 0.0],
-            "size": [50.0, 50.0, 0.1],
+            "size": [
+                float(ground_size.split()[0]),
+                float(ground_size.split()[1]),
+                float(ground_size.split()[2]),
+            ],
             "rgb1": [0.18, 0.18, 0.18] if ground_style == "checker" else [0.0, 0.0, 0.0],
             "rgb2": [0.72, 0.72, 0.72] if ground_style == "checker" else [0.0, 0.0, 0.0],
         },

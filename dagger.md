@@ -451,6 +451,10 @@ root xy 对齐到 source（只影响可视化，不修改轨迹文件），并�
 ### 8/16 步开环与 recursive B 的边界
 
 当前微调只监督 Action[32]；未来 Action[33:63] 在 DAgger 窗口没有 teacher 标签。
+stepwise evaluator 每步重新推理并只执行 Action[32]；为了让 fall 后仍能看到完整 192 步，
+评估会禁用 Isaac 的 auto reset，首次 termination 只记录 fall_frame/terms，然后继续
+推理和执行到 horizon。渲染器默认把 checker 地面改为 10 m，并只对 robot body 的
+geom 做 ghost tint，避免世界地面/其他 worldbody geom 被蓝色覆盖。
 因此：
 
 - 不采用 8/16 步开环；
@@ -1040,7 +1044,7 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |
 | CVAE DAgger smoke | 待 Ubuntu 执行 |
 | CVAE DAgger pilot | smoke 成功后执行 |
-| CVAE KL2 32-motion 适配 | 已实现；Windows 45 tests 通过 |
+| CVAE KL2 32-motion 适配 | 已实现；Windows 46 tests 通过 |
 | CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
 | CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
 | CVAE KL2 smoke | Ubuntu execution PASS；quality 为单轮 smoke 预期 false |
