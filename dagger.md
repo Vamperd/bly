@@ -1244,6 +1244,16 @@ v2 仍使用：
 bash scripts/run_dagger_auto.sh cvae-kl2-pilot-dagger-v2
 ```
 
+2-motion、约 3h 的 pilot：
+
+```bash
+bash scripts/run_dagger_auto.sh cvae-kl2-pilot-dagger-v2-2m
+```
+
+对应配置 `cvae_kl2_pilot_dagger_v2_2m.yaml`：2 env、12×2000、
+teacher_episode_period=2（每轮 1 teacher / 1 student）、prefix32/block16。
+若实测单轮明显超过约 15 分钟，可把 `rounds` 降到 9–10；若明显更快可增加轮数。
+
 对应配置：
 
 ```text

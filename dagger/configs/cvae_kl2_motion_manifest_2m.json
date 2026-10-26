@@ -1,0 +1,105 @@
+{
+  "format_version": "dagger_cvae_kl2_motion_manifest_v1",
+  "source_checkpoint_dataset_run": "/home/helloworld/bly/runs/cvae_long_horizon_dataset_retry_20261016_005224_3359614",
+  "source_dataset_run": "/home/helloworld/bly/runs/cvae_overfit_subset_rebuilt_20260928_193357",
+  "long_horizon_dataset_run": "/home/helloworld/bly/runs/cvae_long_horizon_dataset_rebuilt_20261018_223710_254008",
+  "normalization_sha256": "d9d04cf6359e42ddfcb5f940231bf1202c50aa37f420d50ab09cc3c66fcf18aa",
+  "long_horizon_groups_sha256": "66a18e0faa72b0d59e8dd2a1bc7692238f9088777ab59429ecddd7c15d333378",
+  "long_horizon_windows_sha256": "27d1e2d9b17654ad547003095cd1baabb8a487d25046d6cc7cd4f8493860edec",
+  "source_mix_exact": true,
+  "motion_file": "/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered",
+  "motion_keys": [
+    "baby_full_diaper_walk_ff_360_loop_R_001__A462",
+    "big_heavy_one_hand_front_low_to_front_medium_R_001__A526",
+    "body_stretch_4_002__A054",
+    "body_stretch_v003_001__A362",
+    "cellphone_looking_for_service_walk_R_001__A427",
+    "confusion_103__A045",
+    "crawl_ff_start_225_003__A133",
+    "crawl_ff_stop_225_R_003__A233",
+    "crouch_operating_cupboard_mid_in_R_003__A299",
+    "dance_hiphop_dab_R_fast_002__A317",
+    "dance_latino_kick_kick_padeburee_doubled_R_002__A314",
+    "dance_vouge_butterfly_step_270_R_003__A324",
+    "don_t_know_2_003__A069",
+    "exercise_2_001__A036",
+    "forward_lunge_R_001__A362",
+    "inj_right_leg_stoop_down_R_max_002__A080",
+    "jog_arc_cw_loop_001__A182",
+    "jog_sideway_135_start_004__A042",
+    "jump_right_004__A029",
+    "lift_crate_walk_ff_stop_270_R_003__A202",
+    "medium_heavy_one_hand_front_low_to_right_side_low_R_001__A522",
+    "medium_light_two_hands_put_down_front_low_R_001__A507",
+    "neutral_looking_around_R_001__A542",
+    "pounding_meat_R_002__A296",
+    "reaching_far_R_002__A050",
+    "reaching_up_001__A034",
+    "reaching_up_R_002__A238",
+    "small_heavy_one_hand_behind_medium_to_front_medium_R_001__A522",
+    "tasty_R_001__A407",
+    "turn_start_walk_000_002__A036",
+    "victory_dance_macarena_four_directions_R_002__A306",
+    "wiping_shoes_R_003__A234"
+  ],
+  "motion_groups": [
+    [
+      "baby_full_diaper_walk_ff_360_loop_R_001__A462",
+      "big_heavy_one_hand_front_low_to_front_medium_R_001__A526",
+      "body_stretch_4_002__A054",
+      "body_stretch_v003_001__A362",
+      "cellphone_looking_for_service_walk_R_001__A427",
+      "confusion_103__A045",
+      "crawl_ff_start_225_003__A133",
+      "crawl_ff_stop_225_R_003__A233"
+    ],
+    [
+      "crouch_operating_cupboard_mid_in_R_003__A299",
+      "dance_hiphop_dab_R_fast_002__A317",
+      "dance_latino_kick_kick_padeburee_doubled_R_002__A314",
+      "dance_vouge_butterfly_step_270_R_003__A324",
+      "don_t_know_2_003__A069",
+      "exercise_2_001__A036",
+      "forward_lunge_R_001__A362",
+      "inj_right_leg_stoop_down_R_max_002__A080"
+    ],
+    [
+      "jog_arc_cw_loop_001__A182",
+      "jog_sideway_135_start_004__A042",
+      "jump_right_004__A029",
+      "lift_crate_walk_ff_stop_270_R_003__A202",
+      "medium_heavy_one_hand_front_low_to_right_side_low_R_001__A522",
+      "medium_light_two_hands_put_down_front_low_R_001__A507",
+      "neutral_looking_around_R_001__A542",
+      "pounding_meat_R_002__A296"
+    ],
+    [
+      "reaching_far_R_002__A050",
+      "reaching_up_001__A034",
+      "reaching_up_R_002__A238",
+      "small_heavy_one_hand_behind_medium_to_front_medium_R_001__A522",
+      "tasty_R_001__A407",
+      "turn_start_walk_000_002__A036",
+      "victory_dance_macarena_four_directions_R_002__A306",
+      "wiping_shoes_R_003__A234"
+    ]
+  ],
+  "pilot_motion_keys": [
+    "dance_vouge_butterfly_step_270_R_003__A324",
+    "cellphone_looking_for_service_walk_R_001__A427"
+  ],
+  "pilot_selection": {
+    "selection": "two_motion_3h",
+    "motion_keys": [
+      "dance_vouge_butterfly_step_270_R_003__A324",
+      "cellphone_looking_for_service_walk_R_001__A427"
+    ]
+  },
+  "mlp_motion_keys": [
+    "fishing_standing_start_R_001__A502",
+    "crawl_ff_start_180_R_002__A232",
+    "looking_by_binoculars_003__A100",
+    "big_light_two_hands_right_side_high_to_behind_high_R_001__A527"
+  ],
+  "mlp_overlap_with_32": []
+}

@@ -12,6 +12,7 @@ case "$MODE" in
   cvae-kl2-pilot-intensive) CONFIG_MODE="cvae_kl2_pilot_intensive" ;;
   cvae-kl2-pilot-intensive-8h) CONFIG_MODE="cvae_kl2_pilot_intensive_8h" ;;
   cvae-kl2-pilot-dagger-v2) CONFIG_MODE="cvae_kl2_pilot_dagger_v2" ;;
+  cvae-kl2-pilot-dagger-v2-2m) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m" ;;
   cvae-kl2-formal) CONFIG_MODE="cvae_kl2_formal" ;;
   mlp-smoke) CONFIG_MODE="mlp_smoke" ;;
   mlp-pilot) CONFIG_MODE="mlp_pilot" ;;
@@ -23,7 +24,7 @@ case "$MODE" in
   mlp-dynamic2) CONFIG_MODE="mlp_dynamic2" ;;
   mlp-render) CONFIG_MODE="mlp_render" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-formal|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-render" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-formal|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-render" >&2
   exit 2
     ;;
 esac
@@ -122,13 +123,17 @@ if [[ "$MODE" == cvae-smoke || "$MODE" == cvae-pilot ]]; then
   }
 fi
 
-if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-kl2-pilot-intensive || "$MODE" == cvae-kl2-pilot-intensive-8h || "$MODE" == cvae-kl2-pilot-dagger-v2 || "$MODE" == cvae-kl2-formal ]]; then
+if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-kl2-pilot-intensive || "$MODE" == cvae-kl2-pilot-intensive-8h || "$MODE" == cvae-kl2-pilot-dagger-v2 || "$MODE" == cvae-kl2-pilot-dagger-v2-2m || "$MODE" == cvae-kl2-formal ]]; then
   export CVAE_KL2_MOTION_FILE="${CVAE_KL2_MOTION_FILE:-/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered}"
   test -d "$CVAE_KL2_MOTION_FILE" || {
     echo "CVAE KL2 motion directory is missing: $CVAE_KL2_MOTION_FILE" >&2
     exit 2
   }
-  export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest.json}"
+  if [[ "$MODE" == "cvae-kl2-pilot-dagger-v2-2m" ]]; then
+    export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_2m.json}"
+  else
+    export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest.json}"
+  fi
   test -s "$DAGGER_MOTION_MANIFEST" || {
     echo "CVAE KL2 motion manifest is missing: $DAGGER_MOTION_MANIFEST" >&2
     exit 2

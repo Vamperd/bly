@@ -818,3 +818,5 @@ student 先执行 32 步 teacher prefix，之后每 16 步 block 推理并执行
 C Action，每个执行步都在真实 student state 上查询 teacher 标签。新增配置
 `cvae_kl2_pilot_dagger_v2.yaml`，source mix 0.4；旧 v1 配置和 run 只读。
 Windows `test_episode_mix_uses_teacher_prefix_and_student_blocks` 通过。
+新增 2-motion 约 3h pilot：`cvae_kl2_pilot_dagger_v2_2m.yaml` +
+`cvae_kl2_motion_manifest_2m.json`，2 env、12×2000、每轮 1 teacher/1 student。
