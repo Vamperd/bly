@@ -100,7 +100,7 @@ Windows 已完成：
 - 双路径损失组合；
 - 192 步指标聚合。
 
-当前共 35 个 Windows 单元测试通过。
+当前共 38 个 Windows 单元测试通过。
 
 当前测试命令：
 
@@ -306,6 +306,128 @@ pilot 把 24/32 降为 3/4。192 步实时 Isaac 闭环的 survival / episode le
 
 每轮保存 `round_XX.pt`；pilot/formal 结束后根据 teacher RMSE 和 survival
 选择并复制 `best_teacher_rmse.pt` / `best_survival.pt`。
+
+### 4-motion intensive 训练
+
+`cvae_kl2_pilot_intensive.yaml` 使用当前 pilot 4 个 motion、4 env、12 rounds：
+`2000 train steps/round`、`1000 rollout steps/round`、`500 chunk steps`、
+`192 eval`。总量约 24,000 optimizer steps；它只是 calibration，不是完整 8–10h。
+实际 8–10h 应按实测 `optimizer_steps_per_second` 放大轮数；本机实测约 2.72 steps/s，
+8–10h 约 78k–98k steps，即约 20–24 rounds × 4000 steps。放大前先看前 12–24k
+steps 的 teacher RMSE/termination 是否改善。
+
+已提供候选 8h 配置 `cvae_kl2_pilot_intensive_8h.yaml`：
+`rounds: 20`、`train_steps_per_round: 4000`、`beta_schedule_extension: hold_last`，
+共约 80k optimizer steps；若实测偏慢可改为 22–24 rounds。它只在 calibration
+显示改善后使用：
+
+```bash
+DAGGER_TEE=1 DAGGER_SHARD_ROUNDS=1 DAGGER_MAX_SHARDS=60 DAGGER_MAX_RETRIES=5 \
+bash scripts/run_dagger_auto.sh cvae-kl2-pilot-intensive-8h
+```
+
+若实测吞吐不同，只调整 `dagger.rounds` 和 `student.train_steps_per_round`；
+`hold_last` 会在 12 个 beta 值之后持续保持最后的 `0.0`，而不是重新回到 teacher-only。
+
+4m calibration 与 8h 配置都启用中途门禁：
+
+```yaml
+dagger:
+  early_stop:
+    enabled: true
+    check_rounds: [4, 9]      # 第 5、10 轮
+    baseline_round: 0
+    min_teacher_improvement_ratio: 0.98
+    termination_tolerance: 0.0
+```
+
+第 5/10 轮相对 round0：
+
+```text
+teacher_action_rmse <= 0.98 × round0
+termination_rate 不变差
+```
+
+任一失败即写：
+
+```text
+manifests/dagger_cvae_kl2_early_stop.json
+markers/dagger_cvae_kl2_early_stop.ok
+```
+
+并保留已完成 round/partial metrics；`run_dagger_auto.sh` 检测到该 marker 后退出，不再重试或继续后续 round。
+
+```bash
+DAGGER_TEE=1 DAGGER_SHARD_ROUNDS=1 DAGGER_MAX_RETRIES=5 \
+bash scripts/run_dagger_auto.sh cvae-kl2-pilot-intensive
+```
+
+`source_cache.pt` 会在第一次 shard 写入 run 的 `data/`，后续 shard 直接加载，
+避免重复读取 1504 个 HDF5 source window。
+
+### Stepwise causal evaluator（渲染评估路线）
+
+这条路线与训练门禁分开：它从 recorded 192-step group 的 exact initialization
+开始，每步重建 causal window，只执行 Action[32]，重复 192 步。它不是
+`recursive_state_feedback_b` 的 32-Action 开环块。
+
+先准备 4 个 motion 的 start-at-zero source template：
+
+```bash
+export CVAE_ORIGINAL_CHECKPOINT=/home/helloworld/bly/runs/cvae_long_horizon_train_kl2_fp32_300k_20261016_005837_3380803/checkpoints/best.pt
+export CVAE_KL2_DATASET_RUN=/home/helloworld/bly/runs/cvae_long_horizon_dataset_rebuilt_20261018_223710_254008
+STEPWISE_PREP=/home/helloworld/bly/runs/cvae_kl2_4m_stepwise_prepare_$(date +%Y%m%d_%H%M%S)
+
+bash scripts/run_stepwise_prepare.sh "$STEPWISE_PREP" \
+  dance_vouge_butterfly_step_270_R_003__A324 \
+  cellphone_looking_for_service_walk_R_001__A427 \
+  lift_crate_walk_ff_stop_270_R_003__A202 \
+  big_heavy_one_hand_front_low_to_front_medium_R_001__A526
+```
+
+再运行 original C 与 fine-tuned C：
+
+```bash
+export SONIC_KIT_ROOT=/home/helloworld/bly/sonic-repro-kit
+export STEPWISE_CASES_MANIFEST="$STEPWISE_PREP/manifests/cases.json"
+export CVAE_FINETUNED_CHECKPOINT=/home/helloworld/bly/runs/<4m_run>/checkpoints/best_teacher_rmse.pt
+STEPWISE_OUT=/home/helloworld/bly/runs/cvae_kl2_4m_stepwise_$(date +%Y%m%d_%H%M%S)
+
+bash scripts/run_stepwise_recursive_causal.sh \
+  configs/stepwise_recursive_causal.yaml "$STEPWISE_OUT"
+```
+
+输出包含 source、original C、fine-tuned C 的 193 帧轨迹、fall frame、State/Root/
+Action 指标，以及 `manifests/stepwise_recursive_causal.json`。source 是 recorded
+HDF，不是 live teacher。
+
+### 三层 ghost 视频
+
+```bash
+python sonic-repro-kit/render_three_way_ghost.py \
+  --manifest "$STEPWISE_OUT/manifests/stepwise_recursive_causal.json" \
+  --model /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml \
+  --output-run "$STEPWISE_OUT/ghost" \
+  --layout ghost
+```
+
+每个 motion 生成：
+
+```text
+videos/ghost_source_original_finetuned_<motion>.mp4
+```
+
+source opaque，original C 与 fine-tuned C 半透明；同相机；运动学 ghost，
+不是扭矩物理重放。
+
+### 8/16 步开环与 recursive B 的边界
+
+当前微调只监督 Action[32]；未来 Action[33:63] 在 DAgger 窗口没有 teacher 标签。
+因此：
+
+- 不采用 8/16 步开环；
+- 不使用 `recursive_state_feedback_b` 的 32 步块；
+- 如果将来必须块执行，应另立 block-causal 微调，监督整个 block 的 Action。
 
 ### 从 MLP 路线复用的经验
 
@@ -890,12 +1012,18 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |
 | CVAE DAgger smoke | 待 Ubuntu 执行 |
 | CVAE DAgger pilot | smoke 成功后执行 |
-| CVAE KL2 32-motion 适配 | 已实现；Windows 35 tests 通过 |
+| CVAE KL2 32-motion 适配 | 已实现；Windows 38 tests 通过 |
 | CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
 | CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
 | CVAE KL2 smoke | Ubuntu execution PASS；quality 为单轮 smoke 预期 false |
 | CVAE KL2 pilot | round 0 step 800 native SIGSEGV；source cache + 500-step chunk resume + auto retry 已加，待重跑 |
 | CVAE KL2 formal | 待 pilot 通过 |
+| CVAE 4m intensive | `cvae_kl2_pilot_intensive` 配置/命令已实现；12×2000 候选，待 Ubuntu |
+| CVAE source cache 持久化 | 已实现 `data/source_cache.pt`；待 Ubuntu 验证 |
+| CVAE 4m early-stop 门禁 | 第 5/10 轮比较 teacher RMSE/termination；失败写 marker 并停止 auto |
+| Stepwise causal prepare | `dagger.stepwise_prepare` + start-at-zero template 已实现；待 Ubuntu |
+| Stepwise causal replay | `dagger.stepwise_recursive_causal` 已实现；每步 1 Action；待 Ubuntu |
+| Three-way ghost renderer | `sonic-repro-kit/render_three_way_ghost.py` 已实现；待 Ubuntu |
 | CVAE KL2 192-step survival | 实时 Isaac 闭环诊断；待 Ubuntu |
 | standard-normal 质量 | 待 pilot 评估 |
 | teacher action information contract | 待多 motion/reference probe |

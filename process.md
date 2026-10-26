@@ -708,3 +708,26 @@ JSON 均先写临时文件再 atomic replace。`run_dagger_auto.sh` 对 CVAE 默
 `DAGGER_SHARD_ROUNDS=1`、`DAGGER_MAX_RETRIES=5`。这些只是工程缓解，尚未在 Ubuntu 验证能消除
 native crash；若仍复现，下一步应在 `source_mix=0` 的独立诊断 run 中区分 HDF5 source read 与
 CVAE/CUDA/Isaac native 原因，不能直接进入 formal。
+
+## 24. 4-motion intensive 与 stepwise causal 渲染路线（2026-10-26）
+
+新增 `cvae_kl2_pilot_intensive`：4 env、当前 pilot 4 keys、12 rounds × 2000 train、
+1000 rollout、500 chunk、192 eval，候选约 24k optimizer steps，约 2.5h，作为
+calibration。pilot 实测约 2.72 optimizer steps/s；8–10h 约 78k–98k steps，
+候选 `cvae_kl2_pilot_intensive_8h` 为 20 rounds × 4000 train = 约 80k steps，
+偏慢时可改为 22–24 rounds。`source_cache.pt` 在 run 的 `data/` 持久化，避免每个
+shard 重读 1504 个 source window。calibration 和 8h 配置均启用 `early_stop`：
+第 5/10 轮（0-based 4/9）相对 round0 要求 teacher RMSE <= 0.98× 且 termination
+不变差；失败写 `manifests/dagger_cvae_kl2_early_stop.json` 与
+`markers/dagger_cvae_kl2_early_stop.ok`，`run_dagger_auto.sh` 看到 marker 后退出，
+不自动重试后续 round。
+
+新增 `dagger.stepwise_prepare` 与 `dagger.stepwise_recursive_causal`。渲染评估路线
+从 recorded 192-step group 的 exact initialization 开始，每步重建 causal window，只执行
+Action[32]，重复 192 步；source 层使用 recorded HDF，original/fine-tuned C 使用同一 exact
+init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recursive_state_feedback_b`
+的 32-Action 开环块。
+
+新增 `sonic-repro-kit/render_three_way_ghost.py`：source opaque、original C 与 fine-tuned C
+半透明，同相机 193 帧、50 Hz 运动学 ghost。上述入口只在 Windows compile 和 35 tests 通过，
+尚未在 Ubuntu Isaac/MuJoCo 执行。

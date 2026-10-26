@@ -80,6 +80,7 @@ class CvaeStudentAdapter:
         teacher_mode: str = "posterior_sample",
         source_identity: dict[str, Any] | None = None,
         source_cache_size: int = 0,
+        source_cache_path: str | Path | None = None,
         state_weight: float = 1.0,
         contact_weight: float = 0.1,
         teacher_sn_weight: float = 0.5,
@@ -109,6 +110,11 @@ class CvaeStudentAdapter:
         self.source_cache_size = int(source_cache_size)
         if self.source_cache_size < 0:
             raise ValueError("source_cache_size must be non-negative")
+        self.source_cache_path = (
+            Path(source_cache_path).expanduser().resolve()
+            if source_cache_path is not None
+            else None
+        )
         self._source_cache: list[dict[str, Any]] | None = None
         self.source_mix_exact = bool(self.source_identity.get("source_mix_exact", False))
         self.source_hash_mismatch: str | None = None
@@ -472,28 +478,79 @@ class CvaeStudentAdapter:
                 random_crop=True,
             )
         if self.source_cache_size > 0:
-            limit = min(len(self._source_dataset), self.source_cache_size)
-            cache: list[dict[str, Any]] = []
-            cache_keys = (
-                "physical_state",
-                "action",
-                "valid_state",
-                "valid_action",
-                "motion_key",
-                "variant_id",
-                "window_start",
-                "episode_ref",
-            )
-            for index in range(limit):
-                sample = self._source_dataset[index]
-                cache.append(
-                    {key: sample[key] for key in cache_keys if key in sample}
-                )
-                if (index + 1) % 128 == 0 or index + 1 == limit:
+            cache_identity = {
+                "format_version": "dagger_cvae_source_cache_v1",
+                "source_dataset_run": str(self.source_dataset_run),
+                "source_dataset_kind": self.source_dataset_kind,
+                "source_cache_size": int(self.source_cache_size),
+                "normalization_sha256": self.normalization_sha256,
+                "long_horizon_windows_sha256": self.source_identity.get(
+                    "long_horizon_windows_sha256"
+                ),
+            }
+            cache: list[dict[str, Any]] | None = None
+            if self.source_cache_path is not None and self.source_cache_path.is_file():
+                try:
+                    payload = torch.load(
+                        self.source_cache_path,
+                        map_location="cpu",
+                        weights_only=False,
+                    )
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("identity") == cache_identity
+                        and isinstance(payload.get("samples"), list)
+                    ):
+                        cache = payload["samples"]
+                        print(
+                            f"[dagger] cvae source cache loaded "
+                            f"{len(cache)} from {self.source_cache_path}",
+                            flush=True,
+                        )
+                except Exception as error:
                     print(
-                        f"[dagger] cvae source cache {index + 1}/{limit}",
+                        f"[dagger] source cache load failed, rebuilding: {error}",
                         flush=True,
                     )
+            if cache is None:
+                limit = min(len(self._source_dataset), self.source_cache_size)
+                cache = []
+                cache_keys = (
+                    "physical_state",
+                    "action",
+                    "valid_state",
+                    "valid_action",
+                    "motion_key",
+                    "variant_id",
+                    "window_start",
+                    "episode_ref",
+                )
+                for index in range(limit):
+                    sample = self._source_dataset[index]
+                    cache.append(
+                        {key: sample[key] for key in cache_keys if key in sample}
+                    )
+                    if (index + 1) % 128 == 0 or index + 1 == limit:
+                        print(
+                            f"[dagger] cvae source cache {index + 1}/{limit}",
+                            flush=True,
+                        )
+                if self.source_cache_path is not None:
+                    self.source_cache_path.parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    temporary = self.source_cache_path.with_name(
+                        f"{self.source_cache_path.name}.tmp.{os.getpid()}"
+                    )
+                    try:
+                        torch.save(
+                            {"identity": cache_identity, "samples": cache},
+                            temporary,
+                        )
+                        os.replace(temporary, self.source_cache_path)
+                    finally:
+                        if temporary.exists():
+                            temporary.unlink()
             self._source_cache = cache
         self.source_identity["source_mix_exact"] = bool(self.source_mix_exact)
         self.source_identity["source_hash_mismatch"] = self.source_hash_mismatch

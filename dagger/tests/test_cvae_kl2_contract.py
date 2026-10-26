@@ -9,6 +9,7 @@ from dagger.core.cvae_dataset import CvaeDaggerDataset, CvaeDaggerRound
 from dagger.core.cvae_loop import CvaeDaggerLoop
 from dagger.core.cvae_objective import (
     compose_dagger_loss,
+    cvae_early_stop_decision,
     masked_future_contact_bce,
     masked_future_state_mse,
     teacher_action_mse,
@@ -164,6 +165,36 @@ class CvaeObjectiveTest(unittest.TestCase):
             float(masked_future_contact_bce(logits, contact_target, contact_mask).item()),
             0.0,
         )
+
+    def test_early_stop_passes_with_improvement_and_stable_termination(self):
+        decision = cvae_early_stop_decision(
+            {"teacher_action_rmse": 0.30, "termination_rate": 0.10},
+            {"teacher_action_rmse": 0.29, "termination_rate": 0.10},
+            min_teacher_improvement_ratio=0.98,
+        )
+        self.assertTrue(decision["pass"])
+        self.assertTrue(decision["teacher_ok"])
+        self.assertTrue(decision["termination_ok"])
+
+    def test_early_stop_fails_without_teacher_improvement(self):
+        decision = cvae_early_stop_decision(
+            {"teacher_action_rmse": 0.30, "termination_rate": 0.10},
+            {"teacher_action_rmse": 0.30, "termination_rate": 0.10},
+            min_teacher_improvement_ratio=0.98,
+        )
+        self.assertFalse(decision["pass"])
+        self.assertFalse(decision["teacher_ok"])
+        self.assertTrue(decision["termination_ok"])
+
+    def test_early_stop_fails_when_termination_worsens(self):
+        decision = cvae_early_stop_decision(
+            {"teacher_action_rmse": 0.30, "termination_rate": 0.10},
+            {"teacher_action_rmse": 0.20, "termination_rate": 0.20},
+            min_teacher_improvement_ratio=0.98,
+        )
+        self.assertFalse(decision["pass"])
+        self.assertTrue(decision["teacher_ok"])
+        self.assertFalse(decision["termination_ok"])
 
     def test_compose_dagger_loss_weights(self):
         zero = torch.zeros(())

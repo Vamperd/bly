@@ -20,6 +20,7 @@ from omegaconf import OmegaConf
 
 from .adapters.plain_mlp_student import PlainMlpStudent
 from .adapters.sonic_release_teacher import SonicReleaseTeacher
+from .core.cvae_objective import cvae_early_stop_decision
 from .core.dataset import AggregatedDataset
 from .core.loop import DaggerLoop
 from .core.metrics import estimate_teacher_identifiability, same_motion_memorization_pass
@@ -1291,12 +1292,68 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
 
     manifest = _load_kl2_motion_manifest(config)
     mode = str(config.mode)
+    early_stop_marker = run_dir / "markers" / "dagger_cvae_kl2_early_stop.ok"
+    if early_stop_marker.is_file():
+        early_stop_path = (
+            run_dir / "manifests" / "dagger_cvae_kl2_early_stop.json"
+        )
+        payload = (
+            json.loads(early_stop_path.read_text(encoding="utf-8"))
+            if early_stop_path.is_file()
+            else {}
+        )
+        return None, {
+            "marker": "dagger_cvae_kl2_early_stop.ok",
+            "complete": False,
+            "early_stop": payload,
+        }
     smoke = "smoke" in mode
     pilot = "pilot" in mode
     formal = not smoke and not pilot
     beta_schedule = [float(value) for value in config.dagger.beta_schedule]
     if not beta_schedule:
         raise ValueError("beta_schedule must not be empty")
+    requested_rounds = int(
+        config.dagger.get("rounds", len(beta_schedule)) or len(beta_schedule)
+    )
+    if requested_rounds <= 0:
+        raise ValueError("dagger.rounds must be positive")
+    if requested_rounds <= len(beta_schedule):
+        beta_schedule = beta_schedule[:requested_rounds]
+    else:
+        extension = str(config.dagger.get("beta_schedule_extension", "hold_last"))
+        if extension == "hold_last":
+            beta_schedule = beta_schedule + [beta_schedule[-1]] * (
+                requested_rounds - len(beta_schedule)
+            )
+        elif extension == "repeat":
+            repeats = (requested_rounds + len(beta_schedule) - 1) // len(beta_schedule)
+            beta_schedule = (beta_schedule * repeats)[:requested_rounds]
+        else:
+            raise ValueError("beta_schedule_extension must be hold_last or repeat")
+    early_stop_config = config.dagger.get("early_stop", None)
+    early_stop_enabled = bool(
+        early_stop_config.get("enabled", False)
+    ) if early_stop_config else False
+    early_stop_rounds = {
+        int(value)
+        for value in (
+            early_stop_config.get("check_rounds", []) if early_stop_config else []
+        )
+    }
+    early_stop_baseline_round = int(
+        early_stop_config.get("baseline_round", 0)
+    ) if early_stop_config else 0
+    early_stop_min_ratio = float(
+        early_stop_config.get("min_teacher_improvement_ratio", 0.98)
+    ) if early_stop_config else 0.98
+    early_stop_term_tol = float(
+        early_stop_config.get("termination_tolerance", 0.0)
+    ) if early_stop_config else 0.0
+    if early_stop_enabled and not early_stop_rounds:
+        raise ValueError("early_stop.check_rounds must not be empty")
+    if early_stop_enabled and any(value < 0 for value in early_stop_rounds):
+        raise ValueError("early_stop.check_rounds must be non-negative")
     train_steps_per_round = int(config.student.train_steps_per_round)
     train_chunk_steps = int(config.student.get("train_chunk_steps", 0) or 0)
     if train_chunk_steps <= 0 or train_chunk_steps >= train_steps_per_round:
@@ -1367,6 +1424,11 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         teacher_mode=str(config.student.get("teacher_mode", "dual")),
         source_identity=manifest,
         source_cache_size=int(config.student.get("source_cache_size", 0)),
+        source_cache_path=(
+            run_dir / "data" / "source_cache.pt"
+            if int(config.student.get("source_cache_size", 0)) > 0
+            else None
+        ),
         state_weight=float(config.student.get("state_weight", 1.0)),
         contact_weight=float(config.student.get("contact_weight", 0.1)),
         teacher_sn_weight=float(config.student.get("teacher_sn_weight", 0.5)),
@@ -1562,6 +1624,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
     )
 
     for round_index in range(start_round, end_round):
+        round_started = time.perf_counter()
         resume_this_round = bool(resume_partial and round_index == start_round)
         if resume_this_round:
             keys = list(partial_keys)
@@ -1572,6 +1635,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         env, contract, teacher = _create_cvae_env_for_keys(
             config, prepared, run_dir, keys, args_cli, device
         )
+        env_setup_seconds = time.perf_counter() - round_started
         try:
             student.action_contract = contract
             student.set_action_clip_value(
@@ -1598,6 +1662,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
             )
             if resume_this_round:
                 round_data = dataset.rounds[-1]
+                collect_seconds = 0.0
                 chunk_index = int(partial_start_chunk)
                 train_chunks = list(partial_train_chunks)
                 motion_weights = partial_motion_weights
@@ -1605,7 +1670,9 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                 partial_path = partial_checkpoint_path
                 resume_partial = False
             else:
+                collect_started = time.perf_counter()
                 round_data = loop.collect_round(round_index, beta)
+                collect_seconds = time.perf_counter() - collect_started
                 chunk_index = 0
                 train_chunks = []
                 if formal:
@@ -1626,6 +1693,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     / "checkpoints"
                     / f"round_{round_index:02d}_partial.pt"
                 )
+            train_started = time.perf_counter()
             while chunk_index < chunks_total:
                 steps = min(
                     train_chunk_steps,
@@ -1676,12 +1744,16 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     },
                 )
                 chunk_index += 1
+            train_seconds = time.perf_counter() - train_started
             train_metrics = _merge_cvae_train_chunks(train_chunks)
+            eval_started = time.perf_counter()
             eval_metrics = loop.evaluate_student_only(
                 eval_steps,
                 latent_mode="fixed_standard_normal",
                 round_index=round_index,
             )
+            eval_seconds = time.perf_counter() - eval_started
+            round_seconds = time.perf_counter() - round_started
             raw_teacher_score = float(
                 eval_metrics.get("teacher_action_rmse", float("inf"))
             )
@@ -1753,6 +1825,13 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     "beta": beta,
                     "motion_keys": keys,
                     "samples": int(round_data.count),
+                    "env_setup_seconds": env_setup_seconds,
+                    "collect_seconds": collect_seconds,
+                    "train_seconds": train_seconds,
+                    "eval_seconds": eval_seconds,
+                    "round_seconds": round_seconds,
+                    "train_optimizer_steps": int(train_steps_per_round),
+                    "rollout_steps": int(config.dagger.rollout_steps),
                     "teacher_executed_ratio": teacher_ratio,
                     "student_executed_ratio": 1.0 - teacher_ratio,
                     "history_steps_mean": history_mean,
@@ -1762,6 +1841,42 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     "motion_coverage": dataset.motion_coverage(),
                 }
             )
+            early_stop_payload = None
+            if early_stop_enabled and round_index in early_stop_rounds:
+                baseline_entry = next(
+                    (
+                        item
+                        for item in metrics
+                        if int(item.get("round", -1))
+                        == early_stop_baseline_round
+                    ),
+                    None,
+                )
+                if baseline_entry is None:
+                    raise RuntimeError(
+                        "early-stop baseline round is not available: "
+                        f"{early_stop_baseline_round}"
+                    )
+                decision = cvae_early_stop_decision(
+                    baseline_entry["student_only"],
+                    eval_metrics,
+                    min_teacher_improvement_ratio=early_stop_min_ratio,
+                    termination_tolerance=early_stop_term_tol,
+                )
+                metrics[-1]["early_stop_check"] = decision
+                if not decision["pass"]:
+                    early_stop_payload = {
+                        "format_version": "dagger_cvae_kl2_early_stop_v1",
+                        "round": round_index,
+                        "baseline_round": early_stop_baseline_round,
+                        "decision": decision,
+                        "baseline": baseline_entry["student_only"],
+                        "current": eval_metrics,
+                        "quality_note": (
+                            "Stopped because teacher RMSE did not improve enough "
+                            "or termination became worse."
+                        ),
+                    }
             global_step_offset = (round_index + 1) * train_steps_per_round
             _write_json(
                 run_dir / "manifests" / "dagger_cvae_kl2_metrics.partial.json",
@@ -1781,6 +1896,16 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     "motion_manifest": manifest,
                 },
             )
+            if early_stop_payload is not None:
+                _write_json(
+                    run_dir
+                    / "manifests"
+                    / "dagger_cvae_kl2_early_stop.json",
+                    early_stop_payload,
+                )
+                early_stop_marker.write_text(
+                    "EARLY STOP\n", encoding="utf-8"
+                )
             final_path = (
                 run_dir / "checkpoints" / f"round_{round_index:02d}.pt"
             )
@@ -1797,6 +1922,12 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     motion_coverage=dataset.motion_coverage(),
                 )
             round_progress_path.unlink(missing_ok=True)
+            if early_stop_payload is not None:
+                return None, {
+                    "marker": "dagger_cvae_kl2_early_stop.ok",
+                    "complete": False,
+                    "early_stop": early_stop_payload,
+                }
         finally:
             _close_cvae_env(env)
 

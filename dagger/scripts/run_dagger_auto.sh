@@ -4,9 +4,9 @@ set -u
 
 MODE="${1:-mlp-pilot}"
 case "$MODE" in
-  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-formal) ;;
+  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-formal) ;;
   *)
-    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-formal" >&2
+    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-formal" >&2
     exit 2
     ;;
 esac
@@ -68,6 +68,11 @@ for ((shard = 1; shard <= MAX_SHARDS; shard++)); do
   else
     METRICS="$RUN/manifests/dagger_mlp_metrics.partial.json"
     FINAL_MANIFEST="$RUN/manifests/dagger_mlp_manifest.json"
+  fi
+  if [[ -f "$RUN/markers/dagger_cvae_kl2_early_stop.ok" ]]; then
+    echo "[auto] early stop run=$RUN"
+    cat "$RUN/manifests/dagger_cvae_kl2_early_stop.json" 2>/dev/null || true
+    exit 0
   fi
   COMPLETED=0
   if [[ -f "$METRICS" ]]; then

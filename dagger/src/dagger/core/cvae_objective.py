@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from typing import Any
+
 import torch
 from torch.nn import functional as F
 
@@ -71,3 +74,39 @@ def compose_dagger_loss(
         + float(posterior_mean_weight) * teacher_posterior_mean.float()
         + float(kl_beta) * kl.float()
     )
+
+
+def cvae_early_stop_decision(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    min_teacher_improvement_ratio: float = 0.98,
+    termination_tolerance: float = 0.0,
+) -> dict[str, Any]:
+    """Decide whether a mid-run teacher/termination gate should stop training."""
+
+    baseline_rmse = float(baseline.get("teacher_action_rmse", math.inf))
+    current_rmse = float(current.get("teacher_action_rmse", math.inf))
+    ratio = (
+        current_rmse / baseline_rmse
+        if baseline_rmse > 0.0 and math.isfinite(baseline_rmse)
+        else math.inf
+    )
+    baseline_termination = float(baseline.get("termination_rate", 0.0))
+    current_termination = float(current.get("termination_rate", math.inf))
+    teacher_ok = bool(ratio <= float(min_teacher_improvement_ratio))
+    termination_ok = bool(
+        current_termination <= baseline_termination + float(termination_tolerance)
+    )
+    return {
+        "pass": bool(teacher_ok and termination_ok),
+        "teacher_ok": teacher_ok,
+        "termination_ok": termination_ok,
+        "baseline_teacher_action_rmse": baseline_rmse,
+        "current_teacher_action_rmse": current_rmse,
+        "teacher_ratio": ratio,
+        "min_teacher_improvement_ratio": float(min_teacher_improvement_ratio),
+        "baseline_termination_rate": baseline_termination,
+        "current_termination_rate": current_termination,
+        "termination_tolerance": float(termination_tolerance),
+    }
