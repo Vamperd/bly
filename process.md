@@ -785,5 +785,8 @@ anchor 使用随机起始帧，policy 在 step 0/3 就 anchor/foot termination�
 回归测试。另外 confirmed 之前播放的是旧 stepwise manifest：original/fine-tuned
 只有 1–23 帧，渲染补帧不能生成真实机器人轨迹；ghost 蓝条来自 original C 的
 segmentation tint，不是背景重复渲染。渲染器现为每个单独视频使用各自 root 相机，
-并在 ghost 中按初始 root xy 对齐后合成，同时记录 `raw_first_roots`。Windows
+并在 ghost 中按初始 root xy 对齐后合成，同时记录 `raw_first_roots`。motion reset
+后又暴露 SONIC `set_motion_state` 把 `motion_num_steps` 设为 Int32、而原 buffer
+是 Long，首次 termination reset 会触发 dtype RuntimeError；wrapper 现把该字段
+cast 回 `time_steps` dtype，并在 fall 时打印实际 termination terms。Windows
 compile 和 45 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。

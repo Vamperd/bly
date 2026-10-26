@@ -193,6 +193,19 @@ def _run_policy(
         next_state = env.physics_state()
         if done_value:
             fall_frame = len(frames) - 1
+            raw_env = getattr(env.env, "env", env.env)
+            manager = getattr(raw_env, "termination_manager", None)
+            terms = {}
+            if manager is not None:
+                terms = {
+                    name: bool(manager.get_term(name)[0].item())
+                    for name in manager.active_terms
+                }
+            print(
+                f"[stepwise] fall at frame {fall_frame} "
+                f"terms={terms}",
+                flush=True,
+            )
             adapter.after_step(contract.raw_to_canonical(raw), next_state, done)
             break
         frames.append(_robot_frame(env, contract, next_state))

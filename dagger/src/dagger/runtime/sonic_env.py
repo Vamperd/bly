@@ -36,6 +36,10 @@ class SonicDaggerEnv:
             torch.zeros_like(motion.time_steps),
             torch.zeros_like(motion.motion_start_time_steps),
         )
+        if hasattr(motion, "motion_num_steps"):
+            motion.motion_num_steps = motion.motion_num_steps.to(
+                dtype=motion.time_steps.dtype
+            )
 
     def __init__(self, env: Any, *, reference_terms: list[str] | tuple[str, ...] | None = None) -> None:
         self.env = env
