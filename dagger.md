@@ -455,6 +455,33 @@ root xy 对齐到 source（只影响可视化，不修改轨迹文件），并�
 `padded_frames`。如果 source 首帧渲染为空白，渲染器会直接报错而不是写出空视频。
 已有 `ghost/` 目录时不要复用，改用新的 `ghost_fixed/` 输出目录。
 
+### 192-step recorded-state replay
+
+新增 `dagger.cvae_recorded_state_replay`，用于四路视频：
+
+- initial: `s0` real + `s1..s64` expected，Action 全 mask；一次生成 64 Action，执行前 32
+- 后续 `t=32..191`: `33 real + 32 expected` State，32 已执行 + 32 masked Action；预测并执行
+  `output.action[32]`
+- 每步窗口前进 1，最终 192 Action / 193 State
+- 不判断 fall，不 reset；关闭 auto reset
+- 每个 motion 输出 source/original/fine/ghost 四路视频
+
+```bash
+python -m dagger.cvae_recorded_state_replay \
+  --cases-manifest "$STEPWISE_PREP/manifests/cases.json" \
+  --case-index 0 \
+  --config configs/stepwise_recursive_causal.yaml \
+  --original-checkpoint "$CVAE_ORIGINAL_CHECKPOINT" \
+  --finetuned-checkpoint "$CVAE_FINETUNED_CHECKPOINT" \
+  --output-run "$OUT"
+
+python ../sonic-repro-kit/render_three_way_ghost.py \
+  --manifest "$OUT/manifests/recorded_state_replay.json" \
+  --model .../g1_29dof_rev_1_0.xml \
+  --ground-style black \
+  --output-run "$OUT/ghost"
+```
+
 ### 8/16 步开环与 recursive B 的边界
 
 当前微调只监督 Action[32]；未来 Action[33:63] 在 DAgger 窗口没有 teacher 标签。
@@ -1053,7 +1080,7 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |
 | CVAE DAgger smoke | 待 Ubuntu 执行 |
 | CVAE DAgger pilot | smoke 成功后执行 |
-| CVAE KL2 32-motion 适配 | 已实现；Windows 48 tests 通过 |
+| CVAE KL2 32-motion 适配 | 已实现；Windows 51 tests 通过 |
 | CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
 | CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
 | CVAE KL2 smoke | Ubuntu execution PASS；quality 为单轮 smoke 预期 false |
