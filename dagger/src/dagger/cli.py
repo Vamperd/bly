@@ -1255,6 +1255,23 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
     )
     if completed:
         student.load_round_checkpoint(completed[-1][2], load_optimizer=True)
+    source_contract = student.source_identity.get("training_contract") or {}
+    source_mask_mode = source_contract.get("mask_mode")
+    if source_mask_mode and str(source_mask_mode) != str(
+        config.student.get("source_mask_mode", "fixed")
+    ):
+        raise ValueError(
+            "configured source_mask_mode differs from the KL2 checkpoint: "
+            f"{config.student.get('source_mask_mode')} != {source_mask_mode}"
+        )
+    source_beta = source_contract.get("kl_beta")
+    if source_beta is not None and abs(
+        float(source_beta) - float(config.student.kl_beta)
+    ) > 1.0e-12:
+        raise ValueError(
+            "configured KL beta differs from the KL2 checkpoint: "
+            f"{config.student.kl_beta} != {source_beta}"
+        )
     if float(config.student.source_mix) > 0:
         student._load_source_dataset()
     total_train_steps = total_rounds * train_steps_per_round
@@ -1491,7 +1508,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
             last = metrics[-1].get("student_only") if metrics else None
             gate = _cvae_imitation_gate(first, last, required_motions=3)
     best_checkpoints: dict[str, str] = {}
-    if complete:
+    if complete and not smoke:
         for name, info in (
             ("best_teacher_rmse.pt", best_teacher_rmse),
             ("best_survival.pt", best_survival),

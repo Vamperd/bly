@@ -180,6 +180,7 @@ class SonicActionContract:
                 raise ValueError(f"SONIC {name} must be [B,29], found {tuple(value.shape)}")
             return value
 
+        self.raw_action_clip_value: float | None = None
         self.scale = expand_param("scale", self.scale)
         self.offset = expand_param("offset", self.offset)
         self.nominal = expand_param("nominal", self.nominal)
@@ -204,9 +205,22 @@ class SonicActionContract:
             processed = torch.minimum(processed, self.clip[..., 1])
         return processed
 
+    def set_raw_action_clip_value(self, value: float | None) -> None:
+        """Set a finite fallback clip used when the env bounds are infinite."""
+
+        self.raw_action_clip_value = None if value is None else float(value)
+
     def clip_raw(self, raw: torch.Tensor) -> torch.Tensor:
         raw = raw.to(self.device, dtype=torch.float32)
-        return torch.maximum(torch.minimum(raw, self.raw_high), self.raw_low)
+        finite_bounds = bool(
+            torch.isfinite(self.raw_low).all() and torch.isfinite(self.raw_high).all()
+        )
+        if finite_bounds:
+            return torch.maximum(torch.minimum(raw, self.raw_high), self.raw_low)
+        if self.raw_action_clip_value is not None and self.raw_action_clip_value > 0:
+            limit = float(self.raw_action_clip_value)
+            return torch.clamp(raw, -limit, limit)
+        return raw
 
     def raw_to_canonical(self, raw: torch.Tensor) -> torch.Tensor:
         return self.raw_to_processed(raw) - self.nominal

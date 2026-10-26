@@ -28,6 +28,7 @@ class CvaeWindow:
     action_mask: torch.Tensor
     loss_state_mask: torch.Tensor
     loss_action_mask: torch.Tensor
+    history_steps: torch.Tensor | None = None
 
 
 def _zeros(device: torch.device, batch: int, dtype: torch.dtype = torch.float32):
@@ -78,6 +79,15 @@ class CvaeWindowBuffer:
         self._states: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
         self._actions: list[list[torch.Tensor]] = [[] for _ in range(self.num_envs)]
         self._current: list[torch.Tensor | None] = [None] * self.num_envs
+
+    def history_steps(self) -> torch.Tensor:
+        """Return how many real history States each environment currently has."""
+
+        return torch.tensor(
+            [len(states) for states in self._states],
+            device=self.device,
+            dtype=torch.long,
+        )
 
     def reset(self, current_state: torch.Tensor) -> None:
         current_state = current_state.to(self.device, dtype=torch.float32)
@@ -152,6 +162,7 @@ class CvaeWindowBuffer:
             action_mask=am,
             loss_state_mask=lsm,
             loss_action_mask=lam,
+            history_steps=self.history_steps(),
         )
 
 

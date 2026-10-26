@@ -16,6 +16,7 @@ class ActionContractTest(unittest.TestCase):
         contract.clip = None
         contract.raw_low = torch.full((1, 29), -10.0)
         contract.raw_high = torch.full((1, 29), 10.0)
+        contract.raw_action_clip_value = None
         contract.term = object()
         return contract
 

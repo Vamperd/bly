@@ -13,14 +13,18 @@ DAgger 的唯一实现目录是工作区根目录 `dagger/`。SONIC nested repo 
 - `dagger/src/dagger/core/cvae_dataset.py`：保存和均衡采样各 DAgger round 的动态窗口；
 - `dagger/src/dagger/core/cvae_loop.py`：Isaac 环境闭环收集 teacher/student/executed Action 和未来 State；
 - `dagger/src/dagger/adapters/cvae_student.py`：加载 Stage-C 65-token CVAE，rollout 使用 condition + fixed standard-normal latent，训练使用 future-State loss、teacher-Action loss 和 KL；
-- `dagger/configs/cvae_smoke.yaml`、`dagger/configs/cvae_pilot.yaml`：独立配置，不进入 SONIC Hydra defaults。
+- `dagger/src/dagger/core/cvae_objective.py`：teacher Action、future State、contact 和总损失的纯 tensor 组合；
+- `dagger/src/dagger/core/motion_groups.py`：32 motion 的确定性分组和 pilot 选择；
+- `dagger/configs/cvae_smoke.yaml`、`dagger/configs/cvae_pilot.yaml`：独立的通用 CVAE 配置；
+- `dagger/configs/cvae_kl2_smoke.yaml`、`cvae_kl2_pilot.yaml`、`cvae_kl2_formal.yaml`：KL2 32-motion 适配配置；
+- `dagger/configs/cvae_kl2_motion_manifest.json`：固定 32 keys、4×8 groups 和 pilot keys。
 
 Plain MLP 的通用路径仍可通过 `smoke` 和 `pilot` 使用；4-motion 记忆实验通过
 `mlp-smoke` 和 `mlp-pilot` 使用；CVAE 路径通过 `cvae-smoke` 和 `cvae-pilot` 使用。
 Plain MLP 的 teacher/student mixture 已改为 **per-step**：每一步独立采样
 `teacher_mask ~ Bernoulli(beta)`，teacher Action 始终计算并作为标签，环境执行 teacher 或
-student 之一；`beta=0` 是纯 student rollout，`beta=1` 是纯 teacher。CVAE 路径仍使用
-per-episode mixture。
+student 之一；`beta=0` 是纯 student rollout，`beta=1` 是纯 teacher。通用 CVAE 路径仍使用
+per-episode mixture；KL2 32-motion 路径使用 per-step mixture。
 
 ## 术语和数据语义
 
@@ -86,7 +90,17 @@ Windows 已完成：
 - same-motion memorization 门禁测试；
 - SONIC reference term selection 和 motion key contract 测试。
 
-当前共 22 个 Windows 单元测试通过。
+新增 KL2 适配测试覆盖：
+
+- 32-motion 分组与 pilot 选择；
+- causal-prefix Mask；
+- per-step teacher/student mixture；
+- motion-weighted dataset sampling；
+- action fallback clip；
+- 双路径损失组合；
+- 192 步指标聚合。
+
+当前共 34 个 Windows 单元测试通过。
 
 当前测试命令：
 
@@ -121,6 +135,201 @@ pilot 结果必须包含 teacher checkpoint、student checkpoint、normalization
 
 每轮 student-only 评测同时记录 `fixed_standard_normal`（正式部署路径）、`zero` 和
 `posterior_mean`（当前 masked rollout 的诊断路径）；三者不合并成单一质量结论。
+
+## CVAE KL2 32-motion 适配（2026-10-28）
+
+### 一句话
+
+在 KL2 300k 的 65-token CVAE 基础上，用冻结的 SONIC release teacher 在
+**学生自己走到的状态**上现场给出 29 维 Action 标签，做同 32 motion 的
+DAgger 动作模仿微调；不训练新模型，也不改 CVAE 架构。
+
+### 数据从哪里来
+
+```text
+源 checkpoint:
+  /home/helloworld/bly/runs/cvae_long_horizon_train_kl2_fp32_300k_20261016_005837_3380803/checkpoints/best.pt
+  SHA256 = f0a254be2cfc04316d2565d1c747d4e60cfbfe16c2fecf873c8904c0982860a7
+
+32-motion 基础集:
+  /home/helloworld/bly/runs/cvae_overfit_subset_rebuilt_20260928_193357
+
+long-horizon source:
+  /home/helloworld/bly/runs/cvae_long_horizon_dataset_rebuilt_20261018_223710_254008
+  groups_sha256  = 66a18e...
+  windows_sha256 = 27d1e2...
+  normalization  = d9d04c...
+```
+
+rebuilt long-horizon 与 KL2 checkpoint 记录的 groups/windows hash 完全一致，
+所以 source mix 标记为 `source_mix_exact=true`。运动文件使用：
+
+```text
+/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered
+```
+
+32 个 motion key、4 组 × 8、pilot 4 个 key 固定记录在：
+
+```text
+dagger/configs/cvae_kl2_motion_manifest.json
+```
+
+配置继承 KL2 的 `fixed` Mask、`kl_beta=0.002`、`beta_warmup=10000` 和
+FP32 eager；不加载源 optimizer。
+
+### 一轮训练到底发生什么
+
+```text
+reset 8 个 env（formal）或 1/4 个 env（smoke/pilot）
+↓
+每步：
+  1. 学生读最近 32 步 State/Action + 当前 State，组成 65-token 条件窗口
+  2. 学生用 condition + 固定 standard-normal latent 输出当前 Action
+  3. teacher 看同一个 observation，现场算 release Action
+  4. 每个 env 独立采样 teacher_mask ~ Bernoulli(beta)
+  5. 执行 teacher 或 student 的 Action
+  6. 记录 executed / teacher / student Action、下一 State、done
+↓
+用 anchor=32 的窗口构造训练样本：
+  - 未来 State 只作训练 target，不进入 rollout 输入
+  - 只监督 anchor 处的 teacher Action
+↓
+50% batch 来自原始 long-horizon 重建窗口
+50% batch 来自本轮 DAgger 动态窗口
+↓
+AdamW 更新 64M 参数
+↓
+192 步实时 Isaac 闭环评估
+```
+
+`beta` 是每步 teacher/student 混合比例：
+
+```text
+1.0 = 全部执行 teacher
+0.0 = 全部执行 student
+```
+
+### 两条 latent 路径
+
+```text
+posterior mean:
+  用完整序列的 posterior mean + condition，标签稳定，适合状态重建
+
+standard normal:
+  用 N(0,1) latent + condition，和真正部署路径一致
+
+teacher Action loss:
+  0.5 × standard-normal
++ 0.5 × posterior-mean
+```
+
+训练时 standard-normal epsilon 每个样本重新采样；训练 rollout 时每个 episode
+固定一组 epsilon；评估时每个 env 在 192 步内固定同一组，保证 baseline/final 可比。
+
+### 完整损失
+
+```text
+future State MSE
++ 0.1 × contact BCE
++ 0.5 × standard-normal teacher MSE
++ 0.5 × posterior-mean teacher MSE
++ 0.002 × KL
+```
+
+source batch 仍使用 KL2 原目标：
+
+```text
+full State/Action/contact reconstruction
++ 0.002 × KL
+```
+
+其中一部分 source batch 会主动使用 causal-prefix Mask，让模型提前适应
+“未来 State/Action 全部隐藏”的 DAgger 条件分布。
+
+### 从 4 个 motion 到 32 个 motion
+
+```text
+pilot:
+  4 env
+  4 keys = MLP 4 与 32 的交集 + seed=20261024 补齐
+  2 轮：beta = [1.0, 0.5]
+  500 rollout steps/轮
+  1500 train steps/轮
+
+formal:
+  8 env
+  每轮使用 G[round % 4] 的 8 个 key
+  10 轮：beta = [1.0, 0.9, ..., 0.0]
+  1000 rollout steps/轮
+  1500 train steps/轮
+  末尾单独 32-env × 192 步评估
+```
+
+MLP 的 4 个 key 不在 KL2 的 32 个 key 内，所以 pilot 实际使用：
+
+```text
+dance_vouge_butterfly_step_270_R_003__A324
+cellphone_looking_for_service_walk_R_001__A427
+lift_crate_walk_ff_stop_270_R_003__A202
+big_heavy_one_hand_front_low_to_front_medium_R_001__A526
+```
+
+### 评估与通过标准
+
+主目标是**同 32 motion 的 teacher Action 模仿**：
+
+```text
+final canonical teacher RMSE <= 0.5 × baseline
+至少 24/32 motion <= 0.7 × baseline
+termination_rate 不变差
+action_saturation_ratio < 5%
+```
+
+pilot 把 24/32 降为 3/4。192 步实时 Isaac 闭环的 survival / episode length
+只作诊断，不作为一票否决；它回答“动作更像 teacher 后是否更稳”，
+不和 teacher RMSE 合并成一个分数。
+
+固定 32-motion 评估会先跑 source baseline，再跑 final；如果 32-env OOM，
+自动回退 4×8 并记录。
+
+每轮保存 `round_XX.pt`；pilot/formal 结束后根据 teacher RMSE 和 survival
+选择并复制 `best_teacher_rmse.pt` / `best_survival.pt`。
+
+### 从 MLP 路线复用的经验
+
+| MLP 踩坑/有效方法 | CVAE 适配 |
+|---|---|
+| 双重归一化 | 只用 checkpoint normalization，禁止二次标准化 |
+| action bounds ±Inf | fallback clip 20.0，记录 saturation |
+| teacher 旧 trl 状态 | 复用兼容 unpickler |
+| per-episode mixture 覆盖不足 | 改 per-step Bernoulli |
+| 固定 4 motion | 32 keys 对齐；4-motion pilot |
+| 跌倒 motion 加权 | formal 按 per-motion termination 加权采样 |
+| RMSE 低但 termination 高 | 192 步 survival 单独报告 |
+| 无分片/续训 | CVAE round shard + partial + auto resume |
+| render 配置不匹配 | CVAE 用 replay65 exact-init，不套 MLP render |
+| 动作拟合≠物理质量 | 视频/replay 只作定性，不作门禁 |
+
+### 运行入口
+
+```bash
+cd ~/bly/dagger
+export SONIC_REPO_ROOT=~/bly/sonic-repro/GR00T-WholeBodyControl
+export SONIC_TEACHER_CHECKPOINT=$SONIC_REPO_ROOT/sonic_release/last.pt
+
+bash scripts/run_dagger.sh cvae-kl2-smoke
+bash scripts/run_dagger.sh cvae-kl2-pilot
+bash scripts/run_dagger_auto.sh cvae-kl2-formal
+```
+
+### 证据边界
+
+- 只训练/评估 KL2 的同一批 32 个 motion，不是新 motion 泛化；
+- 学生仍然不接收 reference，teacher 的 Action 标签在 partial history 上
+  可能不是唯一可辨识的；
+- `quality_pass` 只表示同 motion teacher Action 模仿门禁，不表示
+  物理 replay、随机生成或长时生存一定通过；
+- 所有结果必须写入 `~/bly/runs/dagger_cvae_kl2_*`，不得覆盖源 checkpoint。
 
 ## Plain MLP 4-motion memorization 路线
 
@@ -669,5 +878,10 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |
 | CVAE DAgger smoke | 待 Ubuntu 执行 |
 | CVAE DAgger pilot | smoke 成功后执行 |
+| CVAE KL2 32-motion 适配 | 已实现；Windows 34 tests 通过 |
+| CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
+| CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
+| CVAE KL2 smoke / pilot / formal | 待 Ubuntu 执行 |
+| CVAE KL2 192-step survival | 实时 Isaac 闭环诊断；待 Ubuntu |
 | standard-normal 质量 | 待 pilot 评估 |
 | teacher action information contract | 待多 motion/reference probe |

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ class CvaeDaggerRound:
     """CPU tensors collected for one DAgger round."""
 
     tensors: dict[str, torch.Tensor]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         missing = [key for key in _REQUIRED if key not in self.tensors]
@@ -84,6 +85,7 @@ class CvaeDaggerDataset:
                 "round_index": int(round_index),
                 "count": self.rounds[-1].count,
                 "tensors": self.rounds[-1].tensors,
+                "metadata": self.rounds[-1].metadata,
             },
             path,
         )
@@ -95,8 +97,34 @@ class CvaeDaggerDataset:
         keys = self.rounds[0].tensors.keys()
         return {key: torch.cat([item.tensors[key] for item in self.rounds], dim=0) for key in keys}
 
-    def sample(self, batch_size: int, *, generator: torch.Generator) -> dict[str, torch.Tensor]:
-        """Sample equal round mass, then random rows within each selected round."""
+    @staticmethod
+    def _row_weights(
+        round_data: CvaeDaggerRound,
+        motion_weights: dict[str, float] | None,
+    ) -> torch.Tensor | None:
+        if not motion_weights:
+            return None
+        keys = list(round_data.metadata.get("motion_keys") or [])
+        motion_ids = round_data.tensors.get("motion_id")
+        if not keys or motion_ids is None or int(motion_ids.shape[0]) != round_data.count:
+            return None
+        weights = torch.ones(round_data.count, dtype=torch.float32)
+        for row, motion_id in enumerate(motion_ids.tolist()):
+            index = int(motion_id)
+            key = keys[index] if 0 <= index < len(keys) else ""
+            weights[row] = float(motion_weights.get(key, 1.0))
+        if not torch.isfinite(weights).all() or float(weights.sum()) <= 0.0:
+            return None
+        return weights
+
+    def sample(
+        self,
+        batch_size: int,
+        *,
+        generator: torch.Generator,
+        motion_weights: dict[str, float] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Sample equal round mass, then weighted rows within each selected round."""
 
         if not self.rounds:
             raise RuntimeError("CVAE DAgger dataset is empty")
@@ -106,10 +134,31 @@ class CvaeDaggerDataset:
         rows: dict[str, list[torch.Tensor]] = {key: [] for key in self.rounds[0].tensors}
         for round_index in selected_rounds.tolist():
             round_data = self.rounds[round_index]
-            row = torch.randint(round_data.count, (1,), generator=generator).item()
+            weights = self._row_weights(round_data, motion_weights)
+            if weights is None:
+                row = torch.randint(round_data.count, (1,), generator=generator).item()
+            else:
+                row = int(
+                    torch.multinomial(weights, 1, replacement=True, generator=generator).item()
+                )
             for key, value in round_data.tensors.items():
                 rows[key].append(value[row])
         return {key: torch.stack(values) for key, values in rows.items()}
+
+    def motion_coverage(self) -> dict[str, int]:
+        """Count how many stored samples belong to each motion key."""
+
+        coverage: dict[str, int] = {}
+        for round_data in self.rounds:
+            keys = list(round_data.metadata.get("motion_keys") or [])
+            motion_ids = round_data.tensors.get("motion_id")
+            if not keys or motion_ids is None:
+                continue
+            for motion_id in motion_ids.tolist():
+                index = int(motion_id)
+                key = keys[index] if 0 <= index < len(keys) else f"motion_{index}"
+                coverage[key] = coverage.get(key, 0) + 1
+        return dict(sorted(coverage.items()))
 
     @classmethod
     def load_rounds(cls, paths: list[str | Path]) -> "CvaeDaggerDataset":
@@ -118,6 +167,11 @@ class CvaeDaggerDataset:
             payload: Any = torch.load(Path(path), map_location="cpu", weights_only=False)
             if payload.get("format_version") != "dagger_cvae_round_v1":
                 raise ValueError(f"unsupported DAgger shard: {path}")
-            result.append(CvaeDaggerRound(dict(payload["tensors"])))
+            result.append(
+                CvaeDaggerRound(
+                    dict(payload["tensors"]),
+                    metadata=dict(payload.get("metadata") or {}),
+                )
+            )
         return result
 
