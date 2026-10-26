@@ -23,6 +23,11 @@ class SonicDaggerEnv:
         close = getattr(self.env, "close", None)
         if callable(close):
             close()
+            return
+        inner = getattr(self.env, "env", None)
+        close = getattr(inner, "close", None)
+        if callable(close):
+            close()
 
     def __init__(self, env: Any, *, reference_terms: list[str] | tuple[str, ...] | None = None) -> None:
         self.env = env

@@ -46,6 +46,17 @@ class _Env:
         self.closed = True
 
 
+class _Wrapper:
+    device = torch.device("cpu")
+    num_envs = 1
+    config = _Config()
+    action_space = _Space()
+    command_manager = _CommandManager()
+
+    def __init__(self):
+        self.env = _Env()
+
+
 class SonicEnvContractTest(unittest.TestCase):
     def test_reference_term_selection_and_motion_keys(self):
         env = SonicDaggerEnv(_Env(), reference_terms=("term_b",))
@@ -61,6 +72,12 @@ class SonicEnvContractTest(unittest.TestCase):
         env = SonicDaggerEnv(raw, reference_terms=("term_b",))
         env.close()
         self.assertTrue(raw.closed)
+
+    def test_close_delegates_through_wrapper(self):
+        wrapper = _Wrapper()
+        env = SonicDaggerEnv(wrapper, reference_terms=("term_b",))
+        env.close()
+        self.assertTrue(wrapper.env.closed)
 
     def test_missing_reference_term_is_reported(self):
         with self.assertRaises(KeyError):
