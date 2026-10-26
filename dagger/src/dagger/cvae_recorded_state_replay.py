@@ -177,8 +177,13 @@ def _run_lane(args: argparse.Namespace) -> dict:
         _prepare_release_env,
     )
     from .runtime.sonic_env import SonicActionContract
-    from .stepwise_recursive_causal import _load_source, _metrics, _robot_frame, _stack_frames
-    from exact_replay_initializer import apply_exact_replay_initialization
+    from .stepwise_recursive_causal import (
+        _ensure_kit_path,
+        _load_source,
+        _metrics,
+        _robot_frame,
+        _stack_frames,
+    )
 
     case = _case(Path(args.cases_manifest), int(args.case_index))
     motion_key = str(case["motion_key"])
@@ -197,6 +202,9 @@ def _run_lane(args: argparse.Namespace) -> dict:
     lane_output.mkdir(parents=True, exist_ok=True)
 
     config = OmegaConf.load(args.config)
+    _ensure_kit_path(config)
+    from exact_replay_initializer import apply_exact_replay_initialization
+
     device = torch.device(str(config.get("device", "cuda:0")))
     sonic_root = Path(str(config.sonic_repo_root)).expanduser().resolve()
     os.chdir(sonic_root)
