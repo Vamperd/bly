@@ -69,7 +69,7 @@ class CvaeDaggerLoop:
     @staticmethod
     def _new_record(state: torch.Tensor, episode_id: int = 0) -> dict[str, list[torch.Tensor]]:
         return {
-            "states": [state.detach().clone()],
+            "states": [state.detach().cpu().clone()],
             "state_valid": [torch.tensor(True, dtype=torch.bool)],
             "executed_canonical": [],
             "teacher_canonical": [],

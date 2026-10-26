@@ -311,6 +311,11 @@ class CvaeLoopContractTest(unittest.TestCase):
             mixture_mode="per_step",
         )
 
+    def test_record_normalizes_initial_state_to_cpu(self):
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        record = CvaeDaggerLoop._new_record(torch.zeros(70, device=device))
+        self.assertEqual(record["states"][0].device.type, "cpu")
+
     def test_per_step_mixture_records_teacher_and_student(self):
         with tempfile.TemporaryDirectory() as directory:
             loop = self._loop(directory)
