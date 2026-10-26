@@ -769,6 +769,8 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 下钻到 `env.env.close`，并加两层回归测试。修复后第一个 case 完成，但同一 Kit
 进程内销毁并重建 `SimulationContext` 在第二个 case 卡住超过 3 分钟；因此
 `stepwise_recursive_causal` 新增 `--case-index`，stepwise 评估改为每个 motion
-独立进程，避免复用同一 Isaac app 重初始化。以上均发生在模型推理前/写盘阶段，
-不构成数据或模型质量结论。Windows compile 和 43 tests 通过，Ubuntu
+独立进程，避免复用同一 Isaac app 重初始化。随后 case 3 跑完但写 manifest 时因
+`stepwise_recursive_causal.py` 只导入 `datetime` 未导入 `timezone` 再次失败；
+已补 `timezone` 并增加 source 级回归检查。以上均发生在模型推理前/写盘阶段，
+不构成数据或模型质量结论。Windows compile 和 44 tests 通过，Ubuntu
 Isaac/MuJoCo 仍待执行。

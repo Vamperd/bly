@@ -20,6 +20,13 @@ class StepwisePrepareTest(unittest.TestCase):
     def test_utc_timestamp_is_available(self):
         self.assertIn("+00:00", _utc_now_iso())
 
+    def test_stepwise_modules_import_timezone(self):
+        root = Path(__file__).resolve().parents[1] / "src" / "dagger"
+        for name in ("stepwise_prepare.py", "stepwise_recursive_causal.py"):
+            text = (root / name).read_text(encoding="utf-8")
+            if "timezone.utc" in text:
+                self.assertRegex(text, r"from datetime import [^\n]*timezone")
+
     def test_window_args_match_replay65_contract(self):
         args = SimpleNamespace(
             horizon_steps=192,
