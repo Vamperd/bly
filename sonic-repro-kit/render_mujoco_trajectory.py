@@ -362,23 +362,32 @@ def _remove_matching_children(root: ET.Element, tag: str, attribute: str, value:
 
 
 def _remove_worldbody_plane_geoms(root: ET.Element) -> int:
-    """Remove source ground planes before adding the run-local visual ground.
+    """Remove every source plane before adding the run-local visual ground.
 
-    Converted robot MJCF files may already contain a worldbody ``floor`` plane.
-    Keeping it coplanar with the renderer overlay produces depth-buffer
-    z-fighting, which appears as alternating black/checker ground frames.
-    Robot collision meshes are not affected because only plane geoms below the
-    worldbody are removed.
+    Converted robot MJCF files may already contain a worldbody ``floor`` plane
+    with a blue checker material.  Leaving it coplanar with the runtime ground
+    produces depth-buffer z-fighting: alternating black/checker/blue bands.
+    Remove all plane geoms from the whole parsed tree, not only direct
+    worldbody children, so nested converted assets cannot reintroduce the
+    source floor.
     """
-    worldbody = root.find("worldbody")
-    if worldbody is None:
-        return 0
     removed = 0
-    for parent in worldbody.iter():
+    for parent in list(root.iter()):
         for child in list(parent):
             if child.tag == "geom" and child.get("type") == "plane":
                 parent.remove(child)
                 removed += 1
+    return removed
+
+
+def _remove_source_ground_assets(root: ET.Element) -> int:
+    removed = 0
+    for tag in ("texture", "material"):
+        for parent in list(root.iter()):
+            for child in list(parent):
+                if child.tag == tag and child.get("name") == "groundplane":
+                    parent.remove(child)
+                    removed += 1
     return removed
 
 
@@ -473,6 +482,7 @@ def prepare_runtime_xml(
     )
     replaced_ground = _remove_matching_children(root, "geom", "name", RUNTIME_GROUND_GEOM_NAME)
     removed_worldbody_planes = _remove_worldbody_plane_geoms(root)
+    removed_source_ground_assets = _remove_source_ground_assets(root)
 
     asset = _find_or_create_top_level(root, "asset", before="worldbody")
     if ground_style == "checker":
@@ -530,6 +540,17 @@ def prepare_runtime_xml(
         ),
     )
 
+    plane_geoms = [
+        geom
+        for parent in root.iter()
+        for geom in parent
+        if geom.tag == "geom" and geom.get("type") == "plane"
+    ]
+    if len(plane_geoms) != 1:
+        raise RuntimeError(
+            f"runtime model must contain exactly one ground plane, found {len(plane_geoms)}"
+        )
+
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     ET.indent(tree, space="  ")
     tree.write(destination_path, encoding="utf-8", xml_declaration=True)
@@ -538,6 +559,7 @@ def prepare_runtime_xml(
         "removed_terrain_meshes": removed_meshes,
         "removed_terrain_geoms": removed_geoms,
         "removed_terrain_bodies": removed_bodies,
+        "removed_source_ground_assets": removed_source_ground_assets,
         "framebuffer": {"width": width, "height": height},
         "ground": {
             "style": ground_style,
