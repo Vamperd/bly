@@ -312,14 +312,14 @@ pilot 把 24/32 降为 3/4。192 步实时 Isaac 闭环的 survival / episode le
 `cvae_kl2_pilot_intensive.yaml` 使用当前 pilot 4 个 motion、4 env、12 rounds：
 `2000 train steps/round`、`1000 rollout steps/round`、`500 chunk steps`、
 `192 eval`。总量约 24,000 optimizer steps；它只是 calibration，不是完整 8–10h。
-实际 8–10h 应按实测 `optimizer_steps_per_second` 放大轮数；本机实测约 2.72 steps/s，
-8–10h 约 78k–98k steps，即约 20–24 rounds × 4000 steps。放大前先看前 12–24k
-steps 的 teacher RMSE/termination 是否改善。
+pilot 实测约 2.72 steps/s；8h 的 round1 实测约 2.1 steps/s，因此 calibration
+约 3–4h，8–10h 约 72k–80k steps，即约 18–20 rounds × 4000 steps。放大前先看
+calibration 的 teacher RMSE/termination 是否改善。
 
 已提供候选 8h 配置 `cvae_kl2_pilot_intensive_8h.yaml`：
-`rounds: 20`、`train_steps_per_round: 4000`、`beta_schedule_extension: hold_last`，
-共约 80k optimizer steps；若实测偏慢可改为 22–24 rounds。它只在 calibration
-显示改善后使用：
+`rounds: 18`、`train_steps_per_round: 4000`、`beta_schedule_extension: hold_last`，
+`beta_schedule: [1.0,1.0,0.8,0.6,0.4,0.2,0.1,0.0]`，共约 72k optimizer steps；
+若实测偏慢可改为 17 rounds。它只在 calibration 显示改善后使用：
 
 ```bash
 DAGGER_TEE=1 DAGGER_SHARD_ROUNDS=1 DAGGER_MAX_SHARDS=60 DAGGER_MAX_RETRIES=5 \
@@ -327,7 +327,9 @@ bash scripts/run_dagger_auto.sh cvae-kl2-pilot-intensive-8h
 ```
 
 若实测吞吐不同，只调整 `dagger.rounds` 和 `student.train_steps_per_round`；
-`hold_last` 会在 12 个 beta 值之后持续保持最后的 `0.0`，而不是重新回到 teacher-only。
+`hold_last` 会在 8 个 beta 值之后持续保持最后的 `0.0`，而不是重新回到 teacher-only。
+前两轮 beta=1.0 保留给 teacher-only 数据；round 2 起快速降到 0.8/0.6/0.4，
+使第 5 轮门禁时学生已访问自己的错误状态。
 
 4m calibration 与 8h 配置都启用中途门禁：
 

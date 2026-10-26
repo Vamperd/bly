@@ -712,15 +712,27 @@ CVAE/CUDA/Isaac native 原因，不能直接进入 formal。
 ## 24. 4-motion intensive 与 stepwise causal 渲染路线（2026-10-26）
 
 新增 `cvae_kl2_pilot_intensive`：4 env、当前 pilot 4 keys、12 rounds × 2000 train、
-1000 rollout、500 chunk、192 eval，候选约 24k optimizer steps，约 2.5h，作为
-calibration。pilot 实测约 2.72 optimizer steps/s；8–10h 约 78k–98k steps，
-候选 `cvae_kl2_pilot_intensive_8h` 为 20 rounds × 4000 train = 约 80k steps，
-偏慢时可改为 22–24 rounds。`source_cache.pt` 在 run 的 `data/` 持久化，避免每个
-shard 重读 1504 个 source window。calibration 和 8h 配置均启用 `early_stop`：
+1000 rollout、500 chunk、192 eval，候选约 24k optimizer steps，约 3–4h，作为
+calibration。pilot 实测约 2.72 steps/s；8h run round1 实测约 2.1 steps/s。
+候选 `cvae_kl2_pilot_intensive_8h` 为 18 rounds × 4000 train = 约 72k steps，
+beta `[1.0,1.0,0.8,0.6,0.4,0.2,0.1,0.0]` + hold_last，偏慢时可改为 17 rounds。
+`source_cache.pt` 在 run 的 `data/` 持久化，避免每个 shard 重读 1504 个 source window。
+calibration 和 8h 配置均启用 `early_stop`：
 第 5/10 轮（0-based 4/9）相对 round0 要求 teacher RMSE <= 0.98× 且 termination
 不变差；失败写 `manifests/dagger_cvae_kl2_early_stop.json` 与
 `markers/dagger_cvae_kl2_early_stop.ok`，`run_dagger_auto.sh` 看到 marker 后退出，
 不自动重试后续 round。
+
+8h run `dagger_cvae_kl2_pilot_intensive_8h_20261026_141123` 的 round0/1 均在
+beta=1.0 下完成，teacher RMSE 为 0.2986→0.29996，termination 为 5.34%→5.60%，
+survival 均为 0，没有质量改善；round0/1 的 train 时间分别为 862/1908s，
+round1 明显偏慢。由于前两轮 rollout 完全是 teacher-only，而 eval 是 env reset
+后的 student-only，该结果只说明状态分布迁移，不能判为学生容量失败。原 schedule
+到首次门禁 round4 仍为 beta=0.85，teacher 过重；现已把 calibration/8h 的 beta
+改为 `[1.0,1.0,0.8,0.6,0.4,0.2,0.1,0.0]`，8h 为 18 rounds × 4000 = 72k，
+round4 门禁时 beta=0.4，round9 起为 0.0。前两轮 beta=1.0 与已完成的 round0/1
+一致，可从中断点 resume；若中断发生在 round2 内部，partial checkpoint 仍会先
+完成旧 beta=0.95 的剩余 chunk，再从 round3 使用新 schedule。
 
 新增 `dagger.stepwise_prepare` 与 `dagger.stepwise_recursive_causal`。渲染评估路线
 从 recorded 192-step group 的 exact initialization 开始，每步重建 causal window，只执行
