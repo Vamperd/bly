@@ -101,7 +101,7 @@ class SonicEnvContractTest(unittest.TestCase):
         motion = env.motion_term
         self.assertEqual(motion.time_steps.tolist(), [0])
         self.assertEqual(motion.motion_start_time_steps.tolist(), [0])
-        self.assertEqual(motion.motion_num_steps.dtype, torch.long)
+        self.assertEqual(motion.motion_num_steps.dtype, torch.int32)
 
     def test_missing_reference_term_is_reported(self):
         with self.assertRaises(KeyError):

@@ -38,7 +38,7 @@ class SonicDaggerEnv:
         )
         if hasattr(motion, "motion_num_steps"):
             motion.motion_num_steps = motion.motion_num_steps.to(
-                dtype=motion.time_steps.dtype
+                dtype=torch.int32
             )
 
     def __init__(self, env: Any, *, reference_terms: list[str] | tuple[str, ...] | None = None) -> None:
