@@ -1,10 +1,21 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from dagger.stepwise_prepare import _utc_now_iso, _window_args
 
 
 class StepwisePrepareTest(unittest.TestCase):
+    def test_stepwise_config_defaults_are_omegaconf_safe(self):
+        config = (
+            Path(__file__).resolve().parents[1]
+            / "configs"
+            / "stepwise_recursive_causal.yaml"
+        )
+        text = config.read_text(encoding="utf-8")
+        self.assertNotIn("<", text)
+        self.assertNotIn(">", text)
+
     def test_utc_timestamp_is_available(self):
         self.assertIn("+00:00", _utc_now_iso())
 

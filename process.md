@@ -755,6 +755,8 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 `replay65.prepare_window` 的 `args.masks` 处失败：wrapper 的 `SimpleNamespace`
 缺少 representative 字段。已补 `masks=[]` 并加入回归测试。再次执行时 4 个 window
 都已准备完成，但写 manifest 处因 `timezone` 未导入在 `created_at` 失败；已补
-`datetime, timezone` 并增加 UTC helper 测试。两次都是模型推理后/写盘阶段的工程
-失败，不构成数据或模型质量结论。Windows compile 和 40 tests 通过，Ubuntu
-Isaac/MuJoCo 仍待执行。
+`datetime, timezone` 并增加 UTC helper 测试。随后 evaluator 在 OmegaConf 载入
+配置时失败：`STEPWISE_CASES_MANIFEST` 和 `CVAE_FINETUNED_CHECKPOINT` 的默认值含
+`<...>` 占位符，OmegaConf grammar 不接受 `<`。已把默认值改为合法路径并加入配置
+回归测试。三次都发生在模型推理前/写盘阶段，不构成数据或模型质量结论。
+Windows compile 和 41 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。

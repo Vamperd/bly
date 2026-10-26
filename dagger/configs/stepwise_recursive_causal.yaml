@@ -10,9 +10,9 @@ dagger:
   num_envs: 1
 
 stepwise:
-  cases_manifest: ${oc.env:STEPWISE_CASES_MANIFEST,/home/helloworld/bly/runs/<stepwise_prepare_run>/manifests/cases.json}
+  cases_manifest: ${oc.env:STEPWISE_CASES_MANIFEST,/home/helloworld/bly/runs/STEPWISE_PREP_REQUIRED/manifests/cases.json}
   original_checkpoint: ${oc.env:CVAE_ORIGINAL_CHECKPOINT,/home/helloworld/bly/runs/cvae_long_horizon_train_kl2_fp32_300k_20261016_005837_3380803/checkpoints/best.pt}
-  finetuned_checkpoint: ${oc.env:CVAE_FINETUNED_CHECKPOINT,/home/helloworld/bly/runs/<4m_run>/checkpoints/best_teacher_rmse.pt}
+  finetuned_checkpoint: ${oc.env:CVAE_FINETUNED_CHECKPOINT,/home/helloworld/bly/runs/CVAE_FINETUNED_CHECKPOINT_REQUIRED/checkpoints/best_teacher_rmse.pt}
   model_config: ${oc.env:CVAE_MODEL_CONFIG,/home/helloworld/bly/state-action-cvae/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json}
   normalization_run: ${oc.env:CVAE_KL2_DATASET_RUN,/home/helloworld/bly/runs/cvae_long_horizon_dataset_rebuilt_20261018_223710_254008}
   cvae_root: ${oc.env:STATE_ACTION_CVAE_ROOT,/home/helloworld/bly/state-action-cvae}
