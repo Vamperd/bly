@@ -296,8 +296,8 @@ def _run_lane(args: argparse.Namespace) -> dict:
                 contract,
             )
             env.step({"actions": raw})
-            executed_actions.append(achieved[0].detach().cpu().numpy())
-            actions.append(achieved[0].detach().cpu().numpy())
+            executed_actions.append(achieved.detach().cpu().numpy())
+            actions.append(achieved.detach().cpu().numpy())
             current_state = env.physics_state()
             real_states.append(current_state[0].detach().cpu().numpy())
             frames.append(_robot_frame(env, contract, current_state))
