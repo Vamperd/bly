@@ -33,7 +33,17 @@ def _ensure_kit_path(config) -> None:
 
 def _load_source(case: dict) -> dict:
     with np.load(Path(case["source_replay"]), allow_pickle=False) as archive:
-        state = np.asarray(archive["physical_state_v3"], dtype=np.float32)
+        state_key = (
+            "physical_state_v3"
+            if "physical_state_v3" in archive
+            else "physical_state"
+        )
+        if state_key not in archive:
+            raise KeyError(
+                "source replay has neither physical_state_v3 nor physical_state: "
+                f"{case['source_replay']}"
+            )
+        state = np.asarray(archive[state_key], dtype=np.float32)
         action = np.asarray(
             archive["action_target_canonical"], dtype=np.float32
         )

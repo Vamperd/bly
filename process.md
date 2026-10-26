@@ -760,6 +760,7 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 `<...>` 占位符，OmegaConf grammar 不接受 `<`。已把默认值改为合法路径并加入配置
 回归测试。随后 evaluator 进入 release env 准备时又因 stepwise 配置缺少顶层
 `seed` 失败；`_prepare_release_env` 需要 `config.seed` 同时用于 motion selection
-和 Isaac env。已补 `seed: 20261023`。四次都发生在模型推理前/写盘阶段，不构成
-数据或模型质量结论。Windows compile 和 41 tests 通过，Ubuntu Isaac/MuJoCo
-仍待执行。
+和 Isaac env。已补 `seed: 20261023`。随后 `_load_source` 读取的 replay 只含
+`physical_state` 而没有 `physical_state_v3`；已兼容两种 key，并保留明确缺 key
+错误。以上均发生在模型推理前/写盘阶段，不构成数据或模型质量结论。
+Windows compile 和 41 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。
