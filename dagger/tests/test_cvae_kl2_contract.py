@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from dagger.adapters.cvae_student import CvaeRollout
+from dagger.adapters.cvae_student import CvaeBlockRollout, CvaeRollout
 from dagger.core.cvae_dataset import CvaeDaggerDataset, CvaeDaggerRound
 from dagger.core.cvae_loop import CvaeDaggerLoop
 from dagger.core.cvae_objective import (
@@ -307,6 +307,20 @@ class _FakeStudent:
             action_clip_error=torch.zeros(count),
         )
 
+    def observe_block(self, block_size: int) -> CvaeBlockRollout:
+        count = self.num_envs
+        return CvaeBlockRollout(
+            window=self._window(),
+            action_normalized=torch.zeros(count, block_size, 29),
+            action_canonical=torch.zeros(count, block_size, 29),
+            action_raw=torch.zeros(count, block_size, 29),
+            predicted_state=torch.zeros(count, 65, 70),
+            predicted_action=torch.zeros(count, 64, 29),
+            epsilon_global=torch.zeros(count, 256),
+            epsilon_local=torch.zeros(count, 16, 128),
+            action_clip_error=torch.zeros(count, block_size),
+        )
+
     def after_step(
         self,
         executed_action_canonical,
@@ -401,6 +415,19 @@ class CvaeLoopContractTest(unittest.TestCase):
             round_data = loop.collect_round(0, 0.0)
         self.assertEqual(round_data.tensors["teacher_action_canonical"].shape[0], 8)
         self.assertTrue(bool(round_data.tensors["done"].all()))
+
+    def test_episode_mix_uses_teacher_prefix_and_student_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            loop = self._loop(directory)
+            loop.episode_mix = True
+            loop.teacher_prefix_steps = 2
+            loop.student_block_steps = 2
+            loop.teacher_episode_period = 4
+            loop.rollout_steps = 8
+            round_data = loop.collect_round(0, 0.0)
+        self.assertEqual(round_data.tensors["teacher_action_canonical"].shape[0], 16)
+        self.assertIn("episode_mix", round_data.metadata)
+        self.assertTrue(round_data.metadata["episode_mix"])
 
     def test_evaluation_reports_teacher_and_survival_metrics(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -27,11 +27,26 @@ from dagger.core.cvae_objective import (
     teacher_action_mse,
 )
 from dagger.runtime.cvae_window import (
+    ACTION_DIM,
+    ACTION_STEPS,
     ANCHOR,
     CvaeWindow,
     CvaeWindowBuffer,
     causal_masks,
 )
+
+
+@dataclass
+class CvaeBlockRollout:
+    window: CvaeWindow
+    action_normalized: torch.Tensor
+    action_canonical: torch.Tensor
+    action_raw: torch.Tensor
+    predicted_state: torch.Tensor
+    predicted_action: torch.Tensor
+    epsilon_global: torch.Tensor
+    epsilon_local: torch.Tensor
+    action_clip_error: torch.Tensor
 
 
 @dataclass
@@ -421,6 +436,59 @@ class CvaeStudentAdapter:
             action_normalized=action_normalized,
             action_canonical=action_canonical,
             action_raw=action_raw,
+            predicted_state=output.physical_state.detach().clone(),
+            predicted_action=output.action.detach().clone(),
+            epsilon_global=self._epsilon_global.detach().clone(),
+            epsilon_local=self._epsilon_local.detach().clone(),
+            action_clip_error=clip_error.detach().clone(),
+        )
+
+    @torch.no_grad()
+    def observe_block(self, block_size: int) -> "CvaeBlockRollout":
+        if self._buffer is None or self._epsilon_global is None or self._epsilon_local is None:
+            raise RuntimeError("student has not been reset")
+        block_size = int(block_size)
+        if block_size < 1 or block_size > ACTION_STEPS - ANCHOR:
+            raise ValueError(
+                f"block_size must be in 1..{ACTION_STEPS - ANCHOR}"
+            )
+        self.model.eval()
+        window = self._buffer.build_condition(
+            state_mean=self.state_mean,
+            state_std=self.state_std,
+            action_mean=self.action_mean,
+            action_std=self.action_std,
+        )
+        if self.latent_mode == "posterior_mean":
+            output = self.model(window.batch, stage="A")
+        else:
+            epsilon = (
+                (torch.zeros_like(self._epsilon_global), torch.zeros_like(self._epsilon_local))
+                if self.latent_mode == "zero"
+                else (self._epsilon_global, self._epsilon_local)
+            )
+            output = self.model.infer_from_condition(
+                window.batch,
+                window.state_mask,
+                window.action_mask,
+                epsilon=epsilon,
+            )
+        normalized = output.action[:, ANCHOR : ANCHOR + block_size].float()
+        batch_size = int(normalized.shape[0])
+        canonical = normalized * self.action_std[None, None, :] + self.action_mean[None, None, :]
+        raw, achieved = self.action_contract.canonical_to_raw(
+            canonical.reshape(-1, ACTION_DIM)
+        )
+        raw = raw.reshape(batch_size, block_size, ACTION_DIM)
+        achieved = achieved.reshape(batch_size, block_size, ACTION_DIM)
+        clip_error = (achieved - canonical).abs().amax(dim=-1)
+        if not torch.isfinite(raw).all():
+            raise FloatingPointError("CVAE student produced non-finite block Action")
+        return CvaeBlockRollout(
+            window=window,
+            action_normalized=normalized,
+            action_canonical=achieved,
+            action_raw=raw,
             predicted_state=output.physical_state.detach().clone(),
             predicted_action=output.action.detach().clone(),
             epsilon_global=self._epsilon_global.detach().clone(),

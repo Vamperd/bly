@@ -805,10 +805,16 @@ Isaac auto reset，done 不清 CVAE history，teacher 收到 done=false；不再
 绝对高度/竖直判断，而是按每个 motion 前 10 步的 reference error baseline，
 当 `error_anchor_pos`/`error_body_pos` 超过 baseline 3 倍并持续 50 步时停止
 该 env 的采样。爬行动作因 reference 也在地面、误差低，不会误判。评估仍使用
-标准 reset。当前已完成的 run 保持只读。Windows compile 和 51 tests 通过；
+标准 reset。当前已完成的 run 保持只读。Windows compile 和 52 tests 通过；
 render_mujoco 12 tests 通过；Ubuntu 其余 case、训练和渲染仍待执行。
 新增 `dagger.cvae_recorded_state_replay`：初始 `s0 real + s1..s64 expected` 一次生成
 64 Action 并执行前 32；之后每步用 33 real + 32 expected State、32 executed +
 32 masked Action，取 `output.action[32]`，直到 192 Action。每个 motion 输出
 source/original/fine/ghost 四路。该路径不判断 fall、不 reset；ghost 默认黑地面。
-Windows 全量 51 tests 通过，Ubuntu 实际 replay 仍待执行。
+Windows 全量 52 tests 通过，Ubuntu 实际 replay 仍待执行。
+
+CVAE DAgger v2 已实现 `episode_mix`：4 env 中 1 个 teacher、3 个 student；
+student 先执行 32 步 teacher prefix，之后每 16 步 block 推理并执行 16 个
+C Action，每个执行步都在真实 student state 上查询 teacher 标签。新增配置
+`cvae_kl2_pilot_dagger_v2.yaml`，source mix 0.4；旧 v1 配置和 run 只读。
+Windows `test_episode_mix_uses_teacher_prefix_and_student_blocks` 通过。

@@ -35,6 +35,10 @@ class CvaeDaggerLoop:
         post_fall_baseline_steps: int = 10,
         post_fall_max_error_ratio: float = 3.0,
         post_fall_down_steps: int = 50,
+        episode_mix: bool = False,
+        teacher_prefix_steps: int = 32,
+        student_block_steps: int = 16,
+        teacher_episode_period: int = 4,
     ) -> None:
         if mixture_mode not in {"per_step", "per_episode"}:
             raise ValueError("mixture_mode must be per_step or per_episode")
@@ -63,6 +67,16 @@ class CvaeDaggerLoop:
         self.post_fall_baseline_steps = int(post_fall_baseline_steps)
         self.post_fall_max_error_ratio = float(post_fall_max_error_ratio)
         self.post_fall_down_steps = int(post_fall_down_steps)
+        self.episode_mix = bool(episode_mix)
+        self.teacher_prefix_steps = int(teacher_prefix_steps)
+        self.student_block_steps = int(student_block_steps)
+        self.teacher_episode_period = int(teacher_episode_period)
+        if self.teacher_prefix_steps < 0:
+            raise ValueError("teacher_prefix_steps must be non-negative")
+        if not 1 <= self.student_block_steps <= 32:
+            raise ValueError("student_block_steps must be in 1..32")
+        if self.teacher_episode_period < 1:
+            raise ValueError("teacher_episode_period must be positive")
 
     def _motion_ids(self) -> torch.Tensor:
         motion = self.env.command_manager.get_term("motion")
@@ -172,6 +186,8 @@ class CvaeDaggerLoop:
         return CvaeDaggerRound(tensors)
 
     def collect_round(self, round_index: int, beta: float) -> CvaeDaggerRound:
+        if self.episode_mix:
+            return self._collect_episode_mix(round_index, beta)
         observation = self.env.reset()
         current_state = self.env.physics_state()
         if hasattr(self.student, "end_evaluation"):
@@ -350,6 +366,208 @@ class CvaeDaggerLoop:
             "sample_count": int(round_data.count),
             "post_fall_continuation": bool(postfall),
             "post_fall_stopped_envs": sum(stopped),
+        }
+        self.dataset.append(round_data)
+        self.dataset.save_round(round_index, self.run_dir)
+        return round_data
+
+    def _collect_episode_mix(
+        self, round_index: int, beta: float
+    ) -> CvaeDaggerRound:
+        del beta
+        observation = self.env.reset()
+        current_state = self.env.physics_state()
+        if hasattr(self.student, "end_evaluation"):
+            self.student.end_evaluation()
+        self.teacher.reset(self.num_envs)
+        self.student.reset(self.num_envs, current_state)
+        episode_numbers = list(range(self.num_envs))
+        episode_records = [
+            self._new_record(current_state[index], episode_numbers[index])
+            for index in range(self.num_envs)
+        ]
+        all_samples: list[dict[str, torch.Tensor]] = []
+        done = torch.zeros(self.num_envs, device=self.env.device, dtype=torch.bool)
+        episode_steps = torch.zeros(self.num_envs, dtype=torch.long)
+        teacher_env = [
+            (index + int(round_index)) % self.teacher_episode_period == 0
+            for index in range(self.num_envs)
+        ]
+        block_actions = [None] * self.num_envs
+        block_rollout = [None] * self.num_envs
+        block_index = [0] * self.num_envs
+
+        for step_index in range(self.rollout_steps):
+            rollout = self.student.observe()
+            teacher_raw = self.action_contract.clip_raw(
+                self.teacher.act(observation, done).detach()
+            )
+            teacher_canonical = self.action_contract.raw_to_canonical(teacher_raw)
+            need_block = [
+                not teacher_env[index]
+                and int(episode_steps[index]) >= self.teacher_prefix_steps
+                and (
+                    block_actions[index] is None
+                    or block_index[index] >= self.student_block_steps
+                )
+                for index in range(self.num_envs)
+            ]
+            if any(need_block):
+                fresh = self.student.observe_block(self.student_block_steps)
+                for index in range(self.num_envs):
+                    if need_block[index]:
+                        block_actions[index] = fresh
+                        block_rollout[index] = fresh
+                        block_index[index] = 0
+
+            executed_raw = []
+            student_canonical = []
+            student_raw_values = []
+            sample_rollout = []
+            teacher_flags = []
+            for index in range(self.num_envs):
+                use_teacher = teacher_env[index] or int(
+                    episode_steps[index]
+                ) < self.teacher_prefix_steps
+                if use_teacher:
+                    executed_raw.append(teacher_raw[index])
+                    student_canonical.append(rollout.action_canonical[index])
+                    student_raw_values.append(rollout.action_raw[index])
+                    sample_rollout.append(rollout)
+                    teacher_flags.append(1.0)
+                else:
+                    block = block_actions[index]
+                    if block is None:
+                        raise RuntimeError("student block is missing")
+                    k = block_index[index]
+                    executed_raw.append(block.action_raw[index, k])
+                    student_canonical.append(block.action_canonical[index, k])
+                    student_raw_values.append(block.action_raw[index, k])
+                    sample_rollout.append(block)
+                    teacher_flags.append(0.0)
+                    block_index[index] += 1
+            executed_raw_t = torch.stack(executed_raw)
+            next_observation, _reward, next_done, _info = self.env.step(
+                {"actions": executed_raw_t}
+            )
+            next_done = next_done.to(device=self.env.device).bool()
+            next_state = self.env.physics_state()
+            motion_ids = self._motion_ids()
+            executed_canonical = self.action_contract.raw_to_canonical(
+                executed_raw_t
+            )
+            teacher_flags_t = torch.tensor(
+                teacher_flags, device=self.env.device, dtype=torch.float32
+            )
+
+            for index in range(self.num_envs):
+                record = episode_records[index]
+                item = sample_rollout[index]
+                window = item.window
+                history_steps = (
+                    window.history_steps
+                    if window.history_steps is not None
+                    else torch.zeros(self.num_envs, dtype=torch.long, device=self.env.device)
+                )
+                record["executed_canonical"].append(
+                    executed_canonical[index].detach().cpu()
+                )
+                record["teacher_canonical"].append(
+                    teacher_canonical[index].detach().cpu()
+                )
+                record["student_canonical"].append(
+                    student_canonical[index].detach().cpu()
+                )
+                record["teacher_raw"].append(teacher_raw[index].detach().cpu())
+                record["student_raw"].append(
+                    student_raw_values[index].detach().cpu()
+                )
+                record["executed_raw"].append(
+                    executed_raw_t[index].detach().cpu()
+                )
+                record["done"].append(next_done[index].cpu())
+                record["motion_id"].append(motion_ids[index].cpu())
+                record["mixture_teacher"].append(teacher_flags_t[index].cpu())
+                record["history_steps"].append(history_steps[index].cpu())
+                action_error = torch.linalg.vector_norm(
+                    teacher_canonical[index] - student_canonical[index]
+                )
+                bucket = 0 if float(action_error) < 0.1 else (
+                    1 if float(action_error) < 0.5 else 2
+                )
+                record["tracking_error_bucket"].append(
+                    torch.tensor(bucket, dtype=torch.long)
+                )
+                record["disturbance_seed"].append(
+                    torch.tensor(self.seed, dtype=torch.long)
+                )
+                record["episode_id"].append(
+                    torch.tensor(episode_numbers[index], dtype=torch.long)
+                )
+                record["predicted_state"].append(
+                    item.predicted_state[index].detach().cpu()
+                )
+                record["predicted_action"].append(
+                    item.predicted_action[index].detach().cpu()
+                )
+                latent_bytes = (
+                    item.epsilon_global[index].detach().cpu().numpy().tobytes()
+                    + item.epsilon_local[index].detach().cpu().numpy().tobytes()
+                )
+                visible_bytes = (
+                    window.batch["physical_state"][index].detach().cpu().numpy().tobytes()
+                    + window.batch["action"][index].detach().cpu().numpy().tobytes()
+                )
+                record["latent_epsilon_hash"].append(
+                    torch.tensor(
+                        int(hashlib.sha1(latent_bytes).hexdigest()[:15], 16),
+                        dtype=torch.long,
+                    )
+                )
+                record["student_input_hash"].append(
+                    torch.tensor(
+                        int(hashlib.sha1(visible_bytes).hexdigest()[:15], 16),
+                        dtype=torch.long,
+                    )
+                )
+                record["states"].append(next_state[index].cpu())
+                record["state_valid"].append((~next_done[index]).cpu())
+                episode_steps[index] += 1
+                if bool(next_done[index]):
+                    all_samples.extend(self._make_samples(record))
+                    episode_numbers[index] += self.num_envs
+                    episode_records[index] = self._new_record(
+                        next_state[index].cpu(), episode_numbers[index]
+                    )
+                    episode_steps[index] = 0
+                    block_actions[index] = None
+                    block_rollout[index] = None
+                    block_index[index] = 0
+
+            self.student.after_step(executed_canonical, next_state, next_done)
+            observation = next_observation
+            done = next_done
+            if (step_index + 1) % 100 == 0 or step_index + 1 == self.rollout_steps:
+                print(
+                    f"[dagger] cvae collect v2 round={round_index} "
+                    f"step={step_index + 1}/{self.rollout_steps}",
+                    flush=True,
+                )
+
+        for record in episode_records:
+            all_samples.extend(self._make_samples(record))
+        round_data = self._stack_samples(all_samples)
+        round_data.metadata = {
+            "round_index": int(round_index),
+            "motion_keys": list(
+                getattr(self.env, "motion_keys", None) or self.motion_group
+            ),
+            "motion_group": list(self.motion_group),
+            "sample_count": int(round_data.count),
+            "episode_mix": True,
+            "teacher_prefix_steps": self.teacher_prefix_steps,
+            "student_block_steps": self.student_block_steps,
+            "teacher_episode_period": self.teacher_episode_period,
         }
         self.dataset.append(round_data)
         self.dataset.save_round(round_index, self.run_dir)

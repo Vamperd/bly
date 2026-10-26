@@ -1056,6 +1056,236 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 - 当前 `mlp-intensive` 只是配置和代码方案，尚未在 Ubuntu 实际跑完；
 - 视频是 Isaac rollout 后的 MuJoCo 运动学渲染，不是扭矩物理重放。
 
+## CVAE DAgger v1 与 v2：通俗说明
+
+### 一句话理解
+
+- **v1**：每一步问一次 teacher，环境只执行一个 Action；模型虽然有 64 个 Action 输出，
+  但 DAgger 只监督 anchor 32，fall 后通常 reset。
+- **v2**：把 DAgger 从“单步校正”改为“episode mix + teacher prefix + block 监督”：
+  一部分 episode 全由 teacher 跑，另一部分由 teacher 先跑 32 步、再由 C 每 16 步
+  递推执行，并对执行过的 16 个 Action 逐步给 teacher 标签。
+
+### 旧计划：Legacy DAgger v1（已归档，不再作为主计划）
+
+旧计划的核心是“单步 receding DAgger”：
+
+1. 冻结 SONIC teacher，原本只读的 KL2 Stage-C CVAE 作为 student。
+2. 4 个 motion、4 个 env，每轮 rollout 1000 步。
+3. 每个 env 维护最多 32 步真实 history。
+4. 当前 State 放在 anchor 32；future State/Action 在 condition 中 hidden。
+5. 模型输出 64 Action，但只取 `Action[32]` 执行。
+6. 每步 teacher 和 student 各出一个 Action，按 per-step beta 随机执行其一。
+7. DAgger loss 只监督 `Action[32]`，future Action 没有 loss。
+8. fall 后标准 reset；新代码的 post-fall continuation 属于后续配置，
+   8h 已完成 run 没有使用。
+9. source mix 0.5：约一半 optimizer step 使用 long-horizon source
+   window，source 中约 25% 是 causal mask，其余是 physical/full reconstruction。
+10. 18 轮 × 4000 optimizer steps，beta 从 1.0 逐步降到 0.0。
+11. 评估为 192 步 student-only，`fixed_standard_normal` latent，
+    标准 reset，统计 teacher Action RMSE、termination、survival。
+
+旧 8h run 的代表结果：
+
+```text
+overall ratio = 0.55424
+4/4 per-motion ratio <= 0.7
+overall 0.5 门禁未通过
+```
+
+旧计划的主要优点：
+
+- 工程简单，和 anchor Action 训练完全一致
+- teacher 标签始终来自真实 student state，是真正的 DAgger
+- source mix 保留长序列重建能力
+
+旧计划的主要问题：
+
+- 64 个 Action 中只有 1 个被 DAgger 监督
+- T64 训练窗口和 192 步部署之间没有多步序列监督
+- C 模型自己的 future state 没有被多步训练
+- 每步重新推理，动作容易抖
+- 每个窗口的 latent 独立，长时 latent 不连续
+- fall 数据通常 reset，恢复过程少
+- 视频里“一次性 64 Action 执行前 32”不是训练时的 anchor 路径，
+  那 32 个初始 Action 并没有得到 DAgger 的逐步监督
+
+旧配置和旧入口仍保留：
+
+```text
+dagger/configs/cvae_kl2_pilot_intensive.yaml
+dagger/configs/cvae_kl2_pilot_intensive_8h.yaml
+dagger/configs/cvae_kl2_formal.yaml
+
+bash scripts/run_dagger_auto.sh cvae-kl2-pilot-intensive-8h
+bash scripts/run_dagger_auto.sh cvae-kl2-formal
+```
+
+旧 run、旧 checkpoint、旧数据只读，不得为了 v2 修改后继续 resume。
+
+### 新计划：DAgger v2（episode mix + teacher prefix）
+
+新计划要解决的问题是：
+
+> 让 teacher 在 C 真正会走到的状态上纠正 C，并且一次执行并监督 16 个连续 Action，
+> 而不是每次只看 anchor 32。
+
+#### 1. Episode mix
+
+4 env 时：
+
+```text
+1 个 teacher episode
+3 个 student episode
+```
+
+即 25% / 75%。teacher 的 env 每轮轮换。8 env formal 时是 2 teacher / 6 student。
+
+#### 2. Teacher episode
+
+- teacher 执行完整 192 步
+- C 只在相同真实 state 上做 shadow inference，不执行 C 的动作
+- 每步记录 teacher Action 和 C 的预测
+- 用于稳定状态覆盖、对比和 C 在 teacher state 上的误差
+- 不能替代 student episode，因为状态分布仍是 teacher 的
+
+#### 3. Student episode
+
+- 先用 teacher 执行 32 步，填满 C 的 history
+- 然后 C 每 16 步递推一次
+- 每次输出 64 Action，执行前 16 个
+- 每执行一步，teacher 在真实 student state 上给出纠正 Action
+- 这 16 个 Action 都进入训练，而不是只监督 anchor
+- 16 步后窗口整体前进，再推理下一 block
+- 192 步结束后或 done 后，新 episode 重新 teacher prefix
+
+第一版：
+
+```text
+teacher_prefix_steps = 32
+student_block_steps = 16
+```
+
+稳定后再扩到：
+
+```text
+student_block_steps = 32
+```
+
+#### 4. 初始动作
+
+v2 不再使用“未训练的一次性 64 Action 初始块”。student episode 的第一个 C Action 发生在：
+
+```text
+teacher prefix a0..a31
+-> 32 步真实 history
+-> C 第一次 block inference
+-> 执行 block 的第一个 Action
+```
+
+因此初始 C Action 和后续 block 使用同一套 anchor/history 合同。视频里的 source 64 bootstrap 仍然保留为独立诊断路径，不参与 v2 训练。
+
+#### 5. 多 Action 监督
+
+v2 记录每个 block 内实际执行的 16 步：
+
+- executed Action
+- teacher Action
+- 真实 State
+- done
+- motion id
+- teacher/student 来源标记
+
+每个执行步都会形成一个 anchor 训练窗口；一个 block 的 16 个连续执行步
+共同提供 16 个逐步 teacher 监督。当前实现是 block 执行加强逐步 anchor 监督，
+还不是单个窗口一次输出 16 Action 的 block loss。
+
+#### 6. Source mix
+
+v2 把 source mix 从 0.5 降到约 0.4：
+
+- 仍保留 long-horizon source reconstruction
+- source causal fraction 保持 0.25
+- 固定 source mask
+- KL 0.002，warmup 10000
+
+#### 7. 结束条件
+
+v2 第一版使用标准 episode reset；如果后续启用 post-fall continuation，则按 reference-relative error 判断：
+
+- 每个 motion 前 10 步建立 error baseline
+- `error_anchor_pos` / `error_body_pos` 超过 baseline 3×
+- 连续 50 步
+- 才结束该 env
+
+不使用绝对高度或竖直姿态，因此爬行动作不会被误判。
+
+#### 8. 评估
+
+v2 仍使用：
+
+- 标准 reset
+- 192 步
+- `fixed_standard_normal`
+- student-only
+- per-motion termination/survival
+- teacher Action RMSE
+
+额外建议报告：
+
+- 8/16/32/64/192 分段误差
+- 多 latent sample
+- 动作变化率
+- block 边界连续性
+
+#### 9. v2 入口
+
+```bash
+bash scripts/run_dagger_auto.sh cvae-kl2-pilot-dagger-v2
+```
+
+对应配置：
+
+```text
+dagger/configs/cvae_kl2_pilot_dagger_v2.yaml
+```
+
+配置关键值：
+
+```yaml
+episode_mix: true
+teacher_prefix_steps: 32
+student_block_steps: 16
+teacher_episode_period: 4
+post_fall_continuation: false
+source_mix: 0.4
+```
+
+#### 10. v2 后续可选方向
+
+按优先级：
+
+1. block16 稳定后扩到 block32
+2. 增加跨 block latent continuity
+3. 增加 reference / expected-future-state condition
+4. 增加 recovery / near-fall 数据
+5. 校准 standard-normal latent
+6. 最后再讨论更大模型
+
+### 新旧计划对照
+
+| 项目 | v1 Legacy | v2 |
+|---|---|---|
+| 每步执行 | 1 Action | block16 内逐步执行 |
+| teacher 标签 | 只监督 anchor32 | block16 内逐步监督 |
+| episode 模式 | per-step beta | 25% teacher / 75% student |
+| 初始动作 | 空 history anchor | teacher prefix 32 |
+| 初始 64 block | 视频专用 | 不用于训练 |
+| source mix | 0.5 | 0.4 |
+| fall | 标准 reset | 第一版 reset；后续可 reference-relative continuation |
+| 评估 | 192 standard-normal | 同左 + 分段/多 sample |
+| 主要风险 | 长时漂移、动作抖 | teacher prefix 成本、block 误差累积 |
+
 ## 当前状态
 
 | 项目 | 状态 |
@@ -1080,7 +1310,7 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |
 | CVAE DAgger smoke | 待 Ubuntu 执行 |
 | CVAE DAgger pilot | smoke 成功后执行 |
-| CVAE KL2 32-motion 适配 | 已实现；Windows 51 tests 通过 |
+| CVAE KL2 32-motion 适配 | 已实现；Windows 52 tests 通过 |
 | CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
 | CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
 | CVAE KL2 smoke | Ubuntu execution PASS；quality 为单轮 smoke 预期 false |

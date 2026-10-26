@@ -1674,6 +1674,16 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                 post_fall_down_steps=int(
                     config.dagger.get("post_fall_down_steps", 50)
                 ),
+                episode_mix=bool(config.dagger.get("episode_mix", False)),
+                teacher_prefix_steps=int(
+                    config.dagger.get("teacher_prefix_steps", 32)
+                ),
+                student_block_steps=int(
+                    config.dagger.get("student_block_steps", 16)
+                ),
+                teacher_episode_period=int(
+                    config.dagger.get("teacher_episode_period", 4)
+                ),
             )
             if resume_this_round:
                 round_data = dataset.rounds[-1]
