@@ -474,13 +474,20 @@ class CvaeStudentAdapter:
                 epsilon=epsilon,
             )
         normalized = output.action[:, ANCHOR : ANCHOR + block_size].float()
-        batch_size = int(normalized.shape[0])
-        canonical = normalized * self.action_std[None, None, :] + self.action_mean[None, None, :]
-        raw, achieved = self.action_contract.canonical_to_raw(
-            canonical.reshape(-1, ACTION_DIM)
+        canonical = (
+            normalized * self.action_std[None, None, :]
+            + self.action_mean[None, None, :]
         )
-        raw = raw.reshape(batch_size, block_size, ACTION_DIM)
-        achieved = achieved.reshape(batch_size, block_size, ACTION_DIM)
+        raw_steps = []
+        achieved_steps = []
+        for step in range(block_size):
+            raw_step, achieved_step = self.action_contract.canonical_to_raw(
+                canonical[:, step, :]
+            )
+            raw_steps.append(raw_step)
+            achieved_steps.append(achieved_step)
+        raw = torch.stack(raw_steps, dim=1)
+        achieved = torch.stack(achieved_steps, dim=1)
         clip_error = (achieved - canonical).abs().amax(dim=-1)
         if not torch.isfinite(raw).all():
             raise FloatingPointError("CVAE student produced non-finite block Action")
