@@ -331,6 +331,13 @@ bash scripts/run_dagger_auto.sh cvae-kl2-pilot-intensive-8h
 前两轮 beta=1.0 保留给 teacher-only 数据；round 2 起快速降到 0.8/0.6/0.4，
 使第 5 轮门禁时学生已访问自己的错误状态。
 
+`cvae_kl2_pilot_intensive.yaml`、8h 和 formal 配置启用
+`post_fall_continuation: true`。训练时 Isaac auto reset 关闭，done 不清 CVAE
+history，teacher 收到 done=false；按每个 motion 前 10 步的 reference error
+baseline 判断偏离，`error_anchor_pos`/`error_body_pos` 超过 baseline 3 倍并持续
+50 步时停止该 env 的采样。没有绝对高度/竖直判断，因此爬行动作不会被误判为
+摔倒。评估仍使用标准 reset；已完成的历史 run 不受影响。
+
 4m calibration 与 8h 配置都启用中途门禁：
 
 ```yaml
@@ -453,9 +460,11 @@ root xy 对齐到 source（只影响可视化，不修改轨迹文件），并�
 当前微调只监督 Action[32]；未来 Action[33:63] 在 DAgger 窗口没有 teacher 标签。
 stepwise evaluator 每步重新推理并只执行 Action[32]；为了让 fall 后仍能看到完整 192 步，
 评估会禁用 Isaac 的 auto reset，首次 termination 只记录 fall_frame/terms，然后继续
-推理和执行到 horizon。渲染器默认把 checker 地面改为 10 m，并只对 robot body 的
-geom 做 ghost tint，避免世界地面/其他 worldbody geom 被蓝色覆盖。
-因此：
+推理和执行到 horizon。由于 replay source 的 root xy 被平移归零，而 Isaac reference
+仍使用原始世界坐标，exact init 后会按 reference anchor 把 robot root 平移对齐，并
+打印 `source_world_root_alignment`。渲染器默认使用黑色地面；checker 仅作可选，
+并只对 robot body 的 geom 做 ghost tint，避免世界地面/其他 worldbody geom 被
+蓝色覆盖。因此：
 
 - 不采用 8/16 步开环；
 - 不使用 `recursive_state_feedback_b` 的 32 步块；
@@ -1044,7 +1053,7 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |
 | CVAE DAgger smoke | 待 Ubuntu 执行 |
 | CVAE DAgger pilot | smoke 成功后执行 |
-| CVAE KL2 32-motion 适配 | 已实现；Windows 46 tests 通过 |
+| CVAE KL2 32-motion 适配 | 已实现；Windows 48 tests 通过 |
 | CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
 | CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
 | CVAE KL2 smoke | Ubuntu execution PASS；quality 为单轮 smoke 预期 false |

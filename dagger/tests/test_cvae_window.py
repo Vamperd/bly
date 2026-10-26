@@ -20,6 +20,24 @@ class CvaeWindowTest(unittest.TestCase):
         self.assertFalse(bool(window.state_mask[:, ANCHOR].any()))
         self.assertEqual(int(window.loss_action_mask.sum()), 29)
 
+    def test_done_history_can_be_preserved_for_continuation(self):
+        buffer = CvaeWindowBuffer(device=torch.device("cpu"), num_envs=1)
+        buffer.reset(torch.zeros(1, 70))
+        buffer.advance(
+            torch.ones(1, 29),
+            torch.ones(1, 70),
+            torch.tensor([True]),
+            clear_on_done=False,
+        )
+        self.assertEqual(int(buffer.history_steps().item()), 1)
+        buffer.advance(
+            torch.ones(1, 29),
+            torch.ones(1, 70),
+            torch.tensor([True]),
+            clear_on_done=True,
+        )
+        self.assertEqual(int(buffer.history_steps().item()), 0)
+
     def test_training_target_retains_future_values(self):
         states = torch.arange(100 * 70, dtype=torch.float32).reshape(100, 70)
         actions = torch.zeros(99, 29)

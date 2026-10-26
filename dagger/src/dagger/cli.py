@@ -1635,6 +1635,11 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         env, contract, teacher = _create_cvae_env_for_keys(
             config, prepared, run_dir, keys, args_cli, device
         )
+        post_fall_continuation = bool(
+            config.dagger.get("post_fall_continuation", False)
+        )
+        if post_fall_continuation:
+            env.disable_auto_reset()
         env_setup_seconds = time.perf_counter() - round_started
         try:
             student.action_contract = contract
@@ -1659,6 +1664,16 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                 dataset=dataset,
                 motion_group=keys,
                 mixture_mode=str(config.dagger.get("mixture_mode", "per_step")),
+                post_fall_continuation=post_fall_continuation,
+                post_fall_baseline_steps=int(
+                    config.dagger.get("post_fall_baseline_steps", 10)
+                ),
+                post_fall_max_error_ratio=float(
+                    config.dagger.get("post_fall_max_error_ratio", 3.0)
+                ),
+                post_fall_down_steps=int(
+                    config.dagger.get("post_fall_down_steps", 50)
+                ),
             )
             if resume_this_round:
                 round_data = dataset.rounds[-1]
@@ -1673,6 +1688,8 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                 collect_started = time.perf_counter()
                 round_data = loop.collect_round(round_index, beta)
                 collect_seconds = time.perf_counter() - collect_started
+                if post_fall_continuation:
+                    env.enable_auto_reset()
                 chunk_index = 0
                 train_chunks = []
                 if formal:

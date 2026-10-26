@@ -347,10 +347,17 @@ class CvaeStudentAdapter:
         executed_action_canonical: torch.Tensor,
         next_state: torch.Tensor,
         done: torch.Tensor,
+        *,
+        clear_history_on_done: bool = True,
     ) -> None:
         if self._buffer is None:
             raise RuntimeError("student has not been reset")
-        self._buffer.advance(executed_action_canonical, next_state, done)
+        self._buffer.advance(
+            executed_action_canonical,
+            next_state,
+            done,
+            clear_on_done=clear_history_on_done,
+        )
         if bool(done.any()) and not self._evaluation_mode:
             self._episode_counter += 1
             self._new_epsilon(done)

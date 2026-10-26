@@ -31,9 +31,19 @@ class CvaeDaggerLoop:
         dataset: CvaeDaggerDataset | None = None,
         motion_group: list[str] | tuple[str, ...] | None = None,
         mixture_mode: str = "per_episode",
+        post_fall_continuation: bool = False,
+        post_fall_baseline_steps: int = 10,
+        post_fall_max_error_ratio: float = 3.0,
+        post_fall_down_steps: int = 50,
     ) -> None:
         if mixture_mode not in {"per_step", "per_episode"}:
             raise ValueError("mixture_mode must be per_step or per_episode")
+        if post_fall_baseline_steps < 1:
+            raise ValueError("post_fall_baseline_steps must be positive")
+        if post_fall_max_error_ratio <= 1.0:
+            raise ValueError("post_fall_max_error_ratio must be greater than 1")
+        if post_fall_down_steps < 1:
+            raise ValueError("post_fall_down_steps must be positive")
         self.env = env
         self.teacher = teacher
         self.student = student
@@ -49,6 +59,10 @@ class CvaeDaggerLoop:
         self.dataset = dataset if dataset is not None else CvaeDaggerDataset()
         self.motion_group = list(motion_group or [])
         self.mixture_mode = str(mixture_mode)
+        self.post_fall_continuation = bool(post_fall_continuation)
+        self.post_fall_baseline_steps = int(post_fall_baseline_steps)
+        self.post_fall_max_error_ratio = float(post_fall_max_error_ratio)
+        self.post_fall_down_steps = int(post_fall_down_steps)
 
     def _motion_ids(self) -> torch.Tensor:
         motion = self.env.command_manager.get_term("motion")
@@ -58,6 +72,19 @@ class CvaeDaggerLoop:
                 (self.num_envs,), -1, device=self.env.device, dtype=torch.long
             )
         return value.detach().clone().to(device=self.env.device, dtype=torch.long)
+
+    def _reference_errors(self) -> dict[str, torch.Tensor]:
+        motion = self.env.command_manager.get_term("motion")
+        metrics = getattr(motion, "metrics", {}) or {}
+        result = {}
+        for name in ("error_anchor_pos", "error_body_pos"):
+            value = metrics.get(name)
+            if value is None:
+                continue
+            result[name] = value.detach().to(
+                device=self.env.device, dtype=torch.float32
+            )
+        return result
 
     def _motion_key(self, motion_id: int) -> str:
         keys = getattr(self.env, "motion_keys", None) or self.motion_group
@@ -163,11 +190,19 @@ class CvaeDaggerLoop:
         teacher_mask = (
             torch.rand(self.num_envs, generator=random) < float(beta)
         ).to(self.env.device)
+        postfall = self.post_fall_continuation
+        stopped = [False] * self.num_envs
+        baseline_count = [0] * self.num_envs
+        baseline_error = [0.0] * self.num_envs
+        deviation_count = [0] * self.num_envs
 
         for step_index in range(self.rollout_steps):
             student_rollout = self.student.observe()
+            teacher_done = (
+                torch.zeros_like(done) if postfall else done
+            )
             teacher_raw = self.action_contract.clip_raw(
-                self.teacher.act(observation, done).detach()
+                self.teacher.act(observation, teacher_done).detach()
             )
             teacher_canonical = self.action_contract.raw_to_canonical(teacher_raw)
             student_raw = student_rollout.action_raw.detach()
@@ -189,6 +224,7 @@ class CvaeDaggerLoop:
             next_done = next_done.to(device=self.env.device).bool()
             next_state = self.env.physics_state()
             motion_ids = self._motion_ids()
+            reference_errors = self._reference_errors()
             history_steps = (
                 student_rollout.window.history_steps
                 if student_rollout.window.history_steps is not None
@@ -196,6 +232,8 @@ class CvaeDaggerLoop:
             )
 
             for index in range(self.num_envs):
+                if stopped[index]:
+                    continue
                 record = episode_records[index]
                 record["executed_canonical"].append(executed_canonical[index].cpu())
                 record["teacher_canonical"].append(teacher_canonical[index].cpu())
@@ -231,21 +269,65 @@ class CvaeDaggerLoop:
                     torch.tensor(int(hashlib.sha1(visible_bytes).hexdigest()[:15], 16), dtype=torch.long)
                 )
                 record["states"].append(next_state[index].cpu())
-                record["state_valid"].append((~next_done[index]).cpu())
-                if bool(next_done[index]):
+                record["state_valid"].append(
+                    torch.tensor(True) if postfall else (~next_done[index]).cpu()
+                )
+
+                if postfall and reference_errors:
+                    anchor = reference_errors.get("error_anchor_pos")
+                    body = reference_errors.get("error_body_pos")
+                    values = [
+                        float(value[index].detach().cpu())
+                        for value in (anchor, body)
+                        if value is not None
+                    ]
+                    if values:
+                        error = max(values)
+                        if baseline_count[index] < self.post_fall_baseline_steps:
+                            baseline_count[index] += 1
+                            baseline_error[index] += error
+                        else:
+                            baseline = baseline_error[index] / max(
+                                self.post_fall_baseline_steps, 1
+                            )
+                            ratio = error / max(baseline, 1.0e-6)
+                            if ratio > self.post_fall_max_error_ratio:
+                                deviation_count[index] += 1
+                            else:
+                                deviation_count[index] = 0
+                            if deviation_count[index] >= self.post_fall_down_steps:
+                                stopped[index] = True
+                                all_samples.extend(self._make_samples(record))
+                                print(
+                                    f"[dagger] cvae postfall stop "
+                                    f"env={index} step={step_index + 1} "
+                                    f"error_ratio={ratio:.3f}",
+                                    flush=True,
+                                )
+
+                if not postfall and bool(next_done[index]):
                     all_samples.extend(self._make_samples(record))
                     episode_numbers[index] += self.num_envs
                     episode_records[index] = self._new_record(
                         next_state[index].cpu(), episode_numbers[index]
                     )
 
-            if self.mixture_mode == "per_episode" and bool(next_done.any()):
+            if (
+                not postfall
+                and self.mixture_mode == "per_episode"
+                and bool(next_done.any())
+            ):
                 resampled = (
                     torch.rand(self.num_envs, generator=random) < float(beta)
                 ).to(self.env.device)
                 teacher_mask = torch.where(next_done, resampled, teacher_mask)
 
-            self.student.after_step(executed_canonical, next_state, next_done)
+            self.student.after_step(
+                executed_canonical,
+                next_state,
+                next_done,
+                clear_history_on_done=not postfall,
+            )
             observation = next_observation
             done = next_done
             if (step_index + 1) % 100 == 0 or step_index + 1 == self.rollout_steps:
@@ -255,7 +337,9 @@ class CvaeDaggerLoop:
                     flush=True,
                 )
 
-        for record in episode_records:
+        for index, record in enumerate(episode_records):
+            if postfall and stopped[index]:
+                continue
             all_samples.extend(self._make_samples(record))
         round_data = self._stack_samples(all_samples)
         round_data.metadata = {
@@ -264,6 +348,8 @@ class CvaeDaggerLoop:
             "motion_keys": list(getattr(self.env, "motion_keys", None) or self.motion_group),
             "motion_group": list(self.motion_group),
             "sample_count": int(round_data.count),
+            "post_fall_continuation": bool(postfall),
+            "post_fall_stopped_envs": sum(stopped),
         }
         self.dataset.append(round_data)
         self.dataset.save_round(round_index, self.run_dir)

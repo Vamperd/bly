@@ -793,6 +793,17 @@ original/fine-tuned 分别跑到 frame 36/41，termination 均为 `foot_pos_xyz`
 这不再是 step0 reference 错位，而是 policy 动作误差累积。按用户要求，stepwise
 现在关闭 Isaac auto reset，首次 fall 只记录 `fall_frame`/`fall_terms`，随后继续
 每步推理和执行 Action[32] 直到 192 帧，因此 source/original/fine-tuned 轨迹
-都可完整渲染。ghost 默认 checker 地面从 50 m 缩到 10 m，并只 tint robot body
-geom（排除 worldbody/ground），以消除大块蓝色背景条纹。Windows compile 和
-46 tests 通过，Ubuntu 其余 case 与渲染仍待执行。
+都可完整渲染。ghost 默认改为黑色地面（checker 仅可选），并只 tint robot body
+geom（排除 worldbody/ground），以消除大块蓝色背景条纹。继续执行后发现
+cellphone/lift/big_heavy 仍在 step0 触发 foot/ee termination；原因是 source HDF
+的 root xy 在 replay 准备时被平移归零，而 Isaac reference motion 仍是原始世界
+坐标。stepwise 现在在 exact init 后按 reference anchor 计算 delta、平移 robot
+root 并打印 `source_world_root_alignment`，同时关闭 auto reset 继续到 192 帧。
+
+训练侧新增 `post_fall_continuation`：未来 CVAE 配置默认开启，训练时禁用
+Isaac auto reset，done 不清 CVAE history，teacher 收到 done=false；不再使用
+绝对高度/竖直判断，而是按每个 motion 前 10 步的 reference error baseline，
+当 `error_anchor_pos`/`error_body_pos` 超过 baseline 3 倍并持续 50 步时停止
+该 env 的采样。爬行动作因 reference 也在地面、误差低，不会误判。评估仍使用
+标准 reset。当前已完成的 run 保持只读。Windows compile 和 48 tests 通过；
+render_mujoco 12 tests 通过；Ubuntu 其余 case、训练和渲染仍待执行。

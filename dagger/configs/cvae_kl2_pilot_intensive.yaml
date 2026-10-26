@@ -21,6 +21,10 @@ dagger:
   num_envs: 4
   mixture_mode: per_step
   eval_steps: 192
+  post_fall_continuation: true
+  post_fall_baseline_steps: 10
+  post_fall_max_error_ratio: 3.0
+  post_fall_down_steps: 50
 
 student:
   checkpoint: ${oc.env:CVAE_STUDENT_CHECKPOINT,/home/helloworld/bly/runs/cvae_long_horizon_train_kl2_fp32_300k_20261016_005837_3380803/checkpoints/best.pt}

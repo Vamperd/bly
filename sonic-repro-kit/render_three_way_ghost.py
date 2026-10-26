@@ -387,7 +387,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output-run", type=Path, required=True)
     parser.add_argument("--robot-profile", default="g1")
     parser.add_argument("--mesh-dir", type=Path)
-    parser.add_argument("--ground-style", default="checker", choices=("checker", "black"))
+    parser.add_argument("--ground-style", default="black", choices=("checker", "black"))
     parser.add_argument("--ground-size", type=float, default=10.0)
     parser.add_argument("--gl", default="egl", choices=("egl", "osmesa", "glfw"))
     args = parser.parse_args(argv)

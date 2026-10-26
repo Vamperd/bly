@@ -132,6 +132,17 @@ def _metrics(source: dict, policy: dict, fall_frame: int | None) -> dict:
         policy["canonical_action"][:action_frames]
         - source["canonical_action"][:action_frames]
     )
+    action_steps = np.linalg.norm(
+        np.diff(policy["canonical_action"], axis=0), axis=-1
+    )
+    action_step_delta_mean = (
+        float(action_steps.mean()) if action_steps.size else None
+    )
+    post_fall_action_step_delta_mean = None
+    if fall_frame is not None and fall_frame < action_steps.size:
+        post_fall_action_step_delta_mean = float(
+            action_steps[fall_frame:].mean()
+        )
     body_mpjpe = None
     if (
         source.get("body_pos_w") is not None
@@ -155,6 +166,13 @@ def _metrics(source: dict, policy: dict, fall_frame: int | None) -> dict:
         "body_mpjpe_m": body_mpjpe,
         "action_canonical_rmse": _rmse(action_error),
         "action_frames": int(action_frames),
+        "action_step_delta_mean": action_step_delta_mean,
+        "post_fall_action_step_delta_mean": post_fall_action_step_delta_mean,
+        "post_fall_action_collapsed": (
+            None
+            if post_fall_action_step_delta_mean is None
+            else bool(post_fall_action_step_delta_mean < 1.0e-6)
+        ),
         "fall_frame": fall_frame,
     }
 
@@ -175,6 +193,11 @@ def _run_policy(
     env.reset_motion_to_first_frame()
     env.disable_auto_reset()
     apply_exact_replay_initialization(env.env, exact_init, readback_path)
+    alignment = env.align_root_to_reference_frame()
+    print(
+        f"[stepwise] source_world_root_alignment={alignment}",
+        flush=True,
+    )
     current_state = env.physics_state()
     contract = SonicActionContract(env)
     adapter.action_contract = contract
@@ -208,7 +231,12 @@ def _run_policy(
                 flush=True,
             )
         frames.append(_robot_frame(env, contract, next_state))
-        adapter.after_step(contract.raw_to_canonical(raw), next_state, done)
+        adapter.after_step(
+            contract.raw_to_canonical(raw),
+            next_state,
+            done,
+            clear_history_on_done=False,
+        )
     trajectory = _stack_frames(frames, actions)
     trajectory["fall_terms"] = fall_terms
     return trajectory, actions, fall_frame

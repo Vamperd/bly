@@ -218,6 +218,10 @@ class CvaeObjectiveTest(unittest.TestCase):
 class _FakeMotion:
     def __init__(self, num_envs: int) -> None:
         self.motion_ids = torch.arange(num_envs, dtype=torch.long)
+        self.metrics = {
+            "error_anchor_pos": torch.zeros(num_envs),
+            "error_body_pos": torch.zeros(num_envs),
+        }
 
 
 class _FakeCommandManager:
@@ -303,8 +307,15 @@ class _FakeStudent:
             action_clip_error=torch.zeros(count),
         )
 
-    def after_step(self, executed_action_canonical, next_state, done) -> None:
-        del executed_action_canonical, next_state, done
+    def after_step(
+        self,
+        executed_action_canonical,
+        next_state,
+        done,
+        *,
+        clear_history_on_done: bool = True,
+    ) -> None:
+        del executed_action_canonical, next_state, done, clear_history_on_done
 
 
 def _fake_contract() -> SonicActionContract:
@@ -358,6 +369,38 @@ class CvaeLoopContractTest(unittest.TestCase):
             self.assertEqual(
                 round_data.metadata["motion_keys"], ["motion_0", "motion_1"]
             )
+
+    def test_post_fall_continuation_keeps_collecting_after_done(self):
+        class _DoneEnv(_FakeEnv):
+            def step(self, actions):
+                observation, reward, _done, info = super().step(actions)
+                return observation, reward, torch.ones_like(_done), info
+
+        with tempfile.TemporaryDirectory() as directory:
+            env = _DoneEnv(2)
+            loop = CvaeDaggerLoop(
+                env=env,
+                teacher=_FakeTeacher(),
+                student=_FakeStudent(2),
+                action_contract=_fake_contract(),
+                num_envs=2,
+                rollout_steps=4,
+                run_dir=Path(directory),
+                seed=11,
+                state_mean=torch.zeros(70),
+                state_std=torch.ones(70),
+                action_mean=torch.zeros(29),
+                action_std=torch.ones(29),
+                motion_group=["motion_0", "motion_1"],
+                mixture_mode="per_step",
+                post_fall_continuation=True,
+                post_fall_baseline_steps=2,
+                post_fall_max_error_ratio=3.0,
+                post_fall_down_steps=2,
+            )
+            round_data = loop.collect_round(0, 0.0)
+        self.assertEqual(round_data.tensors["teacher_action_canonical"].shape[0], 8)
+        self.assertTrue(bool(round_data.tensors["done"].all()))
 
     def test_evaluation_reports_teacher_and_survival_metrics(self):
         with tempfile.TemporaryDirectory() as directory:

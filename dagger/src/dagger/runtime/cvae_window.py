@@ -102,6 +102,8 @@ class CvaeWindowBuffer:
         executed_action: torch.Tensor,
         next_state: torch.Tensor,
         done: torch.Tensor,
+        *,
+        clear_on_done: bool = True,
     ) -> None:
         executed_action = executed_action.to(self.device, dtype=torch.float32)
         next_state = next_state.to(self.device, dtype=torch.float32)
@@ -111,7 +113,7 @@ class CvaeWindowBuffer:
         if tuple(next_state.shape) != (self.num_envs, STATE_DIM):
             raise ValueError(f"next_state must be [{self.num_envs},70]")
         for index in range(self.num_envs):
-            if bool(done[index]):
+            if bool(done[index]) and clear_on_done:
                 self._states[index] = []
                 self._actions[index] = []
                 self._current[index] = next_state[index].detach().clone()

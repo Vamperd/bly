@@ -33,7 +33,27 @@ class SonicDaggerEnv:
         raw = getattr(self.env, "env", self.env)
         if not hasattr(raw, "_reset_idx"):
             raise AttributeError("raw environment has no _reset_idx")
+        if self._original_reset_idx is None:
+            self._original_reset_idx = raw._reset_idx
         raw._reset_idx = lambda env_ids: None
+
+    def enable_auto_reset(self) -> None:
+        raw = getattr(self.env, "env", self.env)
+        if self._original_reset_idx is not None:
+            raw._reset_idx = self._original_reset_idx
+            self._original_reset_idx = None
+
+    def reset_envs(self, env_ids):
+        raw = getattr(self.env, "env", self.env)
+        original = self._original_reset_idx or raw._reset_idx
+        original(env_ids)
+        raw.obs_buf = raw.observation_manager.compute(update_history=True)
+        observations = self.env.process_raw_obs(
+            raw.obs_buf, flatten_dict_obs=True
+        )
+        if hasattr(self.env, "_last_obs_dict"):
+            self.env._last_obs_dict = observations
+        return self._augment(observations)
 
     def reset_motion_to_first_frame(self) -> None:
         motion = self.motion_term
@@ -47,6 +67,25 @@ class SonicDaggerEnv:
                 dtype=torch.int32
             )
 
+    def align_root_to_reference_frame(self) -> list[float]:
+        raw = getattr(self.env, "env", self.env)
+        motion = self.motion_term
+        origin = raw.scene.env_origins[0]
+        reference = motion.anchor_pos_w[0] + origin
+        robot_anchor = motion.robot_anchor_pos_w[0]
+        delta = reference - robot_anchor
+        if float(delta.norm()) > 1.0e-6:
+            root_state = raw.scene["robot"].data.root_state_w.clone()
+            root_state[0, :3] += delta
+            raw.scene["robot"].write_root_state_to_sim(
+                root_state,
+                env_ids=torch.tensor([0], dtype=torch.long, device=raw.device),
+            )
+            raw.scene.write_data_to_sim()
+            raw.sim.forward()
+            raw.scene.update(dt=0.0)
+        return delta.detach().cpu().tolist()
+
     def __init__(self, env: Any, *, reference_terms: list[str] | tuple[str, ...] | None = None) -> None:
         self.env = env
         self.device = env.device
@@ -56,6 +95,7 @@ class SonicDaggerEnv:
         if not self.reference_terms:
             raise ValueError("at least one G1 reference term is required")
         self._reference_slices = self._build_reference_slices()
+        self._original_reset_idx = None
 
     def _build_reference_slices(self) -> dict[str, tuple[int, int]]:
         names = list(self.config.obs.group_obs_names["tokenizer"])
