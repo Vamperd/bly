@@ -55,13 +55,6 @@ def _blend(base, layer, mask, color):
     return out.clip(0, 255).astype(np.uint8)
 
 
-def _qposes(model, paths: list[Path], profile: str, frames: int):
-    return [
-        build_mujoco_qpos(load_trajectory(path), profile=profile, model=model)[:frames]
-        for path in paths
-    ]
-
-
 def render(args: argparse.Namespace) -> dict:
     manifest_path = args.manifest.expanduser().resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -161,16 +154,30 @@ def render(args: argparse.Namespace) -> dict:
                 load_trajectory(original_path),
                 load_trajectory(finetuned_path),
             ]
-            frames = min(int(item["dof_pos"].shape[0]) for item in trajectories)
-            if frames <= 0:
-                raise ValueError(f"empty trajectory for {motion}")
-            qposes = _qposes(
-                model,
-                [source_path, original_path, finetuned_path],
-                args.robot_profile,
-                frames,
-            )
+            trajectory_frames = {
+                name: int(item["dof_pos"].shape[0])
+                for name, item in zip(
+                    ("source", "original_c", "finetuned_c"), trajectories
+                )
+            }
+            if any(value <= 0 for value in trajectory_frames.values()):
+                raise ValueError(
+                    f"empty trajectory for {motion}: {trajectory_frames}"
+                )
+            frames = max(trajectory_frames.values())
+            qposes = [
+                build_mujoco_qpos(
+                    trajectory,
+                    profile=args.robot_profile,
+                    model=model,
+                )
+                for trajectory in trajectories
+            ]
             lookat_z = float(qposes[0][0, 2])
+            padded = {
+                name: frames - trajectory_frames[name]
+                for name in trajectory_frames
+            }
             video_path = output / "videos" / f"ghost_source_original_finetuned_{motion}.mp4"
             individual_paths = {
                 "source": output / "videos" / f"source_recorded_{motion}.mp4",
@@ -186,36 +193,54 @@ def render(args: argparse.Namespace) -> dict:
             }
             try:
                 for frame_index in range(frames):
+                    source_index = min(frame_index, trajectory_frames["source"] - 1)
                     lookat = np.asarray(
                         [
-                            qposes[0][frame_index, 0],
-                            qposes[0][frame_index, 1],
+                            qposes[0][source_index, 0],
+                            qposes[0][source_index, 1],
                             lookat_z,
                         ]
                     )
-                    source_frame = draw(qposes[0][frame_index], lookat)
+                    source_frame = draw(qposes[0][source_index], lookat)
+                    if np.ptp(source_frame) < 2:
+                        raise RuntimeError(
+                            f"rendered source frame is blank for {motion} at "
+                            f"frame {frame_index}; check MuJoCo GL/scene"
+                        )
                     frame = source_frame.copy()
-                    for name, qpos, color in (
-                        ("original_c", qposes[1][frame_index], ORIGINAL_COLOR),
-                        ("finetuned_c", qposes[2][frame_index], FINETUNED_COLOR),
+                    for name, qpos_index, color in (
+                        ("original_c", 1, ORIGINAL_COLOR),
+                        ("finetuned_c", 2, FINETUNED_COLOR),
                     ):
+                        policy_index = min(
+                            frame_index, trajectory_frames[name] - 1
+                        )
+                        qpos = qposes[qpos_index][policy_index]
                         layer = draw(qpos, lookat)
-                        writers[name].append_data(
-                            label_frame(
-                                layer,
-                                f"{name} | {motion} | frame {frame_index}/{frames - 1} | 50 Hz",
+                        policy_text = (
+                            f"{name} | {motion} | frame {frame_index}/{frames - 1} | 50 Hz"
+                        )
+                        if padded[name] > 0 and frame_index >= trajectory_frames[name]:
+                            policy_text += (
+                                f" | ended {trajectory_frames[name] - 1}, holding"
                             )
+                        writers[name].append_data(
+                            label_frame(layer, policy_text)
                         )
                         segmentation = draw(qpos, lookat, segment=True)
                         mask = _robot_mask(
                             segmentation, geom_types, plane_type, geom_objtype
                         )
                         frame = _blend(frame, layer, mask, color)
-                    writers["source"].append_data(
-                        label_frame(
-                            source_frame,
-                            f"source recorded | {motion} | frame {frame_index}/{frames - 1} | 50 Hz",
+                    source_text = (
+                        f"source recorded | {motion} | frame {frame_index}/{frames - 1} | 50 Hz"
+                    )
+                    if padded["source"] > 0 and frame_index >= trajectory_frames["source"]:
+                        source_text += (
+                            f" | ended {trajectory_frames['source'] - 1}, holding"
                         )
+                    writers["source"].append_data(
+                        label_frame(source_frame, source_text)
                     )
                     cv2.rectangle(
                         frame, (0, 0), (GHOST_SIZE[0], 106), (25, 25, 25), -1
@@ -291,6 +316,8 @@ def render(args: argparse.Namespace) -> dict:
                     "source_trajectory": str(source_path),
                     "original_trajectory": str(original_path),
                     "finetuned_trajectory": str(finetuned_path),
+                    "trajectory_frames": trajectory_frames,
+                    "padded_frames": padded,
                     "individual_videos": individual_results,
                 }
             )

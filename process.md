@@ -774,6 +774,9 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 已补 `timezone` 并增加 source 级回归检查。四个 case 最终都完成并渲染，但旧
 ghost MP4 缺少显式 `yuv420p`，播放器出现无法打开/花屏；已改为
 `libx264 + yuv420p + +faststart`，并在同一渲染中额外输出 source、original C、
-fine-tuned C 三个单独 MP4。192 步/50 Hz 只有约 3.86 s，不是视频截断。
-上述均为工程/渲染问题，不构成数据或模型质量结论。Windows compile 和
-44 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。
+fine-tuned C 三个单独 MP4。旧渲染还使用三条轨迹的最小帧数，若 policy 提前终止，
+视频会退化成 1 帧、约 30 KB；现改为保留完整 source 帧数，对短轨迹重复最后一帧
+并标注“ended N, holding”，同时记录 `trajectory_frames`/`padded_frames`。source
+首帧若为空白会直接报错。192 步/50 Hz 只有约 3.86 s，不是视频截断。上述均为
+工程/渲染问题，不构成数据或模型质量结论。Windows compile 和 44 tests 通过，
+Ubuntu Isaac/MuJoCo 仍待执行。

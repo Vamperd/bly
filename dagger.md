@@ -437,8 +437,11 @@ videos/finetuned_c_<motion>.mp4
 source opaque，original C 与 fine-tuned C 半透明；同相机；运动学 ghost，
 不是扭矩物理重放。三个单独视频分别只显示 source、original C、fine-tuned C。
 视频固定 `libx264 + yuv420p` 并启用 `+faststart`；192 步在 50 Hz 下约 3.86 s，
-“很短”是协议长度，不是截断。已有 `ghost/` 目录时不要复用，改用新的
-`ghost_fixed/` 输出目录。
+“很短”是协议长度，不是截断。若某个 policy 提前终止，渲染器不再用三者最小帧数
+截断，而是保留 source 的完整长度，并对短轨迹重复最后一帧且在视频上标记
+“ended N, holding”；`three_way_ghost.json` 记录 `trajectory_frames` 和
+`padded_frames`。如果 source 首帧渲染为空白，渲染器会直接报错而不是写出空视频。
+已有 `ghost/` 目录时不要复用，改用新的 `ghost_fixed/` 输出目录。
 
 ### 8/16 步开环与 recursive B 的边界
 
