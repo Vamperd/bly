@@ -20,6 +20,7 @@ student:
   model_config: ${oc.env:CVAE_MODEL_CONFIG,/home/helloworld/bly/state-action-cvae/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json}
   normalization_run: ${oc.env:CVAE_KL2_DATASET_RUN,/home/helloworld/bly/runs/cvae_long_horizon_dataset_rebuilt_20261018_223710_254008}
   source_dataset_run: ${oc.env:CVAE_KL2_DATASET_RUN,/home/helloworld/bly/runs/cvae_long_horizon_dataset_rebuilt_20261018_223710_254008}
+  source_cache_size: 1
   source_dataset_kind: long_horizon
   source_mask_mode: fixed
   teacher_mode: dual
@@ -29,6 +30,7 @@ student:
   source_mix_mode: alternate
   learning_rate: 1.0e-5
   weight_decay: 0.0
+  train_chunk_steps: 0
   train_steps_per_round: 2
   micro_batch: 2
   mask_seed: 20261016

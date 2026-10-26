@@ -69,7 +69,13 @@ def _git_head(path: Path) -> str | None:
 
 
 def _write_json(path: Path, payload: object) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
 def _motion_info(config, sonic_root: Path) -> dict:
@@ -1035,6 +1041,32 @@ def _cvae_kl2_resume_state(run_dir: Path):
     return completed, metrics
 
 
+def _cvae_kl2_partial_round(run_dir: Path) -> dict | None:
+    path = run_dir / "manifests" / "dagger_cvae_kl2_round_progress.json"
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _merge_cvae_train_chunks(chunks: list[dict]) -> dict:
+    if not chunks:
+        return {}
+    merged = dict(chunks[-1])
+    merged["source_steps"] = sum(
+        float(chunk.get("source_steps", 0.0)) for chunk in chunks
+    )
+    merged["dagger_steps"] = sum(
+        float(chunk.get("dagger_steps", 0.0)) for chunk in chunks
+    )
+    merged["chunk_metrics"] = chunks
+    merged["chunks"] = len(chunks)
+    return merged
+
+
 def _cvae_group_reference_rmse(
     metrics: dict | None, keys: list[str]
 ) -> float | None:
@@ -1266,6 +1298,12 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
     if not beta_schedule:
         raise ValueError("beta_schedule must not be empty")
     train_steps_per_round = int(config.student.train_steps_per_round)
+    train_chunk_steps = int(config.student.get("train_chunk_steps", 0) or 0)
+    if train_chunk_steps <= 0 or train_chunk_steps >= train_steps_per_round:
+        train_chunk_steps = train_steps_per_round
+    chunks_total = (
+        train_steps_per_round + train_chunk_steps - 1
+    ) // train_chunk_steps
     eval_steps = int(config.dagger.get("eval_steps", 192))
     rounds_per_process = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
     resume = bool(os.environ.get("DAGGER_RESUME_RUN", "").strip())
@@ -1328,6 +1366,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         ),
         teacher_mode=str(config.student.get("teacher_mode", "dual")),
         source_identity=manifest,
+        source_cache_size=int(config.student.get("source_cache_size", 0)),
         state_weight=float(config.student.get("state_weight", 1.0)),
         contact_weight=float(config.student.get("contact_weight", 0.1)),
         teacher_sn_weight=float(config.student.get("teacher_sn_weight", 0.5)),
@@ -1362,8 +1401,115 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         )
     if float(config.student.source_mix) > 0:
         student._load_source_dataset()
+    round_progress_path = (
+        run_dir / "manifests" / "dagger_cvae_kl2_round_progress.json"
+    )
+    partial = _cvae_kl2_partial_round(run_dir)
+    resume_partial = False
+    partial_start_chunk = 0
+    partial_train_chunks: list[dict] = []
+    partial_keys: list[str] = []
+    partial_beta = float(beta_schedule[start_round])
+    partial_motion_weights: dict[str, float] | None = None
+    partial_data_path = run_dir / "data" / "dagger" / f"round_{start_round:02d}.pt"
+    partial_checkpoint_path = (
+        run_dir / "checkpoints" / f"round_{start_round:02d}_partial.pt"
+    )
+    partial_global_step = start_round * train_steps_per_round
+    if partial:
+        partial_round = int(partial.get("round_index", -1))
+        if partial_round < start_round:
+            round_progress_path.unlink(missing_ok=True)
+            leftover = Path(str(partial.get("checkpoint_path", "")))
+            if leftover.is_file():
+                leftover.unlink()
+            partial = None
+        elif partial_round > start_round:
+            raise RuntimeError(
+                "round progress points past the next uncompleted round: "
+                f"{partial_round} > {start_round}"
+            )
+        else:
+            partial_data_path = Path(
+                str(partial.get("data_path", partial_data_path))
+            ).expanduser()
+            partial_checkpoint_path = Path(
+                str(partial.get("checkpoint_path", partial_checkpoint_path))
+            ).expanduser()
+            if not partial_data_path.is_file() or not partial_checkpoint_path.is_file():
+                raise RuntimeError(
+                    "partial round data or chunk checkpoint is missing: "
+                    f"{partial_data_path}, {partial_checkpoint_path}"
+                )
+            partial_dataset = CvaeDaggerDataset.load_rounds([partial_data_path])
+            if not partial_dataset.rounds:
+                raise RuntimeError("partial round data is empty")
+            dataset.append(partial_dataset.rounds[0])
+            checkpoint_payload = student.load_round_checkpoint(
+                partial_checkpoint_path, load_optimizer=True
+            )
+            checkpoint_round = checkpoint_payload.get("round_index")
+            if checkpoint_round is not None and int(checkpoint_round) != start_round:
+                raise RuntimeError(
+                    "partial checkpoint round mismatch: "
+                    f"{checkpoint_round} != {start_round}"
+                )
+            checkpoint_chunk = checkpoint_payload.get("chunk_index")
+            if checkpoint_chunk is not None:
+                partial_start_chunk = int(checkpoint_chunk) + 1
+            else:
+                partial_start_chunk = int(partial.get("next_chunk_index", 0))
+            if not 0 <= partial_start_chunk <= chunks_total:
+                raise RuntimeError(
+                    f"partial chunk index out of range: {partial_start_chunk}/{chunks_total}"
+                )
+            partial_global_step = int(
+                checkpoint_payload.get(
+                    "global_step",
+                    partial.get("global_step", start_round * train_steps_per_round),
+                )
+            )
+            round_start_step = start_round * train_steps_per_round
+            if not (
+                round_start_step
+                <= partial_global_step
+                <= round_start_step + train_steps_per_round
+            ):
+                raise RuntimeError(
+                    "partial global step is outside the current round: "
+                    f"{partial_global_step} not in "
+                    f"[{round_start_step}, {round_start_step + train_steps_per_round}]"
+                )
+            partial_keys = [
+                str(value)
+                for value in (
+                    checkpoint_payload.get("motion_keys")
+                    or partial.get("motion_keys")
+                    or []
+                )
+            ]
+            if not partial_keys:
+                partial_keys = _kl2_keys_for_round(mode, manifest, start_round)
+            partial_beta = float(
+                checkpoint_payload.get(
+                    "beta", partial.get("beta", beta_schedule[start_round])
+                )
+            )
+            partial_motion_weights = partial.get("motion_weights")
+            partial_train_chunks = list(
+                checkpoint_payload.get("train_chunks")
+                or partial.get("train_chunks")
+                or []
+            )
+            if len(partial_train_chunks) > partial_start_chunk:
+                partial_train_chunks = partial_train_chunks[:partial_start_chunk]
+            resume_partial = True
     total_train_steps = total_rounds * train_steps_per_round
-    global_step_offset = start_round * train_steps_per_round
+    global_step_offset = (
+        partial_global_step
+        if resume_partial
+        else start_round * train_steps_per_round
+    )
     partial_manifest_path = (
         run_dir / "manifests" / "dagger_cvae_kl2_manifest.partial.json"
     )
@@ -1381,7 +1527,11 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         source_baseline_32 = previous.get("source_baseline_32")
         best_teacher_rmse = previous.get("best_teacher_rmse")
         best_survival = previous.get("best_survival")
-    if formal and start_round == 0:
+    if formal and start_round == 0 and source_baseline_32 is None:
+        if resume_partial:
+            raise RuntimeError(
+                "source baseline is missing for a resumed partial round"
+            )
         source_baseline_32 = _evaluate_cvae_full(
             config,
             prepared,
@@ -1412,7 +1562,13 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
     )
 
     for round_index in range(start_round, end_round):
-        keys = _kl2_keys_for_round(mode, manifest, round_index)
+        resume_this_round = bool(resume_partial and round_index == start_round)
+        if resume_this_round:
+            keys = list(partial_keys)
+            beta = float(partial_beta)
+        else:
+            keys = _kl2_keys_for_round(mode, manifest, round_index)
+            beta = float(beta_schedule[round_index])
         env, contract, teacher = _create_cvae_env_for_keys(
             config, prepared, run_dir, keys, args_cli, device
         )
@@ -1440,38 +1596,91 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                 motion_group=keys,
                 mixture_mode=str(config.dagger.get("mixture_mode", "per_step")),
             )
-            beta = beta_schedule[round_index]
-            round_data = loop.collect_round(round_index, beta)
-            if formal:
-                motion_weights = _cvae_motion_weights(
-                    (source_baseline_32 or {}).get("metrics")
-                )
+            if resume_this_round:
+                round_data = dataset.rounds[-1]
+                chunk_index = int(partial_start_chunk)
+                train_chunks = list(partial_train_chunks)
+                motion_weights = partial_motion_weights
+                data_path = partial_data_path
+                partial_path = partial_checkpoint_path
+                resume_partial = False
             else:
-                motion_weights = (
-                    _cvae_motion_weights(metrics[-1].get("student_only"))
-                    if metrics
-                    else None
+                round_data = loop.collect_round(round_index, beta)
+                chunk_index = 0
+                train_chunks = []
+                if formal:
+                    motion_weights = _cvae_motion_weights(
+                        (source_baseline_32 or {}).get("metrics")
+                    )
+                else:
+                    motion_weights = (
+                        _cvae_motion_weights(metrics[-1].get("student_only"))
+                        if metrics
+                        else None
+                    )
+                data_path = (
+                    run_dir / "data" / "dagger" / f"round_{round_index:02d}.pt"
                 )
-            train_metrics = student.train_on_dataset(
-                dataset,
-                round_index=round_index,
-                global_step_offset=global_step_offset,
-                total_training_steps=total_train_steps,
-                motion_weights=motion_weights,
-            )
+                partial_path = (
+                    run_dir
+                    / "checkpoints"
+                    / f"round_{round_index:02d}_partial.pt"
+                )
+            while chunk_index < chunks_total:
+                steps = min(
+                    train_chunk_steps,
+                    train_steps_per_round - chunk_index * train_chunk_steps,
+                )
+                chunk_metrics = student.train_on_dataset(
+                    dataset,
+                    round_index=round_index,
+                    global_step_offset=global_step_offset,
+                    total_training_steps=total_train_steps,
+                    motion_weights=motion_weights,
+                    steps=steps,
+                )
+                global_step_offset += steps
+                train_chunks.append(chunk_metrics)
+                student.save(
+                    partial_path,
+                    round_index=round_index,
+                    beta=beta,
+                    motion_keys=keys,
+                    eval_metrics=None,
+                    sample_count=int(round_data.count),
+                    motion_coverage=dataset.motion_coverage(),
+                    extra_metadata={
+                        "chunk_index": chunk_index,
+                        "train_steps_completed": global_step_offset
+                        - round_index * train_steps_per_round,
+                        "train_steps_total": train_steps_per_round,
+                        "train_chunks": train_chunks,
+                    },
+                )
+                _write_json(
+                    round_progress_path,
+                    {
+                        "round_index": round_index,
+                        "next_chunk_index": chunk_index + 1,
+                        "chunks_total": chunks_total,
+                        "train_steps_completed": global_step_offset
+                        - round_index * train_steps_per_round,
+                        "train_steps_total": train_steps_per_round,
+                        "global_step": global_step_offset,
+                        "data_path": str(data_path),
+                        "checkpoint_path": str(partial_path),
+                        "beta": beta,
+                        "motion_keys": keys,
+                        "motion_weights": motion_weights,
+                        "train_chunks": train_chunks,
+                    },
+                )
+                chunk_index += 1
+            train_metrics = _merge_cvae_train_chunks(train_chunks)
             eval_metrics = loop.evaluate_student_only(
                 eval_steps,
                 latent_mode="fixed_standard_normal",
                 round_index=round_index,
-            )
-            student.save(
-                run_dir / "checkpoints" / f"round_{round_index:02d}.pt",
-                round_index=round_index,
-                beta=beta,
-                motion_keys=keys,
-                eval_metrics=eval_metrics,
-                sample_count=int(round_data.count),
-                motion_coverage=dataset.motion_coverage(),
             )
             raw_teacher_score = float(
                 eval_metrics.get("teacher_action_rmse", float("inf"))
@@ -1548,11 +1757,12 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     "student_executed_ratio": 1.0 - teacher_ratio,
                     "history_steps_mean": history_mean,
                     "train": train_metrics,
+                    "train_chunks": train_chunks,
                     "student_only": eval_metrics,
                     "motion_coverage": dataset.motion_coverage(),
                 }
             )
-            global_step_offset += train_steps_per_round
+            global_step_offset = (round_index + 1) * train_steps_per_round
             _write_json(
                 run_dir / "manifests" / "dagger_cvae_kl2_metrics.partial.json",
                 metrics,
@@ -1571,6 +1781,22 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                     "motion_manifest": manifest,
                 },
             )
+            final_path = (
+                run_dir / "checkpoints" / f"round_{round_index:02d}.pt"
+            )
+            if partial_path.is_file():
+                os.replace(partial_path, final_path)
+            else:
+                student.save(
+                    final_path,
+                    round_index=round_index,
+                    beta=beta,
+                    motion_keys=keys,
+                    eval_metrics=eval_metrics,
+                    sample_count=int(round_data.count),
+                    motion_coverage=dataset.motion_coverage(),
+                )
+            round_progress_path.unlink(missing_ok=True)
         finally:
             _close_cvae_env(env)
 

@@ -14,8 +14,20 @@ esac
 DAGGER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$HOME/bly/runs}"
 PYTHON="${PYTHON:-$HOME/bly/sonic-repro/.venv-sonic/bin/python}"
-SHARD_ROUNDS="${DAGGER_SHARD_ROUNDS:-2}"
-MAX_RETRIES="${DAGGER_MAX_RETRIES:-3}"
+if [[ -n "${DAGGER_SHARD_ROUNDS:-}" ]]; then
+  SHARD_ROUNDS="$DAGGER_SHARD_ROUNDS"
+elif [[ "$MODE" == cvae-kl2-* ]]; then
+  SHARD_ROUNDS=1
+else
+  SHARD_ROUNDS=2
+fi
+if [[ -n "${DAGGER_MAX_RETRIES:-}" ]]; then
+  MAX_RETRIES="$DAGGER_MAX_RETRIES"
+elif [[ "$MODE" == cvae-kl2-* ]]; then
+  MAX_RETRIES=5
+else
+  MAX_RETRIES=3
+fi
 MAX_SHARDS="${DAGGER_MAX_SHARDS:-20}"
 RUN_PREFIX="dagger_${MODE//-/_}"
 RUN="${DAGGER_RESUME_RUN:-}"

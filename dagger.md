@@ -177,6 +177,13 @@ dagger/configs/cvae_kl2_motion_manifest.json
 配置继承 KL2 的 `fixed` Mask、`kl_beta=0.002`、`beta_warmup=10000` 和
 FP32 eager；不加载源 optimizer。
 
+pilot/formal 使用 `source_cache_size=2048`，在训练前把 1504 个 source window
+预加载到 CPU，训练循环不再反复读 HDF5；smoke 用 `1` 验证缓存路径。
+
+训练按 `train_chunk_steps=500` 分块：每块保存 `round_XX_partial.pt` 和
+`manifests/dagger_cvae_kl2_round_progress.json`；crash 后从最后一个 chunk
+继续，而不是重跑整轮。auto 入口对 CVAE 默认 1 round/process、5 次无进展重试。
+
 smoke 会对照 recorded schema/context 与 live env 的 Action mapping：
 `scale` / `nominal` / `clip` 要求严格一致；`offset` 由 startup 的
 默认关节随机化重新采样，允许其随机范围，但 canonical Action 仍相对
@@ -323,7 +330,7 @@ export SONIC_REPO_ROOT=~/bly/sonic-repro/GR00T-WholeBodyControl
 export SONIC_TEACHER_CHECKPOINT=$SONIC_REPO_ROOT/sonic_release/last.pt
 
 bash scripts/run_dagger.sh cvae-kl2-smoke
-bash scripts/run_dagger.sh cvae-kl2-pilot
+bash scripts/run_dagger_auto.sh cvae-kl2-pilot
 bash scripts/run_dagger_auto.sh cvae-kl2-formal
 ```
 
@@ -886,7 +893,9 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE KL2 32-motion 适配 | 已实现；Windows 35 tests 通过 |
 | CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
 | CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
-| CVAE KL2 smoke / pilot / formal | 待 Ubuntu 执行 |
+| CVAE KL2 smoke | Ubuntu execution PASS；quality 为单轮 smoke 预期 false |
+| CVAE KL2 pilot | round 0 step 800 native SIGSEGV；source cache + 500-step chunk resume + auto retry 已加，待重跑 |
+| CVAE KL2 formal | 待 pilot 通过 |
 | CVAE KL2 192-step survival | 实时 Isaac 闭环诊断；待 Ubuntu |
 | standard-normal 质量 | 待 pilot 评估 |
 | teacher action information contract | 待多 motion/reference probe |

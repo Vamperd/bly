@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +79,7 @@ class CvaeStudentAdapter:
         source_causal_fraction: float = 0.0,
         teacher_mode: str = "posterior_sample",
         source_identity: dict[str, Any] | None = None,
+        source_cache_size: int = 0,
         state_weight: float = 1.0,
         contact_weight: float = 0.1,
         teacher_sn_weight: float = 0.5,
@@ -104,6 +106,10 @@ class CvaeStudentAdapter:
         self.source_mask_mode = str(source_mask_mode)
         self.source_causal_fraction = float(source_causal_fraction)
         self.source_identity = dict(source_identity or {})
+        self.source_cache_size = int(source_cache_size)
+        if self.source_cache_size < 0:
+            raise ValueError("source_cache_size must be non-negative")
+        self._source_cache: list[dict[str, Any]] | None = None
         self.source_mix_exact = bool(self.source_identity.get("source_mix_exact", False))
         self.source_hash_mismatch: str | None = None
         self.state_weight = float(state_weight)
@@ -465,6 +471,30 @@ class CvaeStudentAdapter:
                 validation_stride=64,
                 random_crop=True,
             )
+        if self.source_cache_size > 0:
+            limit = min(len(self._source_dataset), self.source_cache_size)
+            cache: list[dict[str, Any]] = []
+            cache_keys = (
+                "physical_state",
+                "action",
+                "valid_state",
+                "valid_action",
+                "motion_key",
+                "variant_id",
+                "window_start",
+                "episode_ref",
+            )
+            for index in range(limit):
+                sample = self._source_dataset[index]
+                cache.append(
+                    {key: sample[key] for key in cache_keys if key in sample}
+                )
+                if (index + 1) % 128 == 0 or index + 1 == limit:
+                    print(
+                        f"[dagger] cvae source cache {index + 1}/{limit}",
+                        flush=True,
+                    )
+            self._source_cache = cache
         self.source_identity["source_mix_exact"] = bool(self.source_mix_exact)
         self.source_identity["source_hash_mismatch"] = self.source_hash_mismatch
         return self._source_dataset
@@ -473,6 +503,11 @@ class CvaeStudentAdapter:
         dataset = self._load_source_dataset()
         if dataset is None or len(dataset) == 0:
             raise RuntimeError("source CVAE dataset is unavailable")
+        if self._source_cache is not None:
+            indices = torch.randint(
+                len(self._source_cache), (self.batch_size,), generator=generator
+            ).tolist()
+            return default_collate([self._source_cache[index] for index in indices])
         indices = torch.randint(
             len(dataset), (self.batch_size,), generator=generator
         ).tolist()
@@ -675,9 +710,13 @@ class CvaeStudentAdapter:
         global_step_offset: int = 0,
         total_training_steps: int = 0,
         motion_weights: dict[str, float] | None = None,
+        steps: int | None = None,
     ) -> dict[str, float]:
         if not dataset.rounds:
             raise RuntimeError("cannot train CVAE student on an empty DAgger dataset")
+        train_steps = int(steps) if steps is not None else self.train_steps
+        if train_steps <= 0:
+            raise ValueError("train steps must be positive")
         if self.source_mix > 0:
             self._load_source_dataset()
         generator = torch.Generator(device="cpu")
@@ -685,7 +724,7 @@ class CvaeStudentAdapter:
             self.seed + len(dataset.rounds) * 1009 + int(global_step_offset)
         )
         total_steps = max(
-            int(total_training_steps), int(global_step_offset) + self.train_steps
+            int(total_training_steps), int(global_step_offset) + train_steps
         )
         self.model.train()
         losses: list[float] = []
@@ -693,7 +732,7 @@ class CvaeStudentAdapter:
         aggregates: dict[str, list[float]] = {}
         source_steps = 0
         dagger_steps = 0
-        for step in range(self.train_steps):
+        for step in range(train_steps):
             global_step = int(global_step_offset) + step
             learning_rate = self._learning_rate(global_step, total_steps)
             for group in self.optimizer.param_groups:
@@ -703,7 +742,7 @@ class CvaeStudentAdapter:
                 1.0, float(global_step + 1) / self.kl_warmup
             )
             if self.source_mix_mode == "alternate":
-                use_source = bool(self.source_mix > 0 and step % 2 == 0)
+                use_source = bool(self.source_mix > 0 and global_step % 2 == 0)
             else:
                 use_source = bool(
                     self.source_mix > 0
@@ -734,16 +773,17 @@ class CvaeStudentAdapter:
             for key, value in metrics.items():
                 aggregates.setdefault(key, []).append(value)
             aggregates.setdefault("gradient_norm", []).append(float(before))
-            if self.train_steps >= 100 and (step + 1) % 100 == 0:
+            if train_steps >= 100 and (step + 1) % 100 == 0:
                 print(
                     f"[dagger] cvae train round={round_index} "
-                    f"step={step + 1}/{self.train_steps} "
+                    f"step={step + 1}/{train_steps} "
+                    f"global={global_step + 1} "
                     f"loss={losses[-1]:.6g} lr={learning_rate:.3g} "
                     f"source={int(use_source)} grad={float(before):.3g}",
                     flush=True,
                 )
         self.model.eval()
-        self.global_step = int(global_step_offset) + self.train_steps
+        self.global_step = int(global_step_offset) + train_steps
         return {
             "train_loss": float(np.mean(losses[-min(100, len(losses)):])),
             "dataset_samples": float(dataset.count),
@@ -765,6 +805,7 @@ class CvaeStudentAdapter:
         eval_metrics: dict[str, Any] | None = None,
         sample_count: int | None = None,
         motion_coverage: dict[str, int] | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -804,7 +845,15 @@ class CvaeStudentAdapter:
             "teacher_mode": self.teacher_mode,
             "raise_on_clip_error": bool(self.raise_on_clip_error),
         }
-        torch.save(payload, path)
+        if extra_metadata:
+            payload.update(extra_metadata)
+        temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+        try:
+            torch.save(payload, temporary)
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def load_round_checkpoint(
         self, path: str | Path, *, load_optimizer: bool = True

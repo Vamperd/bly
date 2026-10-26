@@ -684,3 +684,27 @@ seed，只跳过大体积 diagnostics/trace/plot 写盘。每 50,000 步和最�
 并在该 profile 中更新正式 best checkpoint。FP32 eager route 已加入 posterior/condition encoder 复用，
 checkpoint alias 使用一次序列化 payload；cached/pinned runtime 仅作为后续独立 smoke，当前没有
 Ubuntu throughput 或质量 parity 证据。
+
+## 23. CVAE KL2 pilot native SIGSEGV（2026-10-26）
+
+首次 CVAE KL2 smoke 在记录 initial State 时混用 CUDA/CPU，`torch.stack` 报 device mismatch；
+Windows 修复为 `_new_record` 统一 `.cpu()`，Ubuntu 重跑 smoke execution PASS。smoke 的
+`quality_pass=false` 是单轮 expected，不是质量结论。
+
+action mapping 自检显示 `scale/nominal/clip` max_abs=0，`offset` max_abs=0.014；后者来自
+`add_joint_default_pos` 的 startup 随机化，不对应 canonical Action 语义，因此 offset 容差设为 0.03，
+其余严格 1e-6。
+
+pilot run `dagger_cvae_kl2_pilot_20261026_123821` 在 round 0 train step 800 后先出现 3 分钟
+faulthandler 快照，随后 native SIGSEGV（exit 139）。快照没有 Python 主线程帧；一个 dump 位于
+h5py source window 读取，另一个位于 `_source_loss`/backward。当前不能断言根因，也不能把该目录
+用于 resume。已加入 `source_cache_size=2048`（smoke 为 1），在训练前把 1504 个 source window
+预加载到 CPU，训练循环不再反复读 HDF5；需要新 pilot 验证是否能消除该 native crash。
+
+同时增加 round 内分块训练：`train_chunk_steps=500`，每块保存
+`checkpoints/round_XX_partial.pt` 与 `manifests/dagger_cvae_kl2_round_progress.json`；
+crash 后从最后一个 chunk 的 optimizer/global step 继续，而不是重跑整轮。checkpoint 与
+JSON 均先写临时文件再 atomic replace。`run_dagger_auto.sh` 对 CVAE 默认
+`DAGGER_SHARD_ROUNDS=1`、`DAGGER_MAX_RETRIES=5`。这些只是工程缓解，尚未在 Ubuntu 验证能消除
+native crash；若仍复现，下一步应在 `source_mix=0` 的独立诊断 run 中区分 HDF5 source read 与
+CVAE/CUDA/Isaac native 原因，不能直接进入 formal。
