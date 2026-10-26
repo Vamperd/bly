@@ -1,5 +1,6 @@
 mode: stepwise_recursive_causal
 device: cuda:0
+seed: 20261023
 run_root: ${oc.env:SONIC_RUNS_ROOT,/home/helloworld/bly/runs}
 sonic_repo_root: ${oc.env:SONIC_REPO_ROOT,/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl}
 sonic_kit_root: ${oc.env:SONIC_KIT_ROOT,/home/helloworld/bly/sonic-repro-kit}

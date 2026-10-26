@@ -15,6 +15,7 @@ class StepwisePrepareTest(unittest.TestCase):
         text = config.read_text(encoding="utf-8")
         self.assertNotIn("<", text)
         self.assertNotIn(">", text)
+        self.assertIn("seed: 20261023", text)
 
     def test_utc_timestamp_is_available(self):
         self.assertIn("+00:00", _utc_now_iso())
