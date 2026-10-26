@@ -762,5 +762,9 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 `seed` 失败；`_prepare_release_env` 需要 `config.seed` 同时用于 motion selection
 和 Isaac env。已补 `seed: 20261023`。随后 `_load_source` 读取的 replay 只含
 `physical_state` 而没有 `physical_state_v3`；已兼容两种 key，并保留明确缺 key
-错误。以上均发生在模型推理前/写盘阶段，不构成数据或模型质量结论。
-Windows compile 和 41 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。
+错误。随后多 motion 循环在第二个 case 创建 env 时报
+`Simulation context already exists`：`SonicDaggerEnv` 没有 `close()`，包装层的
+close 是空操作，底层 `ManagerBasedRLEnv.close()` 从未调用，因此第一个 case 的
+SimulationContext 没有被清理。已让包装层把 `close()` 委托给底层 env，并加回归
+测试。以上均发生在模型推理前/写盘阶段，不构成数据或模型质量结论。
+Windows compile 和 42 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。

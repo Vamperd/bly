@@ -40,6 +40,10 @@ class _Env:
     config = _Config()
     action_space = _Space()
     command_manager = _CommandManager()
+    closed = False
+
+    def close(self):
+        self.closed = True
 
 
 class SonicEnvContractTest(unittest.TestCase):
@@ -51,6 +55,12 @@ class SonicEnvContractTest(unittest.TestCase):
         self.assertEqual(env.motion_keys, ["motion_a", "motion_b"])
         self.assertTrue(torch.equal(env.action_low, torch.tensor([[-1.0, -1.0]])))
         self.assertTrue(torch.equal(env.action_high, torch.tensor([[1.0, 1.0]])))
+
+    def test_close_delegates_to_raw_environment(self):
+        raw = _Env()
+        env = SonicDaggerEnv(raw, reference_terms=("term_b",))
+        env.close()
+        self.assertTrue(raw.closed)
 
     def test_missing_reference_term_is_reported(self):
         with self.assertRaises(KeyError):

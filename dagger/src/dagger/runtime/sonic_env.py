@@ -19,6 +19,11 @@ DEFAULT_REFERENCE_TERMS = (
 class SonicDaggerEnv:
     """Thin observation adapter around the unchanged SONIC ManagerEnvWrapper."""
 
+    def close(self) -> None:
+        close = getattr(self.env, "close", None)
+        if callable(close):
+            close()
+
     def __init__(self, env: Any, *, reference_terms: list[str] | tuple[str, ...] | None = None) -> None:
         self.env = env
         self.device = env.device
