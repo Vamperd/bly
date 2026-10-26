@@ -387,9 +387,11 @@ bash scripts/run_stepwise_prepare.sh "$STEPWISE_PREP" \
   big_heavy_one_hand_front_low_to_front_medium_R_001__A526
 ```
 
-再运行 original C 与 fine-tuned C。Isaac 在同一个 Kit 进程内销毁并重建
-`SimulationContext` 会卡住，因此每个 motion 必须使用独立进程；`--case-index`
-对应 cases manifest 的顺序：
+再运行 original C 与 fine-tuned C。每次 `env.reset()` 后必须先把 motion command
+的 `time_steps` 和 `motion_start_time_steps` 归零，再应用 exact initialization；
+否则 reference anchor 可能落在随机初始帧，step 0 就触发 anchor/foot termination。
+Isaac 在同一个 Kit 进程内销毁并重建 `SimulationContext` 会卡住，因此每个 motion
+必须使用独立进程；`--case-index` 对应 cases manifest 的顺序：
 
 ```bash
 export SONIC_KIT_ROOT=/home/helloworld/bly/sonic-repro-kit
@@ -434,8 +436,11 @@ videos/original_c_<motion>.mp4
 videos/finetuned_c_<motion>.mp4
 ```
 
-source opaque，original C 与 fine-tuned C 半透明；同相机；运动学 ghost，
-不是扭矩物理重放。三个单独视频分别只显示 source、original C、fine-tuned C。
+source opaque，original C 与 fine-tuned C 半透明；ghost 使用 source 相机，
+三个单独视频各自跟随自己的 root 相机。渲染前会把 original/fine-tuned 的初始
+root xy 对齐到 source（只影响可视化，不修改轨迹文件），并在
+`raw_first_roots` 记录对齐前坐标；若 policy 在第一步终止，stepwise 必须先修好，
+不能只靠渲染补帧。
 视频固定 `libx264 + yuv420p` 并启用 `+faststart`；192 步在 50 Hz 下约 3.86 s，
 “很短”是协议长度，不是截断。若某个 policy 提前终止，渲染器不再用三者最小帧数
 截断，而是保留 source 的完整长度，并对短轨迹重复最后一帧且在视频上标记
@@ -1035,7 +1040,7 @@ bash scripts/render_mlp_policy.sh "$CKPT" "$MOTION_KEY" 192
 | CVAE Action mapping | 已实现并通过 CPU round-trip 测试 |
 | CVAE DAgger smoke | 待 Ubuntu 执行 |
 | CVAE DAgger pilot | smoke 成功后执行 |
-| CVAE KL2 32-motion 适配 | 已实现；Windows 44 tests 通过 |
+| CVAE KL2 32-motion 适配 | 已实现；Windows 45 tests 通过 |
 | CVAE KL2 motion manifest | 32 keys / 4×8 groups / pilot 4 keys 已固定 |
 | CVAE KL2 source mix | `source_mix_exact=true`；rebuilt long-horizon hash 与 KL2 一致 |
 | CVAE KL2 smoke | Ubuntu execution PASS；quality 为单轮 smoke 预期 false |

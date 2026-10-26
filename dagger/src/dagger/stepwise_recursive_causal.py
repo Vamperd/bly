@@ -172,6 +172,7 @@ def _run_policy(
     from exact_replay_initializer import apply_exact_replay_initialization
 
     env.reset()
+    env.reset_motion_to_first_frame()
     apply_exact_replay_initialization(env.env, exact_init, readback_path)
     current_state = env.physics_state()
     contract = SonicActionContract(env)

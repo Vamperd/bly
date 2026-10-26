@@ -29,6 +29,14 @@ class SonicDaggerEnv:
         if callable(close):
             close()
 
+    def reset_motion_to_first_frame(self) -> None:
+        motion = self.motion_term
+        motion.set_motion_state(
+            motion.motion_ids,
+            torch.zeros_like(motion.time_steps),
+            torch.zeros_like(motion.motion_start_time_steps),
+        )
+
     def __init__(self, env: Any, *, reference_terms: list[str] | tuple[str, ...] | None = None) -> None:
         self.env = env
         self.device = env.device

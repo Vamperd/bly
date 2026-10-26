@@ -20,13 +20,28 @@ class _MotionLib:
 
 class _Motion:
     motion_lib = _MotionLib()
+    motion_ids = torch.tensor([0])
+    time_steps = torch.tensor([5])
+    motion_start_time_steps = torch.tensor([9])
+
+    def set_motion_state(self, motion_ids, time_steps, motion_start_time_steps=None):
+        self.motion_ids = motion_ids
+        self.time_steps = time_steps
+        self.motion_start_time_steps = (
+            motion_start_time_steps
+            if motion_start_time_steps is not None
+            else torch.zeros_like(motion_ids)
+        )
 
 
 class _CommandManager:
+    def __init__(self):
+        self.motion = _Motion()
+
     def get_term(self, name):
         if name != "motion":
             raise KeyError(name)
-        return _Motion()
+        return self.motion
 
 
 class _Space:
@@ -78,6 +93,13 @@ class SonicEnvContractTest(unittest.TestCase):
         env = SonicDaggerEnv(wrapper, reference_terms=("term_b",))
         env.close()
         self.assertTrue(wrapper.env.closed)
+
+    def test_reset_motion_to_first_frame(self):
+        env = SonicDaggerEnv(_Env(), reference_terms=("term_b",))
+        env.reset_motion_to_first_frame()
+        motion = env.motion_term
+        self.assertEqual(motion.time_steps.tolist(), [0])
+        self.assertEqual(motion.motion_start_time_steps.tolist(), [0])
 
     def test_missing_reference_term_is_reported(self):
         with self.assertRaises(KeyError):

@@ -173,11 +173,29 @@ def render(args: argparse.Namespace) -> dict:
                 )
                 for trajectory in trajectories
             ]
+            raw_first_roots = {
+                name: qposes[index][0, :3].tolist()
+                for index, name in enumerate(
+                    ("source", "original_c", "finetuned_c")
+                )
+            }
+            initial_xy_alignment = {}
+            for index, name in ((1, "original_c"), (2, "finetuned_c")):
+                offset = qposes[0][0, :2] - qposes[index][0, :2]
+                qposes[index][:, :2] += offset
+                initial_xy_alignment[name] = offset.tolist()
             lookat_z = float(qposes[0][0, 2])
             padded = {
                 name: frames - trajectory_frames[name]
                 for name in trajectory_frames
             }
+            print(
+                f"[ghost] {motion} raw_first_root "
+                f"source={raw_first_roots['source']} "
+                f"original={raw_first_roots['original_c']} "
+                f"finetuned={raw_first_roots['finetuned_c']}",
+                flush=True,
+            )
             video_path = output / "videos" / f"ghost_source_original_finetuned_{motion}.mp4"
             individual_paths = {
                 "source": output / "videos" / f"source_recorded_{motion}.mp4",
@@ -216,7 +234,10 @@ def render(args: argparse.Namespace) -> dict:
                             frame_index, trajectory_frames[name] - 1
                         )
                         qpos = qposes[qpos_index][policy_index]
-                        layer = draw(qpos, lookat)
+                        policy_lookat = np.asarray(
+                            [qpos[0], qpos[1], qpos[2]]
+                        )
+                        layer = draw(qpos, policy_lookat)
                         policy_text = (
                             f"{name} | {motion} | frame {frame_index}/{frames - 1} | 50 Hz"
                         )
@@ -227,7 +248,7 @@ def render(args: argparse.Namespace) -> dict:
                         writers[name].append_data(
                             label_frame(layer, policy_text)
                         )
-                        segmentation = draw(qpos, lookat, segment=True)
+                        segmentation = draw(qpos, policy_lookat, segment=True)
                         mask = _robot_mask(
                             segmentation, geom_types, plane_type, geom_objtype
                         )
@@ -318,6 +339,8 @@ def render(args: argparse.Namespace) -> dict:
                     "finetuned_trajectory": str(finetuned_path),
                     "trajectory_frames": trajectory_frames,
                     "padded_frames": padded,
+                    "raw_first_roots": raw_first_roots,
+                    "initial_xy_alignment": initial_xy_alignment,
                     "individual_videos": individual_results,
                 }
             )

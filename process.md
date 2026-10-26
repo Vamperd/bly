@@ -778,5 +778,12 @@ fine-tuned C 三个单独 MP4。旧渲染还使用三条轨迹的最小帧数，
 视频会退化成 1 帧、约 30 KB；现改为保留完整 source 帧数，对短轨迹重复最后一帧
 并标注“ended N, holding”，同时记录 `trajectory_frames`/`padded_frames`。source
 首帧若为空白会直接报错。192 步/50 Hz 只有约 3.86 s，不是视频截断。上述均为
-工程/渲染问题，不构成数据或模型质量结论。Windows compile 和 44 tests 通过，
-Ubuntu Isaac/MuJoCo 仍待执行。
+工程/渲染问题，不构成数据或模型质量结论。进一步检查发现 stepwise 在
+`env.reset()` 后没有把 motion command 的 `motion_start_time_steps` 归零，reference
+anchor 使用随机起始帧，policy 在 step 0/3 就 anchor/foot termination；已新增
+`reset_motion_to_first_frame()`（`time_steps`/`motion_start_time_steps` 清零）并加
+回归测试。另外 confirmed 之前播放的是旧 stepwise manifest：original/fine-tuned
+只有 1–23 帧，渲染补帧不能生成真实机器人轨迹；ghost 蓝条来自 original C 的
+segmentation tint，不是背景重复渲染。渲染器现为每个单独视频使用各自 root 相机，
+并在 ghost 中按初始 root xy 对齐后合成，同时记录 `raw_first_roots`。Windows
+compile 和 45 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。
