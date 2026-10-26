@@ -771,6 +771,9 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 `stepwise_recursive_causal` 新增 `--case-index`，stepwise 评估改为每个 motion
 独立进程，避免复用同一 Isaac app 重初始化。随后 case 3 跑完但写 manifest 时因
 `stepwise_recursive_causal.py` 只导入 `datetime` 未导入 `timezone` 再次失败；
-已补 `timezone` 并增加 source 级回归检查。以上均发生在模型推理前/写盘阶段，
-不构成数据或模型质量结论。Windows compile 和 44 tests 通过，Ubuntu
-Isaac/MuJoCo 仍待执行。
+已补 `timezone` 并增加 source 级回归检查。四个 case 最终都完成并渲染，但旧
+ghost MP4 缺少显式 `yuv420p`，播放器出现无法打开/花屏；已改为
+`libx264 + yuv420p + +faststart`，并在同一渲染中额外输出 source、original C、
+fine-tuned C 三个单独 MP4。192 步/50 Hz 只有约 3.86 s，不是视频截断。
+上述均为工程/渲染问题，不构成数据或模型质量结论。Windows compile 和
+44 tests 通过，Ubuntu Isaac/MuJoCo 仍待执行。

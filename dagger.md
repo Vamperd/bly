@@ -429,10 +429,16 @@ done
 
 ```text
 videos/ghost_source_original_finetuned_<motion>.mp4
+videos/source_recorded_<motion>.mp4
+videos/original_c_<motion>.mp4
+videos/finetuned_c_<motion>.mp4
 ```
 
 source opaque，original C 与 fine-tuned C 半透明；同相机；运动学 ghost，
-不是扭矩物理重放。
+不是扭矩物理重放。三个单独视频分别只显示 source、original C、fine-tuned C。
+视频固定 `libx264 + yuv420p` 并启用 `+faststart`；192 步在 50 Hz 下约 3.86 s，
+“很短”是协议长度，不是截断。已有 `ghost/` 目录时不要复用，改用新的
+`ghost_fixed/` 输出目录。
 
 ### 8/16 步开环与 recursive B 的边界
 

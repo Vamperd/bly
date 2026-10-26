@@ -112,6 +112,42 @@ def render(args: argparse.Namespace) -> dict:
             if segment:
                 renderer.disable_segmentation_rendering()
 
+    def writer_for(path: Path):
+        return imageio.get_writer(
+            str(path),
+            fps=FPS,
+            codec="libx264",
+            quality=5,
+            pixelformat="yuv420p",
+            macro_block_size=8,
+            ffmpeg_params=["-movflags", "+faststart"],
+        )
+
+    def label_frame(frame, text: str):
+        result = frame.copy()
+        cv2.rectangle(
+            result, (0, 0), (GHOST_SIZE[0], 74), (25, 25, 25), -1
+        )
+        cv2.putText(
+            result,
+            text,
+            (10, 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (245, 245, 245),
+            1,
+        )
+        cv2.putText(
+            result,
+            "kinematic render | not torque replay",
+            (10, 57),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (230, 230, 230),
+            1,
+        )
+        return result
+
     results = []
     try:
         for case in manifest["cases"]:
@@ -136,10 +172,18 @@ def render(args: argparse.Namespace) -> dict:
             )
             lookat_z = float(qposes[0][0, 2])
             video_path = output / "videos" / f"ghost_source_original_finetuned_{motion}.mp4"
-            writer = imageio.get_writer(
-                str(video_path), fps=FPS, codec="libx264", quality=8,
-                macro_block_size=8,
-            )
+            individual_paths = {
+                "source": output / "videos" / f"source_recorded_{motion}.mp4",
+                "original_c": output / "videos" / f"original_c_{motion}.mp4",
+                "finetuned_c": output / "videos" / f"finetuned_c_{motion}.mp4",
+            }
+            writers = {
+                "ghost": writer_for(video_path),
+                **{
+                    name: writer_for(path)
+                    for name, path in individual_paths.items()
+                },
+            }
             try:
                 for frame_index in range(frames):
                     lookat = np.asarray(
@@ -149,17 +193,30 @@ def render(args: argparse.Namespace) -> dict:
                             lookat_z,
                         ]
                     )
-                    frame = draw(qposes[0][frame_index], lookat)
-                    for qpos, color in (
-                        (qposes[1][frame_index], ORIGINAL_COLOR),
-                        (qposes[2][frame_index], FINETUNED_COLOR),
+                    source_frame = draw(qposes[0][frame_index], lookat)
+                    frame = source_frame.copy()
+                    for name, qpos, color in (
+                        ("original_c", qposes[1][frame_index], ORIGINAL_COLOR),
+                        ("finetuned_c", qposes[2][frame_index], FINETUNED_COLOR),
                     ):
                         layer = draw(qpos, lookat)
+                        writers[name].append_data(
+                            label_frame(
+                                layer,
+                                f"{name} | {motion} | frame {frame_index}/{frames - 1} | 50 Hz",
+                            )
+                        )
                         segmentation = draw(qpos, lookat, segment=True)
                         mask = _robot_mask(
                             segmentation, geom_types, plane_type, geom_objtype
                         )
                         frame = _blend(frame, layer, mask, color)
+                    writers["source"].append_data(
+                        label_frame(
+                            source_frame,
+                            f"source recorded | {motion} | frame {frame_index}/{frames - 1} | 50 Hz",
+                        )
+                    )
                     cv2.rectangle(
                         frame, (0, 0), (GHOST_SIZE[0], 106), (25, 25, 25), -1
                     )
@@ -198,15 +255,32 @@ def render(args: argparse.Namespace) -> dict:
                         (230, 230, 230),
                         1,
                     )
-                    writer.append_data(frame)
+                    writers["ghost"].append_data(frame)
             finally:
-                writer.close()
+                for writer in writers.values():
+                    writer.close()
             rendered_frames, seconds = count_frames_and_secs(str(video_path))
             if rendered_frames != frames or video_path.stat().st_size <= 0:
                 raise RuntimeError(
                     f"ghost video validation failed: {video_path}, "
                     f"frames={rendered_frames}, expected={frames}"
                 )
+            individual_results = {}
+            for name, path in individual_paths.items():
+                individual_frames, individual_seconds = count_frames_and_secs(
+                    str(path)
+                )
+                if individual_frames != frames or path.stat().st_size <= 0:
+                    raise RuntimeError(
+                        f"individual video validation failed: {path}, "
+                        f"frames={individual_frames}, expected={frames}"
+                    )
+                individual_results[name] = {
+                    "path": str(path),
+                    "sha256": _sha256(path),
+                    "frames": int(individual_frames),
+                    "seconds": float(individual_seconds),
+                }
             results.append(
                 {
                     "motion_key": motion,
@@ -217,9 +291,12 @@ def render(args: argparse.Namespace) -> dict:
                     "source_trajectory": str(source_path),
                     "original_trajectory": str(original_path),
                     "finetuned_trajectory": str(finetuned_path),
+                    "individual_videos": individual_results,
                 }
             )
             print(f"[ghost] rendered {motion}: {video_path}", flush=True)
+            for name, item in individual_results.items():
+                print(f"[individual] {motion} {name}: {item['path']}", flush=True)
     finally:
         renderer.close()
 
