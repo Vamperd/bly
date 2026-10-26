@@ -734,6 +734,14 @@ class CvaeStudentAdapter:
             for key, value in metrics.items():
                 aggregates.setdefault(key, []).append(value)
             aggregates.setdefault("gradient_norm", []).append(float(before))
+            if self.train_steps >= 100 and (step + 1) % 100 == 0:
+                print(
+                    f"[dagger] cvae train round={round_index} "
+                    f"step={step + 1}/{self.train_steps} "
+                    f"loss={losses[-1]:.6g} lr={learning_rate:.3g} "
+                    f"source={int(use_source)} grad={float(before):.3g}",
+                    flush=True,
+                )
         self.model.eval()
         self.global_step = int(global_step_offset) + self.train_steps
         return {

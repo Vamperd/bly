@@ -164,7 +164,7 @@ class CvaeDaggerLoop:
             torch.rand(self.num_envs, generator=random) < float(beta)
         ).to(self.env.device)
 
-        for _ in range(self.rollout_steps):
+        for step_index in range(self.rollout_steps):
             student_rollout = self.student.observe()
             teacher_raw = self.action_contract.clip_raw(
                 self.teacher.act(observation, done).detach()
@@ -248,6 +248,12 @@ class CvaeDaggerLoop:
             self.student.after_step(executed_canonical, next_state, next_done)
             observation = next_observation
             done = next_done
+            if (step_index + 1) % 100 == 0 or step_index + 1 == self.rollout_steps:
+                print(
+                    f"[dagger] cvae collect round={round_index} "
+                    f"step={step_index + 1}/{self.rollout_steps}",
+                    flush=True,
+                )
 
         for record in episode_records:
             all_samples.extend(self._make_samples(record))
@@ -377,6 +383,12 @@ class CvaeDaggerLoop:
             )
             observation = next_observation
             done = next_done
+            if (step_index + 1) % 50 == 0 or step_index + 1 == int(steps):
+                print(
+                    f"[dagger] cvae eval round={round_index} "
+                    f"step={step_index + 1}/{int(steps)}",
+                    flush=True,
+                )
         self.student.set_latent_mode("fixed_standard_normal")
         if hasattr(self.student, "end_evaluation"):
             self.student.end_evaluation()
