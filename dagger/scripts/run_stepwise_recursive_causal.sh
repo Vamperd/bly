@@ -10,9 +10,11 @@ PYTHON="${PYTHON:-$HOME/bly/sonic-repro/.venv-sonic/bin/python}"
 export PYTHONPATH="$DAGGER_ROOT/src:$STATE_ACTION_CVAE_ROOT/src:$SONIC_REPO_ROOT:$SONIC_KIT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export SONIC_REPO_ROOT STATE_ACTION_CVAE_ROOT SONIC_KIT_ROOT
 
-CONFIG="${1:?usage: $0 CONFIG OUTPUT_RUN}"
-OUTPUT_RUN="${2:?usage: $0 CONFIG OUTPUT_RUN}"
+CONFIG="${1:?usage: $0 CONFIG OUTPUT_RUN [EXTRA_ARGS...]}"
+OUTPUT_RUN="${2:?usage: $0 CONFIG OUTPUT_RUN [EXTRA_ARGS...]}"
+shift 2
 
 "$PYTHON" -m dagger.stepwise_recursive_causal \
   --config "$CONFIG" \
-  --output-run "$OUTPUT_RUN"
+  --output-run "$OUTPUT_RUN" \
+  "$@"

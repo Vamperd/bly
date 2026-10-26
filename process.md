@@ -766,6 +766,9 @@ init。该路线与训练门禁的 env-reset live eval 分开，也不是 `recur
 `Simulation context already exists`：`SonicDaggerEnv` 没有 `close()`；即使补了
 直接委托，SONIC 的 `ManagerEnvWrapper` 本身也没有 `close()`，真正的
 `ManagerBasedRLEnv.close()` 仍未被调用。已让包装层先取 `env.close`，缺失时再
-下钻到 `env.env.close`，并加两层回归测试。以上均发生在模型推理前/写盘阶段，
+下钻到 `env.env.close`，并加两层回归测试。修复后第一个 case 完成，但同一 Kit
+进程内销毁并重建 `SimulationContext` 在第二个 case 卡住超过 3 分钟；因此
+`stepwise_recursive_causal` 新增 `--case-index`，stepwise 评估改为每个 motion
+独立进程，避免复用同一 Isaac app 重初始化。以上均发生在模型推理前/写盘阶段，
 不构成数据或模型质量结论。Windows compile 和 43 tests 通过，Ubuntu
 Isaac/MuJoCo 仍待执行。

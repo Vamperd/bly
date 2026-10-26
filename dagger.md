@@ -387,29 +387,39 @@ bash scripts/run_stepwise_prepare.sh "$STEPWISE_PREP" \
   big_heavy_one_hand_front_low_to_front_medium_R_001__A526
 ```
 
-再运行 original C 与 fine-tuned C：
+再运行 original C 与 fine-tuned C。Isaac 在同一个 Kit 进程内销毁并重建
+`SimulationContext` 会卡住，因此每个 motion 必须使用独立进程；`--case-index`
+对应 cases manifest 的顺序：
 
 ```bash
 export SONIC_KIT_ROOT=/home/helloworld/bly/sonic-repro-kit
 export STEPWISE_CASES_MANIFEST="$STEPWISE_PREP/manifests/cases.json"
 export CVAE_FINETUNED_CHECKPOINT=/home/helloworld/bly/runs/<4m_run>/checkpoints/best_teacher_rmse.pt
-STEPWISE_OUT=/home/helloworld/bly/runs/cvae_kl2_4m_stepwise_$(date +%Y%m%d_%H%M%S)
 
-bash scripts/run_stepwise_recursive_causal.sh \
-  configs/stepwise_recursive_causal.yaml "$STEPWISE_OUT"
+declare -a STEPWISE_OUTS
+for index in 0 1 2 3; do
+  STEPWISE_OUTS[$index]=/home/helloworld/bly/runs/cvae_kl2_4m_stepwise_case${index}_$(date +%Y%m%d_%H%M%S)
+  bash scripts/run_stepwise_recursive_causal.sh \
+    configs/stepwise_recursive_causal.yaml "${STEPWISE_OUTS[$index]}" \
+    --case-index "$index"
+done
 ```
 
-输出包含 source、original C、fine-tuned C 的 193 帧轨迹、fall frame、State/Root/
-Action 指标，以及 `manifests/stepwise_recursive_causal.json`。source 是 recorded
-HDF，不是 live teacher。
+每个 case 输出 source、original C、fine-tuned C 的 193 帧轨迹、fall frame、
+State/Root/Action 指标，以及该 case 的 `manifests/stepwise_recursive_causal.json`。
+source 是 recorded HDF，不是 live teacher。
 
 ### 三层 ghost 视频
 
+对每个 case 分别渲染：
+
 ```bash
-python ../sonic-repro-kit/render_three_way_ghost.py \
-  --manifest "$STEPWISE_OUT/manifests/stepwise_recursive_causal.json" \
-  --model /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml \
-  --output-run "$STEPWISE_OUT/ghost"
+for index in 0 1 2 3; do
+  python ../sonic-repro-kit/render_three_way_ghost.py \
+    --manifest "${STEPWISE_OUTS[$index]}/manifests/stepwise_recursive_causal.json" \
+    --model /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml \
+    --output-run "${STEPWISE_OUTS[$index]}/ghost"
+done
 ```
 
 渲染脚本固定为 ghost 布局，没有 `--layout` 参数；`--output-run` 必须是新且

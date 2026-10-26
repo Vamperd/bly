@@ -269,8 +269,24 @@ def run(args: argparse.Namespace) -> dict:
         ),
     }
 
+    if args.case_index is None and len(cases["cases"]) > 1:
+        raise ValueError(
+            "multiple cases require one process per motion; pass --case-index "
+            "for each run (Isaac cannot recreate SimulationContext in-process)"
+        )
+    selected_cases = (
+        [int(args.case_index)]
+        if args.case_index is not None
+        else list(range(len(cases["cases"])))
+    )
+    if any(index < 0 or index >= len(cases["cases"]) for index in selected_cases):
+        raise ValueError(
+            f"--case-index out of range for {len(cases['cases'])} cases: "
+            f"{selected_cases}"
+        )
     manifest_cases = []
-    for case_index, case in enumerate(cases["cases"]):
+    for case_index in selected_cases:
+        case = cases["cases"][case_index]
         motion_key = str(case["motion_key"])
         exact_init = Path(case["exact_init"]).expanduser().resolve()
         source = _load_source(case)
@@ -351,6 +367,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-run", type=Path, required=True)
+    parser.add_argument("--case-index", type=int)
     args = parser.parse_args(argv)
     run(args)
     return 0
