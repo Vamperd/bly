@@ -445,7 +445,7 @@ videos/finetuned_c_<motion>.mp4
 
 source opaque，original C 与 fine-tuned C 半透明；ghost 使用 source 相机，
 三个单独视频各自跟随自己的 root 相机。渲染前会把 original/fine-tuned 的初始
-root xy 对齐到 source（只影响可视化，不修改轨迹文件），并在
+root xyz 对齐到 source（只影响可视化，不修改轨迹文件），并在
 `raw_first_roots` 记录对齐前坐标；若 policy 在第一步终止，stepwise 必须先修好，
 不能只靠渲染补帧。
 视频固定 `libx264 + yuv420p` 并启用 `+faststart`；192 步在 50 Hz 下约 3.86 s，
@@ -1253,6 +1253,15 @@ bash scripts/run_dagger_auto.sh cvae-kl2-pilot-dagger-v2-2m
 对应配置 `cvae_kl2_pilot_dagger_v2_2m.yaml`：2 env、12×2000、
 teacher_episode_period=2（每轮 1 teacher / 1 student）、prefix32/block16。
 若实测单轮明显超过约 15 分钟，可把 `rounds` 降到 9–10；若明显更快可增加轮数。
+
+2-motion、约 2h 的 pilot：
+
+```bash
+bash scripts/run_dagger_auto.sh cvae-kl2-pilot-dagger-v2-2m-2h
+```
+
+对应配置 `cvae_kl2_pilot_dagger_v2_2m_2h.yaml`：2 env、8×2000 = 16k
+optimizer steps，teacher_episode_period=2，prefix32/block16，source mix 0.4。
 
 对应配置：
 

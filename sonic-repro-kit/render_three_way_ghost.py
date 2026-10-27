@@ -187,11 +187,11 @@ def render(args: argparse.Namespace) -> dict:
                     ("source", "original_c", "finetuned_c")
                 )
             }
-            initial_xy_alignment = {}
+            initial_xyz_alignment = {}
             for index, name in ((1, "original_c"), (2, "finetuned_c")):
-                offset = qposes[0][0, :2] - qposes[index][0, :2]
-                qposes[index][:, :2] += offset
-                initial_xy_alignment[name] = offset.tolist()
+                offset = qposes[0][0, :3] - qposes[index][0, :3]
+                qposes[index][:, :3] += offset
+                initial_xyz_alignment[name] = offset.tolist()
             lookat_z = float(qposes[0][0, 2])
             padded = {
                 name: frames - trajectory_frames[name]
@@ -352,7 +352,7 @@ def render(args: argparse.Namespace) -> dict:
                     "trajectory_frames": trajectory_frames,
                     "padded_frames": padded,
                     "raw_first_roots": raw_first_roots,
-                    "initial_xy_alignment": initial_xy_alignment,
+                    "initial_xyz_alignment": initial_xyz_alignment,
                     "individual_videos": individual_results,
                 }
             )

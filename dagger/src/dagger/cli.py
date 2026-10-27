@@ -1363,6 +1363,13 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
     ) // train_chunk_steps
     eval_steps = int(config.dagger.get("eval_steps", 192))
     rounds_per_process = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
+    if rounds_per_process != 1:
+        print(
+            "[dagger] forcing one round per process for CVAE KL2; "
+            "use run_dagger_auto.sh for multi-round execution",
+            flush=True,
+        )
+        rounds_per_process = 1
     resume = bool(os.environ.get("DAGGER_RESUME_RUN", "").strip())
     completed, metrics = _cvae_kl2_resume_state(run_dir) if resume else ([], [])
     start_round = len(completed)
@@ -1388,6 +1395,12 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         total_rounds
         if rounds_per_process <= 0
         else min(total_rounds, start_round + rounds_per_process)
+    )
+    print(
+        f"[dagger] cvae shard start_round={start_round} "
+        f"end_round={end_round} total_rounds={total_rounds} "
+        f"rounds_per_process={rounds_per_process}",
+        flush=True,
     )
     dataset = (
         CvaeDaggerDataset.load_rounds([item[1] for item in completed])

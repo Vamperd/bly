@@ -785,7 +785,7 @@ anchor 使用随机起始帧，policy 在 step 0/3 就 anchor/foot termination�
 回归测试。另外 confirmed 之前播放的是旧 stepwise manifest：original/fine-tuned
 只有 1–23 帧，渲染补帧不能生成真实机器人轨迹；ghost 蓝条来自 original C 的
 segmentation tint，不是背景重复渲染。渲染器现为每个单独视频使用各自 root 相机，
-并在 ghost 中按初始 root xy 对齐后合成，同时记录 `raw_first_roots`。motion reset
+并在 ghost 中按初始 root xyz 对齐后合成，同时记录 `raw_first_roots`。motion reset
 后又暴露 SONIC `set_motion_state` 把 `motion_num_steps` 设为 Int32、而原 buffer
 是 Long，首次 termination reset 会触发 dtype RuntimeError；wrapper 现把该字段
 cast 成 Int32，并在 fall 时打印实际 termination terms。Ubuntu case0 修复后
@@ -820,3 +820,9 @@ C Action，每个执行步都在真实 student state 上查询 teacher 标签。
 Windows `test_episode_mix_uses_teacher_prefix_and_student_blocks` 通过。
 新增 2-motion 约 3h pilot：`cvae_kl2_pilot_dagger_v2_2m.yaml` +
 `cvae_kl2_motion_manifest_2m.json`，2 env、12×2000、每轮 1 teacher/1 student。
+随后观察到 round0 完成后再次进入 `create_manager_env` 并长时间无日志；判断为
+同一 Python/Isaac 进程内重建 env 的挂起，而旧 auto 只处理进程退出、不能处理
+进程不退出。现在 CVAE KL2 在 CLI 层强制一轮一进程；`run_dagger_auto.sh` 默认
+每 shard 2400s 超时并在 shard 间等待 5s，超时后由 auto 重试/resume。Ctrl-C
+后进入 round1 说明 round0 已完成且 auto 的 resume 生效；新的超时保护需在重启
+auto 后生效。

@@ -13,6 +13,7 @@ case "$MODE" in
   cvae-kl2-pilot-intensive-8h) CONFIG_MODE="cvae_kl2_pilot_intensive_8h" ;;
   cvae-kl2-pilot-dagger-v2) CONFIG_MODE="cvae_kl2_pilot_dagger_v2" ;;
   cvae-kl2-pilot-dagger-v2-2m) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m" ;;
+  cvae-kl2-pilot-dagger-v2-2m-2h) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m_2h" ;;
   cvae-kl2-formal) CONFIG_MODE="cvae_kl2_formal" ;;
   mlp-smoke) CONFIG_MODE="mlp_smoke" ;;
   mlp-pilot) CONFIG_MODE="mlp_pilot" ;;
@@ -24,7 +25,7 @@ case "$MODE" in
   mlp-dynamic2) CONFIG_MODE="mlp_dynamic2" ;;
   mlp-render) CONFIG_MODE="mlp_render" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-formal|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-render" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-render" >&2
   exit 2
     ;;
 esac
@@ -36,7 +37,13 @@ SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$HOME/bly/runs}"
 STATE_ACTION_CVAE_ROOT="${STATE_ACTION_CVAE_ROOT:-$HOME/bly/state-action-cvae}"
 DAGGER_MOTION_FILE="${DAGGER_MOTION_FILE:-$SONIC_REPO_ROOT/data/motion_lib_bones_seed/robot_filtered}"
 DAGGER_RESUME_RUN="${DAGGER_RESUME_RUN:-}"
-DAGGER_ROUNDS_PER_PROCESS="${DAGGER_ROUNDS_PER_PROCESS:-0}"
+if [[ "$MODE" == cvae-kl2-* ]]; then
+  # CVAE KL2 must not recreate an Isaac env inside one process; one round per
+  # shard is enforced. Use run_dagger_auto.sh for multi-round training.
+  DAGGER_ROUNDS_PER_PROCESS="${DAGGER_ROUNDS_PER_PROCESS:-1}"
+else
+  DAGGER_ROUNDS_PER_PROCESS="${DAGGER_ROUNDS_PER_PROCESS:-0}"
+fi
 DAGGER_RENDER_CHECKPOINT="${DAGGER_RENDER_CHECKPOINT:-}"
 DAGGER_RENDER_STEPS="${DAGGER_RENDER_STEPS:-192}"
 DAGGER_RENDER_MOTION_KEY="${DAGGER_RENDER_MOTION_KEY:-}"
@@ -123,7 +130,7 @@ if [[ "$MODE" == cvae-smoke || "$MODE" == cvae-pilot ]]; then
   }
 fi
 
-if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-kl2-pilot-intensive || "$MODE" == cvae-kl2-pilot-intensive-8h || "$MODE" == cvae-kl2-pilot-dagger-v2 || "$MODE" == cvae-kl2-pilot-dagger-v2-2m || "$MODE" == cvae-kl2-formal ]]; then
+if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-kl2-pilot-intensive || "$MODE" == cvae-kl2-pilot-intensive-8h || "$MODE" == cvae-kl2-pilot-dagger-v2 || "$MODE" == cvae-kl2-pilot-dagger-v2-2m || "$MODE" == cvae-kl2-pilot-dagger-v2-2m-2h || "$MODE" == cvae-kl2-formal ]]; then
   export CVAE_KL2_MOTION_FILE="${CVAE_KL2_MOTION_FILE:-/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered}"
   test -d "$CVAE_KL2_MOTION_FILE" || {
     echo "CVAE KL2 motion directory is missing: $CVAE_KL2_MOTION_FILE" >&2

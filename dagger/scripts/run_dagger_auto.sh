@@ -4,9 +4,9 @@ set -u
 
 MODE="${1:-mlp-pilot}"
 case "$MODE" in
-  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-formal) ;;
+  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal) ;;
   *)
-    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-formal" >&2
+    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal" >&2
     exit 2
     ;;
 esac
@@ -29,6 +29,13 @@ else
   MAX_RETRIES=3
 fi
 MAX_SHARDS="${DAGGER_MAX_SHARDS:-20}"
+if [[ -n "${DAGGER_SHARD_TIMEOUT:-}" ]]; then
+  SHARD_TIMEOUT="$DAGGER_SHARD_TIMEOUT"
+elif [[ "$MODE" == cvae-kl2-* ]]; then
+  SHARD_TIMEOUT="${DAGGER_CVAE_SHARD_TIMEOUT:-2400}"
+else
+  SHARD_TIMEOUT=0
+fi
 RUN_PREFIX="dagger_${MODE//-/_}"
 RUN="${DAGGER_RESUME_RUN:-}"
 
@@ -51,8 +58,14 @@ for ((shard = 1; shard <= MAX_SHARDS; shard++)); do
   fi
   export DAGGER_ROUNDS_PER_PROCESS="$SHARD_ROUNDS"
 
-  bash "$DAGGER_ROOT/scripts/run_dagger.sh" "$MODE"
-  STATUS=$?
+  if [[ "$SHARD_TIMEOUT" -gt 0 ]]; then
+    timeout --signal=INT --kill-after=60 "$SHARD_TIMEOUT" \
+      bash "$DAGGER_ROOT/scripts/run_dagger.sh" "$MODE"
+    STATUS=$?
+  else
+    bash "$DAGGER_ROOT/scripts/run_dagger.sh" "$MODE"
+    STATUS=$?
+  fi
 
   if [[ -z "$RUN" ]]; then
     RUN="$(ls -dt "$SONIC_RUNS_ROOT"/${RUN_PREFIX}_* 2>/dev/null | head -n 1)"
@@ -93,6 +106,9 @@ for ((shard = 1; shard <= MAX_SHARDS; shard++)); do
   fi
 
   echo "[auto] status=$STATUS completed_rounds=$COMPLETED run=$RUN"
+  # Give the previous Kit/Isaac process time to release the GPU and files
+  # before the next shard is launched.
+  sleep "${DAGGER_SHARD_COOLDOWN:-5}"
 
   if [[ "${DAGGER_STOP_ON_CRASH:-0}" == "1" && "$STATUS" -ne 0 ]]; then
     echo "[auto] stopping: shard exited with status=$STATUS and DAGGER_STOP_ON_CRASH=1" >&2
