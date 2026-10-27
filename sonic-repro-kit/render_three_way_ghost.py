@@ -187,6 +187,17 @@ def render(args: argparse.Namespace) -> dict:
                     ("source", "original_c", "finetuned_c")
                 )
             }
+            root_z_ranges = {
+                name: {
+                    "first": float(qposes[index][0, 2]),
+                    "min": float(qposes[index][:, 2].min()),
+                    "max": float(qposes[index][:, 2].max()),
+                    "last": float(qposes[index][-1, 2]),
+                }
+                for index, name in enumerate(
+                    ("source", "original_c", "finetuned_c")
+                )
+            }
             initial_xyz_alignment = {}
             for index, name in ((1, "original_c"), (2, "finetuned_c")):
                 offset = qposes[0][0, :3] - qposes[index][0, :3]
@@ -201,7 +212,8 @@ def render(args: argparse.Namespace) -> dict:
                 f"[ghost] {motion} raw_first_root "
                 f"source={raw_first_roots['source']} "
                 f"original={raw_first_roots['original_c']} "
-                f"finetuned={raw_first_roots['finetuned_c']}",
+                f"finetuned={raw_first_roots['finetuned_c']} "
+                f"root_z={root_z_ranges}",
                 flush=True,
             )
             video_path = output / "videos" / f"ghost_source_original_finetuned_{motion}.mp4"
@@ -352,6 +364,7 @@ def render(args: argparse.Namespace) -> dict:
                     "trajectory_frames": trajectory_frames,
                     "padded_frames": padded,
                     "raw_first_roots": raw_first_roots,
+                    "root_z_ranges": root_z_ranges,
                     "initial_xyz_alignment": initial_xyz_alignment,
                     "individual_videos": individual_results,
                 }
