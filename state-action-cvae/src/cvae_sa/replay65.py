@@ -35,7 +35,12 @@ from .posterior_h50_action_replay_exact_init import (
     _raw_from_processed, _trajectory_metrics, _trajectory_region, _write_error_svg,
     _write_exact_initialization, rotate_body_to_world,
 )
-from .posterior_t64_protocol import PHYSICAL_MASK_NAMES, make_physical_masks
+from .posterior_t64_protocol import (
+    DIAGNOSTIC_MASK_NAMES,
+    PHYSICAL_MASK_NAMES,
+    make_diagnostic_masks,
+    make_physical_masks,
+)
 from .state_mask_eval import reconstruct_root_trajectory
 from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
 
@@ -106,10 +111,14 @@ def execution_actions(original_raw, original_canonical, predicted, mask, nominal
         "recorded_mapping_max_rad": float(np.abs(baseline - original_canonical).max())}
 
 
-def predict(model, cpu, route, mask_seed, sample_seed, sample_index=0):
+def predict(model, cpu, route, mask_seed, sample_seed, sample_index=0, mask_name=None):
     """Only truth returned to the evaluator; B/C model inputs have hidden values zeroed."""
     device = next(model.parameters()).device
-    sm, am, names = make_physical_masks(cpu, mask_seed)
+    if mask_name in DIAGNOSTIC_MASK_NAMES:
+        sm, am = make_diagnostic_masks(cpu, mask_name)
+        names = [mask_name]
+    else:
+        sm, am, names = make_physical_masks(cpu, mask_seed)
     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in cpu.items()}
     sm, am = sm.to(device), am.to(device)
     if route != "A":
@@ -406,7 +415,10 @@ def prepare_window(args, dataset, fixtures, model, index, run, norm, rows, captu
     chunk_ids = ([index] * chunks if single_window else
                  chunk_indices(dataset, index, start, chunks))
     entries = []
-    for slot, name in enumerate(PHYSICAL_MASK_NAMES):
+    diagnostic_only = any(name in DIAGNOSTIC_MASK_NAMES for name in args.masks)
+    mask_names = ([name for name in args.masks if name in DIAGNOSTIC_MASK_NAMES]
+                  if diagnostic_only else list(PHYSICAL_MASK_NAMES))
+    for slot, name in enumerate(mask_names):
         parts = {key: [] for key in ("ps", "pa", "sm", "am", "truth_n", "truth_an", "eps_g", "eps_l")}
         chunk_rows = []
         for k, ci in enumerate(chunk_ids):
@@ -440,7 +452,10 @@ def prepare_window(args, dataset, fixtures, model, index, run, norm, rows, captu
                 elif continuation_state_only:
                     sample["action_before_window"] = torch.zeros_like(sample["action_before_window"])
             cpu = default_collate([sample])
-            ps, pa, sm, am, actual_name, eps = predict(model, cpu, args.route, args.mask_seed, args.sample_seed, args.sample_index)
+            ps, pa, sm, am, actual_name, eps = predict(
+                model, cpu, args.route, args.mask_seed, args.sample_seed,
+                args.sample_index, mask_name=name,
+            )
             assert actual_name == name
             for key, value in (("ps", ps), ("pa", pa), ("sm", sm), ("am", am),
                                ("truth_n", truth_n.copy()), ("truth_an", truth_an.copy())):
@@ -1495,7 +1510,10 @@ def main(argv=None):
             "after the first, provide State only and zero Action/previous-Action inputs"
         ),
     )
-    p.add_argument("--masks",nargs="+",choices=PHYSICAL_MASK_NAMES,default=list(REPRESENTATIVES))
+    p.add_argument("--masks",nargs="+",
+                   choices=tuple(PHYSICAL_MASK_NAMES) + tuple(DIAGNOSTIC_MASK_NAMES),
+                   default=list(REPRESENTATIVES),
+                   help="physical masks plus full_state/full_both diagnostic masks")
     p.add_argument("--mask-seed",type=int,help="default: checkpoint training fixture seed (A legacy: 20260920)")
     p.add_argument("--sample-seed",type=int,default=20260923)
     p.add_argument("--sample-index",type=int,default=0)

@@ -136,7 +136,7 @@ if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-
     echo "CVAE KL2 motion directory is missing: $CVAE_KL2_MOTION_FILE" >&2
     exit 2
   }
-  if [[ "$MODE" == "cvae-kl2-pilot-dagger-v2-2m" ]]; then
+  if [[ "$MODE" == cvae-kl2-pilot-dagger-v2-2m* ]]; then
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_2m.json}"
   else
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest.json}"
