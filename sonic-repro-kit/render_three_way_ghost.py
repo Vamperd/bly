@@ -98,6 +98,7 @@ def render(args: argparse.Namespace) -> dict:
     geom_objtype = int(mujoco.mjtObj.mjOBJ_GEOM)
     geom_types = np.asarray(model.geom_type)
     geom_body_ids = np.asarray(model.geom_bodyid)
+    robot_geom_ids = np.flatnonzero(geom_body_ids != 0)
 
     def draw(qpos, lookat, segment=False):
         data.qpos[:] = qpos
@@ -112,6 +113,17 @@ def render(args: argparse.Namespace) -> dict:
         finally:
             if segment:
                 renderer.disable_segmentation_rendering()
+
+    def lowest_robot_z(qpos):
+        data.qpos[:] = qpos
+        data.qvel[:] = 0.0
+        mujoco.mj_forward(model, data)
+        return float(data.geom_xpos[robot_geom_ids, 2].min())
+
+    def align_ground(qpos, reference_z):
+        result = np.asarray(qpos, dtype=np.float64).copy()
+        result[2] += reference_z - lowest_robot_z(result)
+        return result
 
     def writer_for(path: Path):
         return imageio.get_writer(
@@ -232,14 +244,16 @@ def render(args: argparse.Namespace) -> dict:
             try:
                 for frame_index in range(frames):
                     source_index = min(frame_index, trajectory_frames["source"] - 1)
+                    source_qpos = qposes[0][source_index]
+                    source_ground_z = lowest_robot_z(source_qpos)
                     lookat = np.asarray(
                         [
-                            qposes[0][source_index, 0],
-                            qposes[0][source_index, 1],
+                            source_qpos[0],
+                            source_qpos[1],
                             lookat_z,
                         ]
                     )
-                    source_frame = draw(qposes[0][source_index], lookat)
+                    source_frame = draw(source_qpos, lookat)
                     if np.ptp(source_frame) < 2:
                         raise RuntimeError(
                             f"rendered source frame is blank for {motion} at "
@@ -253,7 +267,9 @@ def render(args: argparse.Namespace) -> dict:
                         policy_index = min(
                             frame_index, trajectory_frames[name] - 1
                         )
-                        qpos = qposes[qpos_index][policy_index]
+                        qpos = align_ground(
+                            qposes[qpos_index][policy_index], source_ground_z
+                        )
                         policy_lookat = np.asarray(
                             [qpos[0], qpos[1], qpos[2]]
                         )
@@ -384,6 +400,7 @@ def render(args: argparse.Namespace) -> dict:
         "profile": profile_details,
         "ghost_alpha": GHOST_ALPHA,
         "layout": "source opaque, original C and fine-tuned C translucent",
+        "vertical_alignment": "policy lowest robot geom z follows source",
         "videos": results,
     }
     write_json_atomic(output / "manifests" / "three_way_ghost.json", result)

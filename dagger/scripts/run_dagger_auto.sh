@@ -106,6 +106,12 @@ for ((shard = 1; shard <= MAX_SHARDS; shard++)); do
   fi
 
   echo "[auto] status=$STATUS completed_rounds=$COMPLETED run=$RUN"
+
+  if [[ "$STATUS" -eq 2 ]]; then
+    echo "[auto] stopping: configuration/lock/process conflict (status=2)" >&2
+    exit 2
+  fi
+
   # Give the previous Kit/Isaac process time to release the GPU and files
   # before the next shard is launched.
   sleep "${DAGGER_SHARD_COOLDOWN:-5}"
