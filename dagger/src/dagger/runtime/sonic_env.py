@@ -122,12 +122,25 @@ class SonicDaggerEnv:
         tokenizer = observation.get("tokenizer")
         if tokenizer is None or tokenizer.ndim != 2:
             raise ValueError("SONIC tokenizer observation must be a flattened [B,D] tensor")
-        selected = [
-            tokenizer[:, self._reference_slices[name][0] : self._reference_slices[name][1]]
-            for name in self.reference_terms
-        ]
+        selected = []
+        selected_sequence = []
+        token_dims = self.config.obs.group_obs_dims["tokenizer"]
+        for name in self.reference_terms:
+            flat_value = tokenizer[
+                :, self._reference_slices[name][0] : self._reference_slices[name][1]
+            ]
+            shape = tuple(token_dims[name])
+            value = flat_value
+            if len(shape) >= 2 and int(shape[0]) == 10:
+                value = value.reshape(value.shape[0], 10, -1)
+                selected_sequence.append(value)
+            selected.append(flat_value)
         result = dict(observation)
         result["student_reference_features"] = torch.cat(selected, dim=-1)
+        if len(selected_sequence) >= 2:
+            first, second = selected_sequence[:2]
+            if first.ndim == 3 and second.ndim == 3:
+                result["student_reference_future"] = torch.cat((first, second), dim=-1)
         return result
 
     def reset(self):

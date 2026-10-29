@@ -78,6 +78,33 @@ class _Wrapper:
 
 
 class SonicEnvContractTest(unittest.TestCase):
+    def test_reference_sequence_is_exposed_as_ten_by_sixty_four(self):
+        class SequenceObsConfig:
+            group_obs_names = {
+                "tokenizer": ["joint_pos_vel", "root_orientation"]
+            }
+            group_obs_dims = {
+                "tokenizer": {
+                    "joint_pos_vel": (10, 58),
+                    "root_orientation": (10, 6),
+                }
+            }
+
+        class SequenceConfig:
+            obs = SequenceObsConfig()
+
+        class SequenceEnv(_Env):
+            config = SequenceConfig()
+
+        env = SonicDaggerEnv(
+            SequenceEnv(),
+            reference_terms=("joint_pos_vel", "root_orientation"),
+        )
+        tokenizer = torch.arange(10 * 64, dtype=torch.float32).reshape(1, -1)
+        augmented = env._augment({"tokenizer": tokenizer})
+        self.assertEqual(tuple(augmented["student_reference_future"].shape), (1, 10, 64))
+        self.assertTrue(torch.equal(augmented["student_reference_future"][0, 0, :58], tokenizer[0, :58]))
+
     def test_reference_term_selection_and_motion_keys(self):
         env = SonicDaggerEnv(_Env(), reference_terms=("term_b",))
         tokenizer = torch.arange(5, dtype=torch.float32).reshape(1, 5)

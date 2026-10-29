@@ -13,6 +13,8 @@ def main() -> int:
             "smoke-train", "train", "evaluate", "sample", "summarize-overfit",
             "analyze-overfit", "diagnose-overfit-fixture", "summarize-single-tasks",
             "posterior-capacity",
+            "sonic-causal-train",
+            "sonic-causal-smoke",
         ),
     )
     args, remainder = parser.parse_known_args()
@@ -33,6 +35,19 @@ def main() -> int:
         from .overfit_single_report import main as command_main
     elif args.command == "posterior-capacity":
         from .posterior_capacity import main as command_main
+    elif args.command in {"sonic-causal-train", "sonic-causal-smoke"}:
+        from .sonic_causal_train import main as command_main
+        if args.command == "sonic-causal-smoke" and "--config" not in sys.argv:
+            sys.argv.extend(
+                [
+                    "--config",
+                    str(
+                        __import__("pathlib").Path(__file__).resolve().parents[2]
+                        / "configs"
+                        / "sonic_causal_c_smoke.json"
+                    ),
+                ]
+            )
     elif args.command in {"smoke-train", "train"}:
         from .trainer import main as command_main
 

@@ -13,12 +13,21 @@ posterior-mean 与部署路径。回放报告区分 `engineering_complete`、`ba
 root position、body MPJPE 相对同窗口原始回放不得超过 1.2 倍，否则标记
 `FAIL_RELATIVE_TO_BASELINE`。
 
+## 新增：sonic-10history-reference-cvae-v1
+
+该模型是独立于65-token合同的新路线，不加载旧65-token checkpoint。输入为
+`state_history[10,70]`、`action_history[10,29]`、SONIC `reference_future[10,64]`，
+输出一个canonical Action[29]，运行时再通过SONIC Action contract转为raw Action。
+逻辑序列为 `H[-9..0] + R[+0..9] + Q`；C阶段只mask当前目标Action，训练posterior Action、
+standard-normal Action和KL，不再训练future State或64步Action序列。Physics v5是该路线唯一允许的
+新数据源；episode 起点用 SONIC reset buffer 的重复观测并显式记录 history validity mask，旧65-token/T64路线保持只读兼容。
+
 ## 1. 数据、编码与解码
 
 数据为 `states[T+1,70]`、`actions[T,29]`，语义为
 `State_t + Action_t → State_(t+1)`。70 个 State 分量依次为关节位置29、关节速度29、
 基座线速度3、角速度3、重力方向3、高度1、接触2；Action 为 canonical 关节目标29。
-当前模型不使用 RobotInfo、reference、motion ID 等元数据；身份字段只供采样和诊断。
+旧65-token模型不使用 RobotInfo、reference、motion ID 等元数据；身份字段只供采样和诊断。
 
 完整输入 `X[B,65,99]=[State_t(70),Action_t(29)]`。终点 `Action_64=0`、
 有效性为 false，不输出或计入 Action loss；State_64 保留。

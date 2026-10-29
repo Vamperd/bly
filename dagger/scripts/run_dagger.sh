@@ -15,6 +15,8 @@ case "$MODE" in
   cvae-kl2-pilot-dagger-v2-2m) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m" ;;
   cvae-kl2-pilot-dagger-v2-2m-2h) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m_2h" ;;
   cvae-kl2-formal) CONFIG_MODE="cvae_kl2_formal" ;;
+  sonic-causal-smoke) CONFIG_MODE="sonic_causal_smoke" ;;
+  sonic-causal-pilot) CONFIG_MODE="sonic_causal_pilot" ;;
   mlp-smoke) CONFIG_MODE="mlp_smoke" ;;
   mlp-pilot) CONFIG_MODE="mlp_pilot" ;;
   mlp-debug) CONFIG_MODE="mlp_debug" ;;
@@ -25,7 +27,7 @@ case "$MODE" in
   mlp-dynamic2) CONFIG_MODE="mlp_dynamic2" ;;
   mlp-render) CONFIG_MODE="mlp_render" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-render" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-render" >&2
   exit 2
     ;;
 esac
@@ -157,6 +159,15 @@ if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-
       exit 2
     }
   fi
+fi
+
+if [[ "$MODE" == sonic-causal-smoke || "$MODE" == sonic-causal-pilot ]]; then
+  : "${SONIC_CAUSAL_STUDENT_CHECKPOINT:=${CVAE_STUDENT_CHECKPOINT:-}}"
+  export SONIC_CAUSAL_STUDENT_CHECKPOINT
+  test -s "$SONIC_CAUSAL_STUDENT_CHECKPOINT" || {
+    echo "SONIC_CAUSAL_STUDENT_CHECKPOINT is missing or empty" >&2
+    exit 2
+  }
 fi
 
 LOG_PATH="$SONIC_RUNS_ROOT/dagger_${MODE}_command_$(date +%Y%m%d_%H%M%S).log"

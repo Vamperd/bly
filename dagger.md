@@ -1344,3 +1344,28 @@ source_mix: 0.4
 | CVAE KL2 192-step survival | 实时 Isaac 闭环诊断；待 Ubuntu |
 | standard-normal 质量 | 待 pilot 评估 |
 | teacher action information contract | 待多 motion/reference probe |
+
+## sonic-10history-reference-cvae-v1：10-step SONIC 序列化 CVAE（新增）
+
+该路线与旧 65-token/T64 CVAE、旧 KL2 DAgger 只读并行存在，不迁移旧 checkpoint。
+新模型合同为：
+
+```text
+state_history   [B,10,70]
+action_history  [B,10,29]
+reference       [B,10,64]  # joint_pos29 + joint_vel29 + root_orientation6
+output          [B,29]     # canonical Action，运行时转 raw SONIC Action
+```
+
+逻辑输入序列为 `H[-9..0] + R[+0..9] + Q`，输出一个当前 Action；不再输出 64 个未来 Action 或未来 State。
+Physics v5 reference-aware dataset 是唯一新数据源，C 阶段只 mask 当前目标 Action，训练 posterior Action、standard-normal Action 和 KL。
+
+新增入口：
+
+```bash
+python -m cvae_sa.sonic_causal_train --config configs/sonic_causal_c_smoke.json
+bash scripts/run_dagger.sh sonic-causal-smoke
+bash scripts/run_dagger.sh sonic-causal-pilot
+```
+
+DAgger 新路线是单步 teacher/student mixture；评估范围是 same-motion teacher imitation，不能解释为 new-motion 泛化。

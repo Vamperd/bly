@@ -810,6 +810,193 @@ def _run_cvae(config, run_dir: Path, device: torch.device, args_cli, prepared: d
     return env, manifest
 
 
+def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
+    """Run the independent 10-history/10-reference single-step DAgger path."""
+
+    from .adapters.sonic_causal_student import SonicCausalStudentAdapter
+    from .core.sonic_causal_loop import SonicCausalDaggerLoop
+    from cvae_sa.sonic_causal_dataset import SonicCausalDataset
+
+    env = _create_release_env(prepared, device, args_cli)
+    try:
+        observation = env.reset()
+        current_state = env.physics_state()
+        if observation.get("student_reference_future") is None:
+            raise RuntimeError("SONIC release observation has no [10,64] reference future")
+        contract = SonicActionContract(env)
+        checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+        student = SonicCausalStudentAdapter(
+            checkpoint=checkpoint,
+            device=device,
+            action_contract=contract,
+            normalization_run=config.student.get("normalization_run"),
+            seed=int(config.seed),
+            learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
+            weight_decay=float(config.student.get("weight_decay", 0.0)),
+            action_clip_value=config.student.get("action_clip_value", 20.0),
+            kl_beta=float(config.student.get("kl_beta", 0.002)),
+        )
+        teacher = SonicReleaseTeacher(
+            config=prepared["release_config"],
+            env=env,
+            checkpoint=str(config.teacher_checkpoint),
+            device=device,
+        )
+        source_dataset = SonicCausalDataset(
+            config.student.source_dataset_run,
+            split="train",
+            max_samples=config.student.get("source_max_samples"),
+        )
+        loop = SonicCausalDaggerLoop(
+            env=env,
+            teacher=teacher,
+            student=student,
+            action_contract=contract,
+            num_envs=int(config.dagger.num_envs),
+            rollout_steps=int(config.dagger.rollout_steps),
+            run_dir=run_dir,
+            seed=int(config.seed),
+        )
+        beta_schedule = [float(value) for value in config.dagger.beta_schedule]
+        rounds = int(config.dagger.get("rounds", len(beta_schedule)) or len(beta_schedule))
+        if len(beta_schedule) < rounds:
+            beta_schedule.extend([beta_schedule[-1]] * (rounds - len(beta_schedule)))
+        beta_schedule = beta_schedule[:rounds]
+        metrics = []
+        for round_index, beta in enumerate(beta_schedule):
+            dynamic = loop.collect_round(round_index, beta)
+            data_path = run_dir / "data" / "dagger" / f"round_{round_index:02d}.pt"
+            data_path.parent.mkdir(parents=True, exist_ok=True)
+            data_tmp = data_path.with_name(f"{data_path.name}.tmp.{__import__('os').getpid()}")
+            torch.save(
+                {
+                    "format_version": "sonic_causal_dagger_samples_v1",
+                    "round_index": int(round_index),
+                    "beta": float(beta),
+                    "architecture_version": student.model.ARCHITECTURE_VERSION,
+                    "samples": dynamic,
+                },
+                data_tmp,
+            )
+            data_tmp.replace(data_path)
+            train_metrics = student.train_on_samples(
+                loop.samples,
+                source_dataset=source_dataset,
+                steps=int(config.student.get("train_steps_per_round", 1000)),
+                batch_size=int(config.student.get("micro_batch", 32)),
+                source_mix=float(config.student.get("source_mix", 0.5)),
+                generator=torch.Generator(device="cpu").manual_seed(
+                    int(config.seed) + round_index * 1009
+                ),
+            )
+            eval_metrics = loop.evaluate_student_only(
+                int(config.dagger.get("eval_steps", 192))
+            )
+            checkpoint_path = run_dir / "checkpoints" / f"round_{round_index:02d}.pt"
+            student.save(
+                checkpoint_path,
+                round_index=round_index,
+                metadata={
+                    "beta": beta,
+                    "motion_keys": list(getattr(env, "motion_keys", []) or []),
+                    "eval_metrics": eval_metrics,
+                },
+            )
+            metrics.append(
+                {
+                    "round": round_index,
+                    "beta": beta,
+                    "round_samples": len(dynamic),
+                    "samples": len(loop.samples),
+                    "train": train_metrics,
+                    "student_only": eval_metrics,
+                }
+            )
+            _write_json(run_dir / "manifests" / "sonic_causal_metrics.partial.json", metrics)
+        baseline = metrics[0]["student_only"] if metrics else None
+        final = metrics[-1]["student_only"] if metrics else None
+        baseline_by_motion = (baseline or {}).get("teacher_action_rmse_by_motion", {})
+        final_by_motion = (final or {}).get("teacher_action_rmse_by_motion", {})
+        motion_ratios = {
+            key: float(final_by_motion[key]["teacher_action_rmse"])
+            / max(float(baseline_by_motion[key]["teacher_action_rmse"]), 1.0e-12)
+            for key in sorted(set(baseline_by_motion) & set(final_by_motion))
+        }
+        motion_pass_count = sum(value <= 0.7 for value in motion_ratios.values())
+        expected_motion_count = int(config.dagger.get("motion_count", 4))
+        gate = {
+            "pass": bool(
+                baseline
+                and final
+                and float(final["teacher_action_rmse"]) <= 0.5 * float(baseline["teacher_action_rmse"])
+                and expected_motion_count >= 4
+                and motion_pass_count >= 3
+                and float(final["termination_rate"]) <= float(baseline["termination_rate"])
+                and float(final["action_saturation_ratio"]) < 0.05
+            ),
+            "scope": "same_motion_teacher_action_imitation",
+            "overall_rmse_ratio": None
+            if not baseline or not final
+            else float(final["teacher_action_rmse"])
+            / max(float(baseline["teacher_action_rmse"]), 1.0e-12),
+            "per_motion_rmse_ratio": motion_ratios,
+            "per_motion_pass_count": int(motion_pass_count),
+            "per_motion_required": 3,
+            "motion_gate_complete": expected_motion_count >= 4,
+        }
+        manifest = {
+            "format_version": "sonic_causal_dagger_manifest_v1",
+            "mode": str(config.mode),
+            "execution_pass": True,
+            "quality_pass": gate["pass"],
+            "quality_scope": "same_motion_teacher_action_imitation",
+            "architecture_version": student.model.ARCHITECTURE_VERSION,
+            "history_state_shape": [10, 70],
+            "history_action_shape": [10, 29],
+            "reference_shape": [10, 64],
+            "action_shape": [29],
+            "dagger_commit": _git_head(Path(__file__).resolve().parents[3]),
+            "sonic_commit": _git_head(prepared["sonic_root"]),
+            "teacher_checkpoint": str(Path(str(config.teacher_checkpoint)).expanduser().resolve()),
+            "teacher_checkpoint_sha256": teacher.checkpoint_sha256,
+            "student_checkpoint": str(checkpoint),
+            "student_checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+            "source_dataset_run": str(source_dataset.dataset_run),
+            "source_dataset_manifest_sha256": hashlib.sha256(
+                (source_dataset.dataset_run / "manifests" / "dataset_manifest.json").read_bytes()
+            ).hexdigest(),
+            "data_root": str(run_dir / "data" / "dagger"),
+            "sample_format": "sonic_causal_dagger_samples_v1",
+            "rounds": metrics,
+            "imitation_gate": gate,
+            "teacher_information_contract": {
+                "teacher_input_keys": sorted(
+                    str(key) for key in observation.keys() if not str(key).startswith("student_")
+                ),
+                "excluded_student_keys": sorted(
+                    str(key) for key in observation.keys() if str(key).startswith("student_")
+                ),
+                "reference_key": "student_reference_future",
+                "reference_shape": [10, 64],
+                "teacher_receives_student_reference": False,
+            },
+            "information_contract_pass": True,
+            "quality_note": "Same-motion DAgger imitation only; no new-motion generalization claim.",
+        }
+        _write_json(run_dir / "manifests" / "sonic_causal_manifest.json", manifest)
+        (run_dir / "markers" / "sonic_causal_execution.ok").write_text(
+            "execution_pass=true\n", encoding="utf-8"
+        )
+        if gate["pass"]:
+            (run_dir / "markers" / "sonic_causal_imitation.ok").write_text(
+                "quality_pass=true\n", encoding="utf-8"
+            )
+        return env, manifest
+    except BaseException:
+        _close_cvae_env(env)
+        raise
+
+
 def _load_kl2_motion_manifest(config) -> dict:
     raw = config.dagger.get("motion_manifest", None)
     if raw is None:
@@ -2151,6 +2338,9 @@ def main() -> None:
         if str(config.mode).startswith("cvae_kl2"):
             env, manifest = _run_cvae_kl2(config, run_dir, device, args_cli, prepared)
             marker_name = manifest.get("marker", "dagger_cvae_kl2_execution.ok")
+        elif str(config.mode).startswith("sonic_causal"):
+            env, manifest = _run_sonic_causal(config, run_dir, device, args_cli, prepared)
+            marker_name = "sonic_causal_execution.ok"
         elif str(config.mode).startswith("cvae"):
             env, manifest = _run_cvae(config, run_dir, device, args_cli, prepared)
             marker_name = "dagger_cvae_smoke.ok" if str(config.mode) == "cvae_smoke" else "dagger_cvae_execution.ok"

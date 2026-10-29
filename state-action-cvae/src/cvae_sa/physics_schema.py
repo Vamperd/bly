@@ -79,6 +79,9 @@ def validate_physics_schema(schema: dict[str, Any]) -> None:
         offsets = np.asarray(reference.get("time_offsets_seconds"), dtype=np.float32)
         if offsets.shape != (REFERENCE_FRAMES,) or not np.isfinite(offsets).all():
             raise ValueError("reference time offsets must contain ten finite values")
+        expected_offsets = np.arange(REFERENCE_FRAMES, dtype=np.float32) * 0.1
+        if not np.allclose(offsets, expected_offsets, atol=1.0e-6, rtol=0.0):
+            raise ValueError("reference time offsets must be [0.0, 0.1, ..., 0.9]")
     elif reference is not None:
         raise ValueError("Physics v3 schema cannot declare reference_future")
 
@@ -120,6 +123,9 @@ def read_reference_future(
         raise ValueError(f"{group.name}/root_orientation_future: invalid shape {root.shape}")
     if offsets.shape != (REFERENCE_FRAMES,):
         raise ValueError(f"{group.name}/time_offsets: invalid shape {offsets.shape}")
+    expected_offsets = np.arange(REFERENCE_FRAMES, dtype=np.float32) * 0.1
+    if not np.allclose(offsets, expected_offsets, atol=1.0e-6, rtol=0.0):
+        raise ValueError(f"{group.name}/time_offsets: expected [0.0, 0.1, ..., 0.9]")
     result = np.concatenate((joint, root), axis=-1)
     if not np.isfinite(result).all() or not np.isfinite(offsets).all():
         raise ValueError(f"{group.name}: reference contains NaN/Inf")

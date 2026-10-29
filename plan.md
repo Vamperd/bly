@@ -6,6 +6,12 @@
 任何历史run、checkpoint、数据和源码均未删除。结构合同见[model.md](model.md)，
 必要反常证据见[process.md](process.md)，交接入口为[AGENTS.md](AGENTS.md)。
 
+## 新增路线：sonic-10history-reference-cvae-v1
+
+独立新增10-step SONIC序列化CVAE：`State[10,70] + Action[10,29] + reference[10,64]`
+输出一个canonical Action；Physics v5为唯一新数据源，C阶段只训练当前目标Action的
+posterior/standard-normal loss与KL。旧65-token/T64与旧DAgger路线只读保留。
+
 ## 1. 当前状态与路线
 
 架构为 `65-token-hierarchical-standard-cvae-v1`，协议为 `65-token-experiment-v2`。

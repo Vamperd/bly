@@ -10,6 +10,12 @@ Ubuntu 重评根目录：`/home/helloworld/bly/runs/cvae_v2_reassessment_gweSqTs
 评测源码 commit：`b64df6499fab832246117521427548069dbba501`，协议 `65-token-experiment-v2`。
 11 个回传包的 report_index 共342项文件哈希全部核对一致；这验证回传完整性，不等于独立验证数据真值。
 
+## 新增路线记录：sonic-10history-reference-cvae-v1
+
+新路线的输入是10步Physics State history、10步Action history和SONIC runtime的10帧reference，
+输出一个canonical Action并映射为raw SONIC Action。该路线不复用旧65-token checkpoint，
+质量证据必须与旧T64/CVAE结果分开记录；同-motion DAgger imitation不等于new-motion泛化。
+
 当前 C 源 run 为
 `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113`，
 采用 `stage=C`、dynamic Mask、32 motion、1504 T64 windows、360000 steps。C 的最终 summary 已回传，

@@ -1,0 +1,32 @@
+{
+  "format_version": "sonic_causal_cvae_config_v1",
+  "seed": 20261101,
+  "device": "cuda:0",
+  "output_dir": "/home/helloworld/bly/runs/sonic_causal_c_smoke",
+  "data": {
+    "dataset_run": "/home/helloworld/bly/runs/cvae_physics_dataset_v5",
+    "max_samples": 32,
+    "max_val_samples": 16
+  },
+  "model": {
+    "architecture_version": "sonic-10history-reference-cvae-v1",
+    "d_model": 128,
+    "posterior_encoder_layers": 2,
+    "condition_encoder_layers": 2,
+    "decoder_layers": 2,
+    "heads": 4,
+    "ffn_dim": 512,
+    "global_latent_dim": 64,
+    "dropout": 0.0
+  },
+  "training": {
+    "micro_batch": 4,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0,
+    "max_optimizer_steps": 2,
+    "max_val_batches": 1,
+    "gradient_clip": 1.0,
+    "kl_beta": 0.002,
+    "log_interval": 1
+  }
+}
