@@ -7,7 +7,11 @@ teacher_checkpoint: ${oc.env:SONIC_TEACHER_CHECKPOINT}
 
 # rounds is an upper bound; the run stops before a round that would exceed max_train_hours.
 dagger:
-  beta_schedule: [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
+  # ~9.8 min/round -> ~48 rounds in 8h; later rounds pad with the last value (0.0).
+  beta_schedule: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.45, 0.4, 0.35, 0.3,
+                  0.3, 0.3, 0.3, 0.3, 0.25, 0.25, 0.25, 0.25, 0.2, 0.2,
+                  0.2, 0.2, 0.15, 0.15, 0.15, 0.15, 0.1, 0.1, 0.1, 0.1,
+                  0.0]
   rounds: 80
   max_train_hours: ${oc.env:DAGGER_MAX_HOURS,8.0}
   rollout_steps: 1000

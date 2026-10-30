@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
@@ -218,6 +219,7 @@ class SonicCausalStudentAdapter:
         if generator is None:
             generator = torch.Generator(device="cpu").manual_seed(self.seed)
         self.model.train()
+        started = time.monotonic()
         losses: list[float] = []
         source_count = 0
         dagger_count = 0
@@ -256,6 +258,14 @@ class SonicCausalStudentAdapter:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0, error_if_nonfinite=True)
             self.optimizer.step()
             losses.append(float(loss.detach()))
+            step = len(losses)
+            if step % 500 == 0 or step == int(steps):
+                print(
+                    f"[sonic-causal] train step={step}/{int(steps)} "
+                    f"loss={float(np.mean(losses[-500:])):.6g} "
+                    f"elapsed={time.monotonic() - started:.0f}s",
+                    flush=True,
+                )
         self.model.eval()
         return {
             "train_loss": float(np.mean(losses)) if losses else 0.0,
