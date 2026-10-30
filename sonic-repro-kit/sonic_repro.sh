@@ -577,7 +577,7 @@ phase_collect_state_action() {
   fi
   [[ -d "$motion_path" ]] || die "Motion directory missing: $motion_path"
   available_motion_count="$({
-    find "$motion_path" -type f -name '*.pkl' ! -name 'metadata.pkl' -print
+    find -L "$motion_path" -type f -name '*.pkl' ! -name 'metadata.pkl' -print
   } | wc -l)"
   (( available_motion_count > 0 )) || die "No motion PKLs found in $motion_path"
   if [[ "$COLLECT_MOTION_COUNT" == "all" ]]; then
