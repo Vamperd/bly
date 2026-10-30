@@ -25,9 +25,10 @@ case "$MODE" in
   mlp-long) CONFIG_MODE="mlp_long" ;;
   mlp-intensive) CONFIG_MODE="mlp_intensive" ;;
   mlp-dynamic2) CONFIG_MODE="mlp_dynamic2" ;;
+  mlp-causal-motions) CONFIG_MODE="mlp_causal_motions" ;;
   mlp-render) CONFIG_MODE="mlp_render" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-render" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-render" >&2
   exit 2
     ;;
 esac
@@ -37,7 +38,7 @@ SONIC_REPO_ROOT="${SONIC_REPO_ROOT:-$HOME/bly/sonic-repro/GR00T-WholeBodyControl
 SONIC_TEACHER_CHECKPOINT="${SONIC_TEACHER_CHECKPOINT:-$SONIC_REPO_ROOT/sonic_release/last.pt}"
 SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$HOME/bly/runs}"
 STATE_ACTION_CVAE_ROOT="${STATE_ACTION_CVAE_ROOT:-$HOME/bly/state-action-cvae}"
-if [[ "$MODE" == sonic-causal-* && -z "${DAGGER_MOTION_FILE:-}" ]]; then
+if [[ ( "$MODE" == sonic-causal-* || "$MODE" == mlp-causal-motions || ( "$MODE" == mlp-render && "${DAGGER_RENDER_POLICY:-}" == sonic_causal ) ) && -z "${DAGGER_MOTION_FILE:-}" ]]; then
   # C training data comes from the Physics v5 reference subset; DAgger motions must be loadable from it.
   REFERENCE_SUBSET_POINTER="$SONIC_RUNS_ROOT/latest_overfit_reference_motion_subset_run_dir.txt"
   test -s "$REFERENCE_SUBSET_POINTER" || {
@@ -60,8 +61,9 @@ DAGGER_RENDER_STEPS="${DAGGER_RENDER_STEPS:-192}"
 DAGGER_RENDER_MOTION_KEY="${DAGGER_RENDER_MOTION_KEY:-}"
 DAGGER_RENDER_POLICY="${DAGGER_RENDER_POLICY:-mlp}"
 DAGGER_RENDER_CONFIG="${DAGGER_RENDER_CONFIG:-}"
+DAGGER_RENDER_LATENT_MODE="${DAGGER_RENDER_LATENT_MODE:-fixed_standard_normal}"
 
-export DAGGER_ROOT SONIC_REPO_ROOT SONIC_TEACHER_CHECKPOINT SONIC_RUNS_ROOT STATE_ACTION_CVAE_ROOT DAGGER_MOTION_FILE DAGGER_RESUME_RUN DAGGER_ROUNDS_PER_PROCESS DAGGER_RENDER_CHECKPOINT DAGGER_RENDER_STEPS DAGGER_RENDER_MOTION_KEY DAGGER_RENDER_POLICY DAGGER_RENDER_CONFIG
+export DAGGER_ROOT SONIC_REPO_ROOT SONIC_TEACHER_CHECKPOINT SONIC_RUNS_ROOT STATE_ACTION_CVAE_ROOT DAGGER_MOTION_FILE DAGGER_RESUME_RUN DAGGER_ROUNDS_PER_PROCESS DAGGER_RENDER_CHECKPOINT DAGGER_RENDER_STEPS DAGGER_RENDER_MOTION_KEY DAGGER_RENDER_POLICY DAGGER_RENDER_CONFIG DAGGER_RENDER_LATENT_MODE
 export PYTHONPATH="$DAGGER_ROOT/src:$STATE_ACTION_CVAE_ROOT/src:$SONIC_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 PYTHON="${PYTHON:-$HOME/bly/sonic-repro/.venv-sonic/bin/python}"
@@ -106,7 +108,7 @@ if ! flock -n 9; then
 fi
 echo "[run_dagger] acquired $LOCK_PATH"
 
-if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-dynamic2 || "$MODE" == mlp-render ]]; then
+if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-dynamic2 || "$MODE" == mlp-causal-motions || "$MODE" == mlp-render ]]; then
   test -d "$DAGGER_MOTION_FILE" || {
     echo "DAGGER_MOTION_FILE is missing or not a directory: $DAGGER_MOTION_FILE" >&2
     exit 2
@@ -120,7 +122,7 @@ if [[ "$MODE" == mlp-render ]]; then
       exit 2
     }
   else
-    : "${DAGGER_RENDER_CHECKPOINT:?Set DAGGER_RENDER_CHECKPOINT to an MLP round checkpoint}"
+    : "${DAGGER_RENDER_CHECKPOINT:?Set DAGGER_RENDER_CHECKPOINT to an MLP or sonic_causal checkpoint}"
     test -s "$DAGGER_RENDER_CHECKPOINT" || {
       echo "Render checkpoint is missing or empty: $DAGGER_RENDER_CHECKPOINT" >&2
       exit 2
@@ -170,6 +172,16 @@ if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-
   fi
 fi
 
+if [[ "$MODE" == mlp-causal-motions ]]; then
+  : "${MLP_MOTION_SOURCE_CHECKPOINT:=${SONIC_CAUSAL_STUDENT_CHECKPOINT:-}}"
+  export MLP_MOTION_SOURCE_CHECKPOINT
+  test -s "$MLP_MOTION_SOURCE_CHECKPOINT" || {
+    echo "Set MLP_MOTION_SOURCE_CHECKPOINT (or SONIC_CAUSAL_STUDENT_CHECKPOINT) to the C checkpoint used by sonic-causal-pilot" >&2
+    exit 2
+  }
+  echo "[run_dagger] MLP_MOTION_SOURCE_CHECKPOINT=$MLP_MOTION_SOURCE_CHECKPOINT"
+fi
+
 if [[ "$MODE" == sonic-causal-smoke || "$MODE" == sonic-causal-pilot ]]; then
   : "${SONIC_CAUSAL_STUDENT_CHECKPOINT:=${CVAE_STUDENT_CHECKPOINT:-}}"
   export SONIC_CAUSAL_STUDENT_CHECKPOINT
@@ -193,6 +205,7 @@ echo "[run_dagger] DAGGER_RENDER_STEPS=$DAGGER_RENDER_STEPS" >> "$LOG_PATH"
 echo "[run_dagger] DAGGER_RENDER_MOTION_KEY=$DAGGER_RENDER_MOTION_KEY" >> "$LOG_PATH"
 echo "[run_dagger] DAGGER_RENDER_POLICY=$DAGGER_RENDER_POLICY" >> "$LOG_PATH"
 echo "[run_dagger] DAGGER_RENDER_CONFIG=$DAGGER_RENDER_CONFIG" >> "$LOG_PATH"
+echo "[run_dagger] DAGGER_RENDER_LATENT_MODE=$DAGGER_RENDER_LATENT_MODE" >> "$LOG_PATH"
 echo "[run_dagger] SONIC_TEACHER_CHECKPOINT=$SONIC_TEACHER_CHECKPOINT" >> "$LOG_PATH"
 set +e
 if [[ "${DAGGER_TEE:-0}" == "1" ]]; then

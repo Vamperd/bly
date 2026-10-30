@@ -534,10 +534,59 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
     elif clip_value is None:
         clip_value = 20.0
     policy_kind = str(config.dagger.get("render_policy", "mlp")).lower()
-    if policy_kind not in {"mlp", "sonic"}:
-        raise ValueError("render_policy must be mlp or sonic")
-    video_name = "sonic_policy.mp4" if policy_kind == "sonic" else "mlp_policy.mp4"
-    if policy_kind == "mlp":
+    if policy_kind not in {"mlp", "sonic", "sonic_causal"}:
+        raise ValueError("render_policy must be mlp, sonic or sonic_causal")
+    video_name = f"{policy_kind}_policy.mp4"
+    extra_manifest: dict = {}
+
+    def after_step(executed_action, done_value):
+        return None
+
+    if policy_kind == "sonic_causal":
+        from .adapters.sonic_causal_student import SonicCausalStudentAdapter
+
+        checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"render checkpoint is missing: {checkpoint}")
+        contract = SonicActionContract(env)
+        causal = SonicCausalStudentAdapter(
+            checkpoint=checkpoint,
+            device=device,
+            action_contract=contract,
+            normalization_run=config.student.get("normalization_run"),
+            seed=int(config.seed),
+        )
+        unseen = sorted(set(prepared["motion"]["loaded_keys"]) - set(causal.train_motion_keys))
+        if unseen:
+            raise ValueError(f"render motion is not among the C training motions: {unseen}")
+        latent_mode = str(config.dagger.get("render_latent_mode", "fixed_standard_normal"))
+        causal.set_latent_mode(latent_mode)
+        actual = getattr(env.env, "env", env.env)
+        previous = getattr(getattr(actual, "action_manager", None), "prev_action", None)
+        initial_action = (
+            contract.raw_to_canonical(previous.detach())
+            if isinstance(previous, torch.Tensor) and tuple(previous.shape) == (env.num_envs, action_dim)
+            else None
+        )
+        causal.reset(env.num_envs, env.physics_state(), initial_action=initial_action)
+        if observation.get("student_reference_future") is None:
+            raise RuntimeError("SONIC release observation has no [10,64] reference future")
+
+        def policy_action(observation_value, done_value):
+            return causal.observe(observation_value["student_reference_future"]).action_raw
+
+        def after_step(executed_action, done_value):
+            causal.after_step(contract.raw_to_canonical(executed_action), env.physics_state(), done_value)
+
+        checkpoint_sha256 = causal.checkpoint_sha256
+        policy_source = "sonic_causal_cvae_policy_rollout"
+        extra_manifest = {
+            "latent_mode": latent_mode,
+            "c_train_motion_keys": list(causal.train_motion_keys),
+            "architecture_version": causal.model.ARCHITECTURE_VERSION,
+            "initial_action_from_env": initial_action is not None,
+        }
+    elif policy_kind == "mlp":
         hidden_dims = tuple(
             int(value)
             for value in config.student.get("hidden_dims", (2048, 2048, 1024, 1024, 512, 512))
@@ -633,6 +682,7 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         executed_max = max(executed_max, float(action.abs().max().item()))
         observation, _reward, next_done, _info = env.step({"actions": action})
         done = next_done.to(device=env.device).bool()
+        after_step(action, done)
         if bool(done.any()):
             terminated = True
             break
@@ -684,6 +734,7 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         "render_kind": "isaac_rollout_then_mujoco_kinematic_render",
         "execution_pass": True,
         "quality_pass": None,
+        **extra_manifest,
     }
     _write_json(run_dir / "manifests" / "dagger_policy_render_manifest.json", manifest)
     print(
@@ -810,12 +861,12 @@ def _run_cvae(config, run_dir: Path, device: torch.device, args_cli, prepared: d
     return env, manifest
 
 
-def _select_sonic_causal_motions(config) -> list[str]:
+def _select_sonic_causal_motions(config, checkpoint=None) -> list[str]:
     """Pin DAgger motions to keys the C-stage student actually trained on."""
 
     import random
 
-    checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+    checkpoint = Path(str(checkpoint or config.student.checkpoint)).expanduser().resolve()
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     seen = sorted(str(key) for key in payload.get("train_motion_keys") or [])
     if not seen:
@@ -2372,6 +2423,19 @@ def main() -> None:
     )
     if str(config.mode).startswith("sonic_causal"):
         _select_sonic_causal_motions(config)
+    if (
+        str(config.mode) == "mlp_render"
+        and str(config.dagger.get("render_policy", "mlp")).lower() == "sonic_causal"
+    ):
+        render_key = str(config.dagger.get("motion_key", "") or "")
+        config.dagger.motion_keys = [render_key] if render_key else []
+        config.dagger.motion_key = None
+        config.dagger.motion_count = 1
+        _select_sonic_causal_motions(config)
+    motion_source = str(config.dagger.get("motion_source_checkpoint", "") or "")
+    if str(config.mode).startswith("mlp") and str(config.mode) != "mlp_render" and motion_source:
+        # Same checkpoint + motion_seed + motion_count as sonic_causal_pilot -> identical motion set.
+        _select_sonic_causal_motions(config, checkpoint=motion_source)
     prepared = _prepare_release_env(config, run_dir)
     print("[dagger] launching Isaac app", flush=True)
     launcher, args_cli = _launch_app(config)

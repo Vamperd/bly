@@ -1,14 +1,12 @@
 # 65-token 层级 CVAE：活动模型与实验合同
 
-最后更新：2026-09-29。当前 C 已完成训练但标准正态部署质量未通过；正在补齐末步诊断证据。
+最后更新：2026-10-30。C 已完成训练但标准正态部署质量未通过；实验结果见[plan.md](plan.md)，异常证据见[process.md](process.md)。
 
 模型架构版本保持 `65-token-hierarchical-standard-cvae-v1`；实验协议为
 `65-token-experiment-v2`，checkpoint 格式为
 `sonic_65_token_hierarchical_standard_cvae_checkpoint_v2`。
 本轮不改模型参数、融合、FiLM、数据或重建目标。历史 H50 checkpoint 不迁移。
-工程 PASS 与质量判断严格分开。B 训练同时保存 `best_fixed.pt` 与 `best_heldout.pt`；
-C checkpoint 额外保存固定 epsilon 的 standard-normal readback probe，严格读回同时验证
-posterior-mean 与部署路径。回放报告区分 `engineering_complete`、`baseline_valid`、
+工程 PASS 与质量判断严格分开。回放报告区分 `engineering_complete`、`baseline_valid`、
 `model_physical_quality` 和 `quality_pass`；baseline 有效后，模型 Action 的 joint position、
 root position、body MPJPE 相对同窗口原始回放不得超过 1.2 倍，否则标记
 `FAIL_RELATIVE_TO_BASELINE`。
@@ -21,6 +19,7 @@ root position、body MPJPE 相对同窗口原始回放不得超过 1.2 倍，否
 逻辑序列为 `H[-9..0] + R[+0..9] + Q`；C阶段只mask当前目标Action，训练posterior Action、
 standard-normal Action和KL，不再训练future State或64步Action序列。Physics v5是该路线唯一允许的
 新数据源；episode 起点用 SONIC reset buffer 的重复观测并显式记录 history validity mask，旧65-token/T64路线保持只读兼容。
+数据链路见plan.md §23，训练/DAgger命令见dagger.md末节。
 
 ## 1. 数据、编码与解码
 
@@ -54,14 +53,7 @@ Decoder query 使用时间 embedding；每层独立零初始化 FiLM head，
 默认宽448、双 Encoder 各6层、Decoder 8层、heads8、FFN1792，
 总参数 **64,377,959**，运行时重新计数写入签名；A/B/C 的可训练参数数目分别记录。
 
-## 2. 实验路线与目标
-
-```text
-已完成 A + 正在运行的旧协议 B（让其完成，保留历史）
-→ v2 工程核验 → 旧 A/B 只读重评
-→ B-fixed 随机初始化 → B-dynamic 从修正版 B-fixed model-only 初始化
-→ C 独立随机初始化
-```
+## 2. 实验阶段与目标
 
 A：只调用 Posterior，使用 mean 和17-token memory；完整序列重建，无 KL。
 B：只调用 Condition，使用 condition memory/global/local、fusion、FiLM、Decoder；
@@ -84,9 +76,8 @@ C beta 默认1e-3、warm-up10k。训练预算不是质量承诺，不自动进�
 八类 Mask 为 state_gap_4/16、state_rollout、action_gap_4/16、full_action、joint_gap_2/8。
 State gap 为双向补全；state_rollout 给定整段 Action，不能叫严格逐步因果 rollout；
 full_action 可能多解。所有当前32-motion窗口均为 train，只支持已见序列实验，
-held-out Mask 不等于 held-out motion。
-held-out bank 中 full_action 等 fixture 可能与训练bank坐标相同；评测显式记录重合数，
-并将真正新坐标与相同坐标分组统计，不能把整份bank一概称为未见Mask。
+held-out Mask 不等于 held-out motion。held-out bank 中可能有与训练bank坐标相同的fixture；
+评测显式记录重合数，并将新坐标与相同坐标分组统计。
 
 ## 3. 身份、评测与尾部诊断
 
@@ -96,55 +87,42 @@ dataset manifest/index/normalization/window-table 哈希及源 checkpoint 路径
 固定/held-out bank 保存实际隐藏坐标与哈希；训练样本、Mask 摘要与暴露量逐步记录。
 
 只读评测入口 `python -m cvae_sa.cvae_tools evaluate` 必须指定 checkpoint、dataset、
-route、新 output run。历史65-token可读但未知身份显式标注；历史 B 原始评测不是
-exact fixture，重评也不是原训练 Mask 的精确重放。源目录始终只读。
+route、新 output run。历史65-token可读但未知身份显式标注；源目录始终只读。
 
 完整评测保存 full/masked/visible 分区，State/Action 分域 RMSE、MAE、
 p95/p99/p99.9/max、全部97个连续 feature，阈值0.01/0.05/0.1/0.2超限统计，
 contact BCE/accuracy/混淆、逐 family 微平均/窗口宏平均与目标数。
 空域为 null，不参与平均。物理误差仅逐同单位特征汇总。
-
-State/Action 各 top100 含窗口、原始元素身份、绝对/相对帧、chunk/位置、
-feature/name/unit、pred/target/signed/absolute error、mean/std和物理值；
-另存去重原始元素 top100，全部窗口和分域最差窗口。
-报告每 t、chunk、chunk内位置（终点位置4）、重叠窗口同一帧的预测范围；
-固定 fixture 0/1 与当前最差窗口分别保存完整连续/接触曲线和 Mask。
+State/Action 各 top100（含窗口、原始元素身份、帧、chunk/位置、feature/unit、误差和物理值）另存去重版本；
+报告每 t、chunk、chunk内位置、重叠窗口同一帧的预测范围；固定 fixture 0/1 与当前最差窗口保存完整曲线和 Mask。
 速度峰值、±2帧辅助对齐仅诊断；正式误差从不平移。
-JSON 曲线同时给 normalized/physical，SVG 使用有符号线性轴。
 
 C 每次评测同时保存 posterior_mean、posterior_sample、standard_normal、zero。
-随机路由默认每 fixture 8 个可复现 epsilon，独立评测 RNG，不影响训练 RNG。
-分布 quantile/极值/代表曲线明确来自固定 draw0；所有8个样本另外统计期望单样本
-State/Action full/masked/visible MSE/RMSE/MAE、方差、masked energy score和补充 best-of-K。
-Energy 定义为维度归一化欧氏范数的经验能量分数
-`mean ||x-y||/sqrt(D) - 0.5 mean_ij ||x_i-x_j||/sqrt(D)`，包括 i=j；
-按有目标 fixture 平均。不能用 best-of-K 代替部署结果，单参考不证明多模态覆盖。
+随机路由默认每 fixture 8 个可复现 epsilon，独立评测 RNG。8个样本统计期望单样本
+full/masked/visible MSE/RMSE/MAE、方差、masked energy score和补充 best-of-K。
+Energy 定义为 `mean ||x-y||/sqrt(D) - 0.5 mean_ij ||x_i-x_j||/sqrt(D)`（包括 i=j），按有目标 fixture 平均。
+不能用 best-of-K 代替部署结果，单参考不证明多模态覆盖。
 
-每5次完整评测对固定不同窗口子集独立置零/置换 global、local、condition memory、
-FiLM，记录 donor。C 的依赖性消融用 posterior mean 参考；A 的 condition memory消融不适用。
-这些只证明依赖，B memory 可绕过 latent，重建成功不能证明 latent 表达充分。
+每5次完整评测对固定不同窗口子集独立置零/置换 global、local、condition memory、FiLM，记录 donor。
+C 的依赖性消融用 posterior mean 参考。这些只证明依赖，重建成功不能证明 latent 表达充分。
 
 ## 4. 记录、审核与恢复
 
 每步流式 JSONL：实际 LR、next LR、分项重建、KL_global/local、beta及加权贡献、
 裁剪前后梯度、实际batch、sample/Mask摘要、累计暴露、局部/源/累计step、耗时、Encoder调用数。
 默认50步刷新进度/控制台、500步 last、1000步全量评测，均可 CLI 调整。
-summary 不复制逐步 records。loss/LR、尾部、masked-visible、family、C多路曲线随评测更新。
 
 step0、首次完整评测、每5次评测及结束生成审核，分已验证事实/候选原因/缺失证据。
 路由或非有限值等工程错误停止；质量告警不自动停止或调整训练：
 5点评测改善不足1%、连续3点比此前best恶化20%、masked变差而full改善。
-数值分母下限1e-12；零初始化FiLM首步上游梯度可为0，按多步观察审核，
-全有效chunk时 empty_local 无梯度属正常。
+零初始化FiLM首步上游梯度可为0；全有效chunk时 empty_local 无梯度属正常。
 
 A best 按 full reconstruction；B best 按八family等权、family内有效域均值 masked MSE；
 C best 按实际 standard_normal masked energy；另存 best_reconstruction
 （C 为 posterior_mean full 重建参考）。每次完整评测才更新 best。
-B 同时写出 `best_fixed.pt`（与 `best.pt` 同一固定bank选择）和
-`best_heldout.pt`（held-out mask 选择），并在 summary/progress/checkpoint 中记录两者的
-step、指标和严格读回结果；旧 run 缺少该别名时不得宣称已补齐历史选择。
-新 C checkpoint 额外保存固定 epsilon 的 standard-normal readback probe，严格读回同时验证
-posterior-mean 与部署路径，避免只验证训练时的 posterior 路径。
+B 同时写出 `best_fixed.pt`（与 `best.pt` 同一固定bank选择）和 `best_heldout.pt`（held-out mask 选择），
+并记录两者的 step、指标和严格读回；旧 run 缺少该别名时不得宣称已补齐历史选择。
+C checkpoint 额外保存固定 epsilon 的 standard-normal readback probe，严格读回同时验证 posterior-mean 与部署路径。
 
 | 模式 | 接口与语义 |
 |---|---|
@@ -152,62 +130,37 @@ posterior-mean 与部署路径，避免只验证训练时的 posterior 路径。
 | 新run延长 | `--continue-checkpoint FILE --additional-steps N`，同stage保留AdamW；新LR段；v2保留采样状态；旧格式明确重启采样 |
 | 新run初始化 | `--init-checkpoint FILE`，只加载模型；optimizer/scheduler/采样重置；兼容 `--init-run RUN` 只取best，不静默fallback |
 
-旧checkpoint缺少归一化/窗口哈希时，只读重评允许并记录unknown；
-训练默认拒绝，若确认来源后显式 `--allow-legacy-identity` 才允许延长/初始化，
-仍不称为已验证的精确恢复。所有已知身份必须一致；旧H50拒绝。
-v2严格resume仅支持未完成run，同一run有OS锁阻止双进程写入。
-改变stage、Mask协议、batch或loss应建新初始化实验，不叫continuation。
+旧checkpoint缺少归一化/窗口哈希时，只读重评允许并记录unknown；训练默认拒绝，确认来源后显式
+`--allow-legacy-identity` 才允许延长/初始化，仍不称为精确恢复。旧H50拒绝。
+v2严格resume仅支持未完成run，同一run有OS锁阻止双进程写入。改变stage、Mask协议、batch或loss应建新初始化实验。
 
-SIGINT/SIGTERM转停止请求，完整更新边界持久化；非有限梯度在更新前阻止；
-更新中异常绝不覆盖原有效last。强杀/断电只恢复到已持久化边界。
-checkpoint写临时文件、flush/fsync、原子replace；先last后best，恢复可修复同step未落盘best。
-严格readback加载模型、optimizer、scheduler、采样状态，检查step关系并比较固定前向。
-最终报告与读回完成后才写完成标记；interrupted/failed/completed/qualitywarning分离。
+SIGINT/SIGTERM转停止请求，完整更新边界持久化；非有限梯度在更新前阻止；更新中异常绝不覆盖原有效last。
+checkpoint写临时文件、flush/fsync、原子replace；先last后best。严格readback加载模型、optimizer、scheduler、
+采样状态并比较固定前向。最终报告与读回完成后才写完成标记；interrupted/failed/completed/qualitywarning分离。
 
-## 5. CLI 与 Ubuntu 操作
+## 5. CLI 与 Ubuntu 操作（A/B/C 历史命令）
 
-先同步Windows源码；不改/安装既有依赖。全部产物必须放在
-`/home/helloworld/bly/runs/` 下。以下命令显式使用虚拟环境Python，避免系统没有python别名。
-
-必要真实工程smoke（不从旧A初始化；当前旧B可继续运行，资源不足时等待其结束）：
+全部产物必须放在 `/home/helloworld/bly/runs/` 下；显式使用虚拟环境Python。以下为当时的smoke、A只读定位、
+B-fixed训练与监控/回传命令，保留作复现参考：
 
 ```bash
 cd /home/helloworld/bly/state-action-cvae
 export PYTHONPATH="$PWD/src"
 PYTHON=/home/helloworld/bly/sonic-repro/.venv-sonic/bin/python
-bash -n ./cvae_repro.sh
-"$PYTHON" -m unittest discover -s tests -p test_cvae_protocol_v2.py -v
+# smoke
 "$PYTHON" -m cvae_sa.posterior_hierarchical_standard_cvae \
   --dataset-run /home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506 \
   --output-run "/home/helloworld/bly/runs/cvae_v2_B_smoke_$(date +%Y%m%d_%H%M%S)" \
   --stage B --mask-mode fixed --smoke --max-steps 2 --warmup-steps 1 \
   --micro-batch 2 --validation-interval 1 --checkpoint-interval 1 --log-interval 1
-```
-
-A90k只读定位（不启动额外60k）：
-
-```bash
-cd /home/helloworld/bly/state-action-cvae
-export PYTHONPATH="$PWD/src"
-PYTHON=/home/helloworld/bly/sonic-repro/.venv-sonic/bin/python
+# A90k只读定位
 EVAL_RUN="/home/helloworld/bly/runs/cvae_v2_A_tail_$(date +%Y%m%d_%H%M%S)"
 "$PYTHON" -m cvae_sa.cvae_tools evaluate \
   --checkpoint /home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260922_014417/checkpoints/best.pt \
   --dataset-run /home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506 \
   --output-run "$EVAL_RUN" --route A --micro-batch 32
 "$PYTHON" -m cvae_sa.cvae_tools export-report --run "$EVAL_RUN"
-```
-
-B旧checkpoint已确认训练使用完整posterior+condition。重评分别使用 `--route posterior_mean`
-（原信息路径）、`--route zero`（移除posterior信息的消融）和 `--route A`（复核旧错误评测路径）；
-不要把新 `--route B` 解释为旧训练路径复现。使用独立新目录和同一固定bank，不是旧Mask精确重放。
-旧权重的zero消融不能作为从头condition-only训练的容量结论，实测概要见plan.md、异常证据见process.md。
-后续正式B-fixed需审核后手动运行：
-
-```bash
-cd /home/helloworld/bly/state-action-cvae
-export PYTHONPATH="$PWD/src"
-PYTHON=/home/helloworld/bly/sonic-repro/.venv-sonic/bin/python
+# B-fixed
 RUN_DIR="/home/helloworld/bly/runs/cvae_v2_B_fixed_$(date +%Y%m%d_%H%M%S)"
 "$PYTHON" -m cvae_sa.posterior_hierarchical_standard_cvae \
   --dataset-run /home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506 \
@@ -215,159 +168,64 @@ RUN_DIR="/home/helloworld/bly/runs/cvae_v2_B_fixed_$(date +%Y%m%d_%H%M%S)"
   --max-steps 60000 --micro-batch 32 --learning-rate 1e-4 \
   --lr-schedule cosine --warmup-steps 2000 --min-lr-ratio 0.01 \
   --validation-interval 1000 --checkpoint-interval 500 --log-interval 50
-```
-
-独立终端监控和完成后回传（使用启动时打印的准确run，不猜最新目录）：
-
-```bash
-cd /home/helloworld/bly/state-action-cvae
-export PYTHONPATH="$PWD/src"
-PYTHON=/home/helloworld/bly/sonic-repro/.venv-sonic/bin/python
+# 监控与回传（使用启动时打印的准确run）
 RUN_DIR=/home/helloworld/bly/runs/替换为准确的run目录
 "$PYTHON" -m cvae_sa.cvae_tools monitor --run "$RUN_DIR" --interval 10
 "$PYTHON" -m cvae_sa.cvae_tools export-report --run "$RUN_DIR"
 ```
 
-回传 `diagnostic_report.zip`；包含配置/身份/normalization/趋势/审核/尾部/曲线/hash，
-不包含HDF5或checkpoint；不覆盖已存在包，可显式 `--output` 指定新文件。
-只读诊断可加 `--export-all` 保存全量预测，常规训练不保存全量。
+- 旧B重评用 `--route posterior_mean`（原信息路径）、`--route zero`（消融）、`--route A`（复核旧错误路径）；
+  新 `--route B` 不是旧训练路径复现。
+- `diagnostic_report.zip` 不含HDF5或checkpoint，不覆盖已存在包（可 `--output` 指定）；`--export-all` 仅用于只读诊断。
+- B-dynamic：`--stage B --mask-mode dynamic --init-checkpoint .../best.pt`；C：`--stage C --mask-mode dynamic --kl-beta 1e-3
+  --beta-warmup-steps 10000 --eval-samples 8`，不加载A/B权重。A追加：`--stage A --continue-checkpoint .../last.pt
+  --additional-steps 60000`（不自动授权）。
+- Shell入口：`...-condition-fixed`、`...-condition-dynamic`、`...-condition-smoke`；`...-fixed` 指Stage A，`...-kl` 指C。
+  环境覆盖 `CVAE_POSTERIOR_INIT_CHECKPOINT`、`CONTINUE_CHECKPOINT`、`ADDITIONAL_STEPS`、`MASK_MODE`、`EVAL_SAMPLES`、
+  `BETA_WARMUP_STEPS`、`ALLOW_LEGACY_IDENTITY`（短名均带 `CVAE_POSTERIOR_` 前缀）。Python CLI不受遗留Shell环境变量影响。
 
-B-dynamic 在正式B-fixed结果审核后用 `--stage B --mask-mode dynamic --init-checkpoint .../best.pt`
-并创建新run；C独立随机初始化，建议用 `--stage C --mask-mode dynamic --kl-beta 1e-3
---beta-warmup-steps 10000 --eval-samples 8`，不加载A/B权重。
-A追加60k的接口是 `--stage A --continue-checkpoint .../last.pt --additional-steps 60000`，
-学习率段仍用已有CLI设置；历史A需显式确认未知身份。当前不自动授权启动该续训。
+## 6. 结论边界与已封存 C run
 
-Shell保留旧入口；新明确入口是 `...-condition-fixed`、`...-condition-dynamic`、
-`...-condition-smoke`。`...-fixed` 仍指Stage A，`...-kl` 指C。
-环境覆盖新增 `CVAE_POSTERIOR_INIT_CHECKPOINT`、`CONTINUE_CHECKPOINT`、
-`ADDITIONAL_STEPS`、`MASK_MODE`、`EVAL_SAMPLES`、`BETA_WARMUP_STEPS`、
-`ALLOW_LEGACY_IDENTITY`（这些短名均带 `CVAE_POSTERIOR_` 前缀）。
-Python CLI 不受遗留Shell环境变量影响，优先用于可复现命令。
+A尾部定位与边界见process.md §2～6。维护分工：AGENTS.md（入口）、model.md（合同）、plan.md（计划与概要）、
+process.md（异常诊断）、dagger.md（DAgger）。Windows测试不能替代Ubuntu HDF5/CUDA smoke。
 
-## 6. 结论边界与维护
-
-A90k的max=0.219557已由只读重评定位为State joint_vel_14、window277、t46；
-model-only再训练60k后max=0.131111，转为joint_vel_28、window242、t64。
-normalization未见近零速度std；尾部仍有局部速度变化拟合不足，但不称为已证明不可下降。
-具体异常、物理误差、同坐标缺失证据及单变量验证边界见process.md，不同时改多个变量。
-
-当前维护AGENTS.md（入口）、model.md（合同）、plan.md（整体计划与概要）、process.md（必要异常诊断）；历史run和结果保留。
-Windows测试不能替代Ubuntu HDF5/CUDA smoke，亦不能证明训练质量或物理可行性。
-
-## 6.5 当前 C 阶段封存状态（2026-09-28）
-
-C 已在 Ubuntu 完成独立随机初始化训练，run 为
-`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113`。
-合同为 `stage=C`、`mask_mode=dynamic`、32 motion、1504 个 T64 窗口、batch32、360000 optimizer
-step、11520000 exposure，参数量 64,377,959；`source_checkpoint=null`，不继承 A/B 权重。
-有效 initialization/mask seed 为 20260921/20260920；启动命令中记录的 shell seed 20260824 只属于元数据，
-不能覆盖 effective config 身份。
-
-工程执行已通过：360000 条连续 train 记录、73 次完整评测、每步 batch32、Posterior/Condition 各调用一次、
-有限值、checkpoint/optimizer/scheduler 严格读回和 forward comparison 均通过。末步为 step360000，
-loss=4.14769e-5，learning rate=1e-6，grad=1.102e-3；summary 的 `execution_pass=true`、
-`quality_pass=null`，不能把工程 PASS 写成质量 PASS。
-
-末步 fixed bank 的归一化结果如下：
-
-| 路径 | energy | masked State / Action RMSE | full State / Action RMSE | State / Action max |
-|---|---:|---:|---:|---:|
-| posterior mean | 0.013585 | 0.016604 / 0.007912 | 0.008654 / 0.006309 | 0.7277 / 0.2511 |
-| posterior sample | 0.012063 | 0.017468 / 0.008526 | 0.009039 / 0.006644 | 0.9293 / 0.2525 |
-| standard normal（部署路径） | 0.027423 | 0.081051 / 0.040847 | 0.036627 / 0.026234 | 14.3284 / 2.4324 |
-| zero latent | 0.032803 | 0.070393 / 0.033941 | 0.031667 / 0.021927 | 14.7097 / 2.6927 |
-
-这证明 posterior 路径仍能重建已见窗口，但标准正态部署路径误差明显升高；不能宣称 C 已具备可靠的
-随机生成能力。held-out standard-normal 的 energy/full/masked 结果与坐标分组见 plan.md 第11节和
-process.md 第10节；数据仍是同一32-motion已见序列，不能解释为新motion泛化。
-
-当前下一步只允许：从 step360000 做只读末步尾部坐标、窗口身份和 latent 统计。
-不得对同一 C run 普通续训，也不得同时修改 loss、latent 维度、pooling 或网络宽度。
-
-### 6.6 KL3 eager 参考 run（2026-10-12）
-
-新增独立参考 run：
-`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl3_eager_200k_eval50k_noeval0_zlqw641k`。
-其合同固定为 `stage=C`、`mask_mode=fixed`、1504 T64 windows、12032 fixtures、200000 steps、
-`kl_beta=0.003`、BF16 eager、compile/cache/pin-memory/non-blocking 全关闭、`skip_initial_eval=true`。
-它从随机初始化开始，不加载 A/B 或其他 C checkpoint；dataset identity 为
-`cvae_overfit_subset_rebuilt_20260928_193357`，checkpoint SHA256 为
-`bc080d48a07e5861a2b8c2e0171cce980d35ee58eef7e921282c7597e3408a63`。
-
-训练执行与严格读回通过，但 `quality_pass` 保持 null。Posterior mean/sample 的 fixed masked RMSE
-约为 `0.013027/0.013251`；standard-normal 为 `0.025908`，held-out standard-normal 为
-`0.059997`。standard-normal fixed 最大 State 误差 `12.272463`，held-out 最大 State/Action
-误差 `11.898151/4.096210`，主要落在 `joint_vel`、`state_rollout` 和 `joint_gap_8` 尾部。
-这组数字属于同一 32-motion 已见窗口上的 Mask 迁移诊断，不是新 motion 泛化门禁。
-
-配套 `latent_distribution65` 报告已验证 best/last 与数据身份一致且逐字节同一 checkpoint。
-global 平均 KL `8.7081e-6`，local 平均 KL `0.002032`，`local_15` 为 `0.016562`；当前模型的
-部署校准问题仍未归因到单一机制。后续实验必须新建 run，不能从该 run 普通续训或同时改动多个
-latent/loss/decoder 变量。
+- 原C（kl_beta=1e-3，已封存）：`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113`；
+  四路线结果见plan.md §11。只允许从step360000做只读尾部诊断，不普通续训，不同时改loss、latent、pooling或宽度。
+- KL3参考（已封存）：
+  `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl3_eager_200k_eval50k_noeval0_zlqw641k`，
+  `skip_initial_eval=true`，compile/cache/pin-memory/non-blocking全关闭，checkpoint SHA256
+  `bc080d48a07e5861a2b8c2e0171cce980d35ee58eef7e921282c7597e3408a63`；结果见plan.md §20。后续实验必须新建run。
 
 ## 7. 65-token State／Action回放合同（2026-09-23）
 
-独立入口 `python -m cvae_sa.replay65 {prepare,simulate,render,report}`，协议 `65-token-replay-v1`。
-不更改训练模型或loss，不复用旧H50模型入口，不迁移H50权重。A接受历史65-token Stage-A checkpoint，
-缺失历史身份明确unknown；B/C只接受对应阶段的v2 checkpoint，拒绝旧posterior参与的B。
-A完整输入posterior mean；B condition-only；C固定epsilon标准正态部署。同一个C样本的S/A成对导出。
-所有Mask均True=隐藏，B/C在调用模型前再次置零隐藏真值。固定Mask seed默认从checkpoint训练合同读取，
-覆盖seed时不声称exact训练fixture。输出State65帧、Action64步，终点没有Action。
+独立入口 `python -m cvae_sa.replay65 {prepare,simulate,render,report}`，协议 `65-token-replay-v1`（v2扩展见plan.md §19）。
+不更改训练模型或loss，不复用旧H50入口。A接受历史65-token Stage-A checkpoint（缺失身份标unknown）；
+B/C只接受对应阶段的v2 checkpoint，拒绝旧posterior参与的B。A完整输入posterior mean；B condition-only；
+C固定epsilon标准正态部署。所有Mask均True=隐藏，B/C调用模型前再次置零隐藏真值。输出State65帧、Action64步。
 
 ### 7.1 准备、选择和原始基线
 
-prepare必须显式checkpoint/dataset/output和 `--window-index` 或 `--selection first-suite`。
-first-suite仅在checkpoint选中窗口中选episode起点、首个非零起点、八家族等权masked continuous MSE最差窗口，
-去重最多三个；选择得分也保存。每窗口离线报告八Mask，默认视频/物理代表为state_gap_16、action_gap_16、
-full_action、joint_gap_8。A按full prediction重放，八Mask统计只是同一完整重建的分区域诊断。
-各窗口独立子目录 `windows/wNNNNNN/`，checkpoint/data/normalization/source/hash与全部准备产物封存；
-再次执行prepare拒绝非空目录，simulate/render/report重验准备哈希。历史源目录、checkpoint和HDF只读。
+- prepare必须显式checkpoint/dataset/output和 `--window-index` 或 `--selection first-suite`（episode起点、首个非零起点、
+  八家族masked MSE最差窗口，去重最多三个）。默认视频/物理代表为state_gap_16、action_gap_16、full_action、joint_gap_8。
+- 各窗口独立子目录 `windows/wNNNNNN/`；再次prepare拒绝非空目录，simulate/render/report重验准备哈希。
+- 每窗口原始Action在两个独立num_envs=1进程执行。B/C只替换隐藏Action；`--action-mode full-prediction` 是另一实验。
+  反归一化后用记录nominal/scale/offset/clip转回raw，保留未裁剪预测与饱和计数。
+- `--state-only-continuation`：manifest中 `single_window_continuation=true` 与 `input_contract=state_only` 为验收标记（详见process.md §20）。
+- exact-init使用外层patch0009钩子：恢复采集后的物理参数，不重新抽取随机化；新interval事件替换为空操作并保存前后事件列表；
+  源采集有未记录日程的interval事件时拒绝。非零延迟的历史draw和队列未存储时不伪造恢复；接触缓存未恢复，不承诺位级等价。
+  回放中出现自动reset时在reset前停止，不拼接。
+- 原始源复现与重复性阈值：joint RMSE≤0.02rad、root RMSE≤0.05m、orientation max≤5°、body MPJPE≤0.05m、
+  contact accuracy≥95%。基线失败仍继续模型对照，但标 `BASELINE_INVALID / MODEL_QUALITY_UNDETERMINED`。
+  缺失字段、映射错误、NaN/Inf属于工程失败。
 
-每窗口原始Action在两个独立num_envs=1进程执行；后续Mask共享该组基线，不重复启动。
-B/C只替换隐藏Action，非Mask raw逐位保留；`--action-mode full-prediction`是显式另一个实验。
-State-only Mask不执行额外模型Action回放。反归一化后用记录nominal/scale/offset/clip转回raw，
-保留未裁剪预测、实际可实现目标、饱和计数及计划/实际raw和processed目标核对。
+### 7.2 State视频与报告
 
-三路线 A/B/C 的单窗口延伸比较可显式加 `--state-only-continuation`。该模式只选择一个
-checkpoint中的T64窗口；后续64步块复用该窗口的Mask/fixture身份，State从同一source capture
-提供，Action target只用于评分和物理回放，模型输入中的Action与`action_before_window`置零。
-manifest中的`single_window_continuation=true`与`input_contract=state_only`是该模式的验收标记，
-它不要求HDF5存在连续stride-64窗口。首块仍按原checkpoint-window输入合同运行。
+State三栏为HDF姿态、真实State积分重建、模型补全State积分重建，共享第0帧root锚点，标KINEMATIC ONLY。
+Action视频为HDF、原Action、模型Action三栏；另有HDF/原Action1/原Action2基线三栏；65帧50Hz，固定HDF相机。
+报告含分域误差、contact混淆/BCE、top100坐标、NPZ、逐帧误差及首次越界帧、初始化读回、runtime配置和seed；
+物理误差按单位组统计。`replay65_execution.ok` 仅表示仿真和视频完整，不代表模型通过。
 
-exact-init使用既有外层patch0009钩子，新payload opt-in开启runtime审计：恢复采集后的物理参数，
-不重新抽取随机化；新interval事件通过公共事件配置API替换为空操作，并保存前后事件列表。
-若源采集本身有未记录日程的interval事件，工程拒绝，不能随意移除真实源扰动。
-检查sim/control dt、decimation、gravity、solver配置、执行器类型/关节/延迟范围、可用asset hash；
-未知字段留痕。非零延迟的历史实际draw和队列未存储时不伪造恢复，runtime contract不标已验证。
-已记录的前一Action不能冒充整个历史队列。求解器接触缓存未恢复，不承诺位级仿真等价。
-回放中出现自动reset时在reset之前停止，保留部分轨迹、termination原因，不拼接成完整回放。
-
-初始化姿态/速度/参数身份、原始重复性、记录轨迹复现分别判断。接触传感器冷启动差异独立记录，
-不能人工写contact标签来假装恢复。原始源复现与重复性规则沿用：joint RMSE≤0.02rad、root RMSE≤0.05m、
-orientation max≤5°、body MPJPE≤0.05m、contact accuracy≥95%。不是位级确定性阈值，也不是C多解生成质量门禁。
-基线失败仍继续模型对照，但报告/Action视频标 `BASELINE_INVALID / MODEL_QUALITY_UNDETERMINED`。
-模型初态核验失败也单独标记，不能因原始基线通过而忽略。缺失字段、映射错误、NaN/Inf属于工程失败。
-
-### 7.2 State视频、报告与结论
-
-State三栏为HDF姿态、真实State积分重建、模型补全State积分重建。共享第0帧root锚点与同一积分规则；
-不逐帧校正到真值root。报告真实State积分误差、重力归一化、起始height锚定偏移，原预测不覆盖。
-State视频标KINEMATIC ONLY；不以其判断物理可执行。Action视频为HDF、原Action、模型Action三栏；
-另有HDF/原Action1/原Action2基线三栏。按固定HDF相机轨迹渲染、65帧50Hz，不渲染后挑选最佳采样。
-仿真使用真实初态，即使fixture隐藏了S0；初态仅进入仿真，报告注明，不用于模型输入。
-
-报告包含full/masked/visible分域误差、contact混淆/BCE、State/Action各top100坐标及物理单位、
-完整预测/真值/Mask NPZ、逐帧误差及首次越界帧、初始化读回、runtime配置和采样seed。
-另比较模型原始/补全State与配对Action实现State，物理误差按单位组统计，不混合rad、rad/s、m。
-`replay65_execution.ok`仅在预期仿真和视频完整后写入，不代表模型通过；baseline 无效时模型质量始终为
-`MODEL_QUALITY_UNDETERMINED`，仍可生成对照视频。
-未完成或异常run可回传已有材料，但不得充当完整验收。确认过哈希的原始基线和视频可复用，不覆盖未验证残留。
-
-### 7.3 Ubuntu命令（代码安全同步后；不与当前训练抢GPU）
-
-以下不会修改Ubuntu源码或安装依赖。先完成安全同步，确认SONIC已应用patch0009；历史exact-init成功的环境通常已有，
-不要重复应用。若下列只读hook检查失败，停止并回传，不直接启动仿真。
+### 7.3 Ubuntu命令（不修改源码或安装依赖；先确认SONIC已应用patch0009）
 
 ```bash
 cd /home/helloworld/bly/state-action-cvae
@@ -376,27 +234,17 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 python3 -m cvae_sa.replay65 --help
 rg -n 'apply_exact_replay_initialization' ../sonic-repro/GR00T-WholeBodyControl/gear_sonic/eval_agent_trl.py
-```
-
-首轮应先对准确 checkpoint 的窗口0执行原始双基线；C 已训练完成，但回放仍未形成有效结果。
-不要猜最新目录，也不要复用曾因 `markers/` 子目录缺失而封存失败的旧 C 回放目录。
-
-```bash
+# B 窗口0原始双基线
 read -r -p '请输入已完成的v2 B训练run绝对路径: ' B_RUN
 test -s "$B_RUN/checkpoints/best.pt" || { echo 'checkpoint不存在'; exit 1; }
 RUN_DIR=$(mktemp -d /home/helloworld/bly/runs/cvae_replay65_B_w0_XXXXXXXX)
-printf 'RUN_DIR=%s\n' "$RUN_DIR"
 python3 -m cvae_sa.replay65 prepare \
   --checkpoint "$B_RUN/checkpoints/best.pt" \
   --dataset-run /home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506 \
   --route B --window-index 0 --output-run "$RUN_DIR" && \
 python3 -m cvae_sa.replay65 simulate --run "$RUN_DIR" --baseline-only && \
 python3 -m cvae_sa.replay65 report --run "$RUN_DIR"
-```
-
-C 当前准确 checkpoint 的窗口0准备命令如下；它只创建新的回放 run，不修改训练目录：
-
-```bash
+# C 窗口0
 C_RUN=/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113
 RUN_DIR=$(mktemp -d /home/helloworld/bly/runs/cvae_replay65_C_w0_XXXXXXXX)
 python3 -m cvae_sa.replay65 prepare \
@@ -406,176 +254,81 @@ python3 -m cvae_sa.replay65 prepare \
   --sample-seed 20260923 --sample-index 0 --simulation-seed 20260923
 python3 -m cvae_sa.replay65 simulate --run "$RUN_DIR" --baseline-only
 python3 -m cvae_sa.replay65 report --run "$RUN_DIR"
-```
-
-先检查该 baseline 报告；baseline 无效仍可继续生成模型对照视频，但报告必须保留
-`BASELINE_INVALID` 和 `MODEL_QUALITY_UNDETERMINED`。若是工程错误，停止并建立新 run，
-不要手工补 marker 或复用失败目录。
-
-基线报告检查后，仍在同一终端对同窗口补充模型回放和三栏视频；若基线质量失败，按用户要求继续生成警告视频。
-若是工程失败，不强行继续。脚本复用已校验双基线，不重复运行。
-
-```bash
+# 基线检查后：模型回放、三栏视频与导出
 python3 -m cvae_sa.replay65 simulate --run "$RUN_DIR" && \
 python3 -m cvae_sa.replay65 render --run "$RUN_DIR" \
   --model /home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/decoupled_wbc/control/robot_model/model_data/g1/g1_29dof_old.xml && \
 python3 -m cvae_sa.replay65 report --run "$RUN_DIR" --export
-```
-
-另一终端监控；输入上面打印的准确回放目录，Ctrl-C只停止监控：
-
-```bash
-cd /home/helloworld/bly/state-action-cvae
-source /home/helloworld/bly/sonic-repro/.venv-sonic/bin/activate
-export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-read -r -p '请输入RUN_DIR: ' RUN_DIR
+# 另一终端监控
 python3 -m cvae_sa.cvae_tools monitor --run "$RUN_DIR" --interval 10
 ```
 
-回传 `$RUN_DIR/replay65_report.zip` 和需要人工查看的 `$RUN_DIR/windows/w000000/videos/*.mp4`。
-ZIP含小型预测/恢复/误差NPZ、配置、哈希、日志、曲线和报告，不含HDF/checkpoint/MP4/pickle；已存在ZIP不覆盖。
-只需回传中途诊断时可直接 `python3 -m cvae_sa.replay65 report --run "$RUN_DIR" --export`，报告明确缺失场景。
-最终回传需新文件名时用 `report --run "$RUN_DIR" --export --output "$RUN_DIR/replay65_report_final.zip"`，不删除旧包。
-
-首轮审核后，再在新run把 `--window-index 0` 换成 `--selection first-suite`；不要提前自动扩展。
-A参考另建run使用 `--route A --window-index 0` 和
-`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260923_012104/checkpoints/best.pt`，
-其余dataset、simulate/render/report不变。B-fixed必须优先使用其 `best_fixed.pt`，B-dynamic必须使用
-`best_heldout.pt`（不能使用 dynamic 的 `best.pt`，它对应 step0 源权重）。C 使用
-`/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113/checkpoints/best.pt`
-和 `--route C --sample-seed ... --sample-index ...`，走标准正态部署路径。
+- 工程错误时停止并建立新run，不手工补marker、不复用失败目录（含因 `markers/` 缺失而失败的旧C回放目录）。
+- 回传 `$RUN_DIR/replay65_report.zip` 与 `$RUN_DIR/windows/w000000/videos/*.mp4`；ZIP不含HDF/checkpoint/MP4/pickle，
+  已存在不覆盖，最终包用 `report --run "$RUN_DIR" --export --output "$RUN_DIR/replay65_report_final.zip"`。
+- 首轮审核后再在新run用 `--selection first-suite`。A参考用 `--route A --window-index 0` 和
+  `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_fixed_20260923_012104/checkpoints/best.pt`；
+  B-fixed用 `best_fixed.pt`，B-dynamic用 `best_heldout.pt`（dynamic的 `best.pt` 对应step0源权重）；C用
+  `/home/helloworld/bly/runs/cvae_posterior_hierarchical_standard_cvae_65_kl_20260925_211113/checkpoints/best.pt`
+  和 `--route C --sample-seed ... --sample-index ...`。
 
 ## 8. v2 运行时优化合同（2026-10-04）
 
-逐特征标准化和 canonical Action 目标保持不变：`A_norm=(A-canonical_mean)/canonical_std`。
-当前模型没有 Action residual 分支，优化不改变 State/Action 数据合同、模型结构、loss 或
-latent 语义。旧 C run 实际是 FP32 eager；下面的设置只用于新 run，既有 checkpoint、HDF5 和
-normalization 统计保持只读。
-
-活动配置默认启用 BF16 mixed precision、stage-specific `torch.compile` 和同步窗口缓存。模型
-参数、AdamW 状态、normalization/denormalization、mask 判断、KL 的 exp/logvar/reduction、
-重建 MSE、contact BCE、最终 reduction、latent mean/logvar/epsilon/variance 与全部评测指标
-保持 FP32；CUDA autocast 只覆盖密集前向。BF16 不启用 GradScaler，启动时不支持 BF16 会直接失败。
-
-runtime contract 会记录 precision、autocast、参数/优化器 dtype、BF16 支持、TF32、compile
-参数、cache、pin-memory 和 non-blocking 状态。精确 resume 要求该 contract 一致；改变运行时选项
-必须建立新的 controlled initialization run。compile 只包住 A/B/C 或标准正态 inference 的
-forward/loss callable，strict readback 仍走 eager；首次编译耗时、是否成功、fallback 原因、
-graph break/recompile 字段写入 checkpoint 和 summary。
-
-`data.cache_mode=auto` 时，选定窗口的已标准化 CPU tensors 写入当前 run 的
-`data/normalized_windows.pt`，identity 同时绑定 dataset manifest、episode index、normalization
-和 selected-window hash。B-fixed/C 的八个 mask fixture 共享一个缓存窗口；超出上限自动回到同步
-HDF5 路径并记录原因。RecoverableSampler 的 permutation、cursor、epoch、exposure 和 RNG 合同
-保持不变。BF16/compile/cache 的 Ubuntu smoke、数值 parity 和稳态吞吐仍需新 run 验证，不能把
-静态实现检查当作速度或模型质量结论。
+逐特征标准化和canonical Action目标不变：`A_norm=(A-canonical_mean)/canonical_std`，无Action residual分支。
+旧C run实际是FP32 eager；新设置只用于新run。BF16只覆盖CUDA密集前向；参数、AdamW状态、normalization、mask判断、
+KL的exp/logvar/reduction、重建MSE、contact BCE、latent统计与评测指标保持FP32；不用GradScaler，不支持BF16直接失败。
+runtime contract记录precision、autocast、dtype、TF32、compile、cache、pin-memory、non-blocking；精确resume要求一致，
+改变运行时选项必须新建controlled initialization run。`data.cache_mode=auto` 写入当前run的 `data/normalized_windows.pt`，
+identity绑定dataset manifest、episode index、normalization和selected-window hash；超出上限回到同步HDF5路径。
+RecoverableSampler的permutation、cursor、epoch、exposure和RNG合同不变。
 
 ## 9. C latent 分组诊断（2026-10-04）
 
-C 的 KL 定义仍是 `0.5 * (global_kl + local_kl)`，其中 global 是 256 维均值、local 是
-`[16,128]` 均值。为避免这个双重平均掩盖局部坍缩，`cvae_sa.latent_distribution65` 对完整
-State--Action window 只调用 Posterior Encoder，按一个 `global` 和十六个 `local` chunk
-分别保存逐维 KL、posterior mean、sigma 及固定 seed 的 posterior samples。该 posterior
-reference 是完整序列的统计估计，不是可观测物理真值，也不改变 C 的 standard-normal 部署合同。
-
-诊断必须同时查看 group-level 分布图、global/local 逐维 KL 热图、posterior-mean 跨窗口方差
-以及 sample 的均值/标准差相对 `N(0,1)` 的差距；单独一个很小的平均 KL 不足以证明十七组均已
-校准。重建数据集回放必须在 manifest 中标记 recovered identity，不能与严格原始数据复现混同。
-
-`cvae_sa.latent_normality65` 对该诊断的 `latent_arrays.npz` 做逐维只读后处理，输出 KS 距离、
-偏度、超额峰度、尾部分位数和 `near_standard_normal` 启发式标签；这些标签用于定位非高斯维度，
-不改变 latent 合同，也不替代四条 C 路径的质量评测。
+C的KL定义为 `0.5 * (global_kl + local_kl)`（global 256维均值、local `[16,128]` 均值）。`cvae_sa.latent_distribution65`
+只调用Posterior Encoder，按 `global` 和十六个 `local` 分别保存逐维KL、posterior mean、sigma及固定seed sample；
+posterior reference是统计估计，不是物理真值。`cvae_sa.latent_normality65` 对 `latent_arrays.npz` 做只读后处理，
+`near_standard_normal` 只是启发式标签，不替代四条C路径的质量评测。输出文件见plan.md §16。
 
 ## 10. Compiled runtime 修复（2026-10-11）
 
-旧的 `bf16_compiled_uncached` run 使用 `max-autotune`，在 step 0 的第一次 C 评测中因 CUDA
-Graph 输出 buffer 被后续调用覆盖而失败；该目录只作为工程失败证据，不能 resume。当前修复把
-autocast context 移到 compiled core 外部，并在评测输出进入 `outputs` 前对 physical State、
-Action 和 contact logits 执行 detach/clone，保证 eager diagnostics 拥有自己的 tensor storage。
-
-默认 compile mode 已切换为 `max-autotune-no-cudagraphs`。compiled route 发生运行时异常或达到
-Dynamo recompile limit 时只允许一次显式 eager fallback，并在 `compile_info`、failure/progress
-和 checkpoint runtime contract 中记录 requested/succeeded、fallback reason/phase、graph breaks、
-recompiles、cold start 与 output ownership contract。BF16 参数、AdamW 状态、KL/重建/contact
-loss 和评测指标的 FP32 保留区域不变。
+默认compile mode为 `max-autotune-no-cudagraphs`；autocast context在compiled core外部，评测输出对physical State、Action和
+contact logits执行detach/clone。运行时异常或Dynamo recompile limit只允许一次显式eager fallback，在 `compile_info`、
+failure/progress和checkpoint runtime contract中记录requested/succeeded、fallback reason/phase、graph breaks、recompiles、
+cold start与output ownership contract。旧 `bf16_compiled_uncached` 失败目录不能resume。
 
 ## 11. T64 连续动作分段与 192 步推理
 
-新增 `sonic_long_horizon_state_action_dataset_v1` 派生合同。原始 episode 被视为完整 motion clip，
-按 192 transition 非重叠分组，每组最多三个连续 T64 窗口；尾部 group 保留 valid padding，所有有效
-Action 必须恰好覆盖一次。新 manifest 只保存 group/window/source hash，HDF5 保持只读，normalization
-沿用源训练 split。
+派生合同 `sonic_long_horizon_state_action_dataset_v1`：episode按192 transition非重叠分组，每组最多三个连续T64窗口；
+尾部group保留valid padding，所有有效Action恰好覆盖一次；manifest只保存group/window/source hash，normalization沿用源split。
+模型仍只接收单个T64窗口。长时standard-normal路径：
 
-65-token 模型仍只接收单个 T64 窗口。长时评测提供两条 standard-normal 路径：`full_action_t64`
-对每个窗口隐藏全部 Action；`tail32_context_next32` 使用前 32 步完整 State/Action 和后 32 步
-State，隐藏后 32 步 Action。后者的首块需要 32 步 warm-up，且当前默认随机 Mask 未直接包含 32-step
-Action gap，因此质量必须单独标记为结构化 held-out/OOD 诊断。
+- `full_action_t64`：每窗口隐藏全部Action。
+- `tail32_context_next32`：前32步完整State/Action加后32步State，隐藏后32步Action；首块需32步warm-up，属结构化held-out/OOD诊断，
+  不能当作递归闭环B或物理外推质量证据。
+- `recursive_state_feedback_b`：先生成临时64步Action只执行前32步，再用真实执行State、上一段Action和记录未来State预测下一段32步；
+  每个segment记录raw Action、exact initialization、执行State、mask identity和baseline replay。
+- `cvae_sa.long_horizon_ab_compare`：同一192-step窗口内比较A与递归B，以recorded source和Origin Action replay为参考；
+  KL2与KL4各自成组。
 
-C 阶段评估提速已在 Windows 实现：训练 `micro_batch=32` 与评估 `eval_micro_batch=128` 分离，
-默认每 5000 步执行全 fixture 的 summary evaluation，每 50000 步及最终步执行 full diagnostic
-evaluation；`eval_samples=8`、fixed/held-out Mask、route 和 sample identity 不变。summary 只跳过
-per-fixture trace、SVG 和大体积 diagnostics 写盘，不参与 `best.pt` 选择；full evaluation 仍执行
-原质量指标和 checkpoint 选择。FP32 eager 路径按 batch 复用 posterior/condition encoder，并将
-多个 checkpoint alias 使用一次序列化 payload 写出；cached/pinned runtime 另有独立配置，尚未有
-Ubuntu CUDA throughput 证据。
-### Recursive state-feedback B
+C评估提速：`micro_batch=32` 与 `eval_micro_batch=128` 分离，summary evaluation不参与 `best.pt` 选择（细节见plan.md §21）。
 
-当前新增 `recursive_state_feedback_b` 作为独立长时诊断路径。它先用完整 T64 State 输入
-生成临时 64-step Action，只执行前 32 步；随后使用真实 simulator 执行 State、上一段已生成
-Action 和记录的未来期望 State 预测下一段 32 步，并在每个 block 后重新执行 simulator。旧的
-`tail32_context_next32` 保留为 recorded-context/OOD 诊断，不能当作递归闭环 B 或物理外推质量
-证据。递归路径必须分别记录每个 segment 的 raw Action、exact initialization、执行 State、
-mask identity 和 baseline replay。
+## 12. G1+ unlocked31 资产、模型与迁移状态（2026-10-20）
 
-多动作诊断新增 `cvae_sa.long_horizon_ab_compare`。它在同一 192-step source window 内比较 A
-与递归 B，分别以 recorded source 和 Origin Action replay 为参考，按 transition 输出综合连续
-State RMSE、canonical Action RMSE、contact disagreement，并记录最大误差关节/State feature。
-KL2 与 KL4 必须各自成组，不在同一曲线中比较 checkpoint。
-
-## 22. G1+ unlocked31 资产、模型与迁移状态（2026-10-20）
-
-G1+ 原始资产只读位置：
-
-```text
-/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/data/assets/robot_description/urdf/g1_plus/
-```
-
-必须保留 `g1_pl.urdf`、`meshes/` 和 `motor_info.md`。run-local 准备和转换产物位于：
+源bundle、final fixed6路径、sha256与三动作ghost目录见plan.md §22。run-local准备和转换产物位于：
 
 ```text
 /home/helloworld/bly/runs/g1plus_unlocked31_diag_20261019_160509_3309439/unlocked31_run/
 ```
 
-最终使用：
+最终使用 `assets/g1_pl_unlocked31_mujoco_fixed6.xml`（sha256=abd1a3dcccdeb43e163ef0d6f21d9eec2e6d426c97fb255d4c3dfe452aa34455）。
+转换器 `urdf2mjcf==0.0.4` 的两个缺陷已在run-local副本中修正：
 
-```text
-assets/g1_pl_unlocked31_mujoco_fixed6.xml
-sha256=abd1a3dcccdeb43e163ef0d6f21d9eec2e6d426c97fb255d4c3dfe452aa34455
-```
+1. 删除 `add_visual_geom_logic()` 产生的缺失 `size`/空 `type` 视觉复制geom；
+2. 为converter synthetic `root` 保留freejoint，并写入原始pelvis的 `fullinertia`，而不是零质量root或虚构小质量。
 
-转换器 `urdf2mjcf==0.0.4` 的两个缺陷已在 run-local 副本中修正：
-
-1. 删除 `add_visual_geom_logic()` 产生的缺失 `size`/空 `type` 视觉复制 geom；
-2. 为 converter synthetic `root` 保留 freejoint，并写入原始 pelvis 的 `fullinertia`，而不是使用
-   零质量 root 或虚构小质量。
-
-fixed6 已通过 `nq=38`、`nv=37`、`njnt=32`、`nu=31`，两个 neck joint 为 hinge，profile
-mapping 通过。它是 31-DoF G1+ runtime model；29-DoF C checkpoint 仍只负责 body joints，
-neck 是额外渲染变量，不声称 checkpoint 已扩展为 31-D policy。
-
-三动作 C ghost 归档为：
-
-```text
-/home/helloworld/bly/runs/g1plus_unlocked31_action_01_source_static_moving_ghost_20261020_002708_157847/
-/home/helloworld/bly/runs/g1plus_unlocked31_action_02_source_static_moving_ghost_20261020_002708_157847/
-/home/helloworld/bly/runs/g1plus_unlocked31_action_03_source_static_moving_ghost_20261020_002708_157847/
-```
-
-每个目录中的 `videos/ghost_source_static_moving.mp4` 为 193 帧、50 Hz；manifest 记录 source、
-C recursive replay、neck static/moving 三层、模型 hash、runtime XML hash 和 `kinematic_only=true`。
-source 路径是 `windows/w000000/data/source.trajectory.pkl`；C route 路径是
+fixed6是31-DoF G1+ runtime model；29-DoF C checkpoint仍只负责body joints，neck是额外渲染变量，不声称checkpoint已扩展为31-D policy。
+每个ghost目录的 `videos/ghost_source_static_moving.mp4` 为193帧、50 Hz；manifest记录source、C recursive replay、neck static/moving
+三层、模型hash、runtime XML hash和 `kinematic_only=true`。source路径是 `windows/w000000/data/source.trajectory.pkl`；C route路径是
 `windows/w000000/simulations/recursive_state_feedback_b/data/replay/000000.trajectory.pkl`。
-
-上一轮 `simulate_g1_plus_action_compare.py` 的 static-zero body control 会导致机器人在重力下
-逐渐蹲下；该结果只说明“无身体控制的 free-floating rollout 会失稳”，不能替代 C replay，也不应
-作为 G1+ 兼容性质量结论。C canonical Action 是关节目标，不能直接当作 fixed6 MJCF 的 torque ctrl。
+`simulate_g1_plus_action_compare.py` 的static-zero body control会让机器人在重力下蹲下，只说明无身体控制会失稳；
+C canonical Action是关节目标，不能直接当作fixed6 MJCF的torque ctrl。
