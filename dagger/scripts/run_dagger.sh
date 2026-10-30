@@ -37,6 +37,15 @@ SONIC_REPO_ROOT="${SONIC_REPO_ROOT:-$HOME/bly/sonic-repro/GR00T-WholeBodyControl
 SONIC_TEACHER_CHECKPOINT="${SONIC_TEACHER_CHECKPOINT:-$SONIC_REPO_ROOT/sonic_release/last.pt}"
 SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$HOME/bly/runs}"
 STATE_ACTION_CVAE_ROOT="${STATE_ACTION_CVAE_ROOT:-$HOME/bly/state-action-cvae}"
+if [[ "$MODE" == sonic-causal-* && -z "${DAGGER_MOTION_FILE:-}" ]]; then
+  # C training data comes from the Physics v5 reference subset; DAgger motions must be loadable from it.
+  REFERENCE_SUBSET_POINTER="$SONIC_RUNS_ROOT/latest_overfit_reference_motion_subset_run_dir.txt"
+  test -s "$REFERENCE_SUBSET_POINTER" || {
+    echo "Set DAGGER_MOTION_FILE or create $REFERENCE_SUBSET_POINTER" >&2
+    exit 2
+  }
+  DAGGER_MOTION_FILE="$(<"$REFERENCE_SUBSET_POINTER")/data/robot_filtered"
+fi
 DAGGER_MOTION_FILE="${DAGGER_MOTION_FILE:-$SONIC_REPO_ROOT/data/motion_lib_bones_seed/robot_filtered}"
 DAGGER_RESUME_RUN="${DAGGER_RESUME_RUN:-}"
 if [[ "$MODE" == cvae-kl2-* ]]; then
@@ -166,6 +175,10 @@ if [[ "$MODE" == sonic-causal-smoke || "$MODE" == sonic-causal-pilot ]]; then
   export SONIC_CAUSAL_STUDENT_CHECKPOINT
   test -s "$SONIC_CAUSAL_STUDENT_CHECKPOINT" || {
     echo "SONIC_CAUSAL_STUDENT_CHECKPOINT is missing or empty" >&2
+    exit 2
+  }
+  test -d "$DAGGER_MOTION_FILE" || {
+    echo "DAGGER_MOTION_FILE is missing or not a directory: $DAGGER_MOTION_FILE" >&2
     exit 2
   }
 fi

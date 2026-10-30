@@ -59,6 +59,7 @@ def save_checkpoint(
         "best_metric": float(best_metric),
         "dataset_run": str(dataset.dataset_run),
         "dataset_manifest": dataset.manifest,
+        "train_motion_keys": dataset.motion_keys,
         "normalization": {
             "state_mean": dataset.state_mean,
             "state_std": dataset.state_std,
@@ -69,7 +70,7 @@ def save_checkpoint(
         },
         "training_config": config,
     }
-    atomic_torch_save(payload, path)
+    atomic_torch_save(path, payload)
 
 
 def load_checkpoint(
@@ -103,6 +104,17 @@ def _batch_loss(
     standard_output = model.infer_from_condition(
         batch,
         epsilon=torch.randn_like(posterior_output.global_latent),
+    )
+    if posterior_output.posterior is None:
+        raise RuntimeError("C-stage output did not contain a posterior")
+    return compose_causal_c_loss(
+        posterior_action=posterior_output.action,
+        standard_normal_action=standard_output.action,
+        target_action=batch["target_action"],
+        posterior=posterior_output.posterior,
+        posterior_weight=1.0,
+        standard_normal_weight=0.5,
+        kl_beta=kl_beta,
     )
 
 
@@ -148,17 +160,6 @@ def _evaluate_routes(
             sums[name] += float((value.float() - target).square().sum())
         count += int(target.numel())
     return {name: (value / max(1, count)) ** 0.5 for name, value in sums.items()}
-    if posterior_output.posterior is None:
-        raise RuntimeError("C-stage output did not contain a posterior")
-    return compose_causal_c_loss(
-        posterior_action=posterior_output.action,
-        standard_normal_action=standard_output.action,
-        target_action=batch["target_action"],
-        posterior=posterior_output.posterior,
-        posterior_weight=1.0,
-        standard_normal_weight=0.5,
-        kl_beta=kl_beta,
-    )
 
 
 def train(config: dict[str, Any]) -> dict[str, Any]:
@@ -170,10 +171,16 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
         split="train",
         max_samples=data_config.get("max_samples"),
     )
-    val_dataset = SonicCausalDataset(
-        data_config["dataset_run"],
-        split="val",
-        max_samples=data_config.get("max_val_samples"),
+    use_validation = bool(data_config.get("use_validation", True))
+    readback_split = "validation" if use_validation else "train"
+    readback_dataset = (
+        SonicCausalDataset(
+            data_config["dataset_run"],
+            split="validation",
+            max_samples=data_config.get("max_val_samples"),
+        )
+        if use_validation
+        else train_dataset
     )
     batch_size = int(config.get("training", {}).get("micro_batch", 32))
     train_loader = DataLoader(
@@ -184,7 +191,7 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
         collate_fn=causal_collate,
     )
     val_loader = DataLoader(
-        val_dataset,
+        readback_dataset,
         batch_size=min(batch_size, 128),
         shuffle=False,
         num_workers=0,
@@ -255,12 +262,14 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
         "execution_pass": True,
         "stage": "C",
         "optimizer_steps": step,
-        "validation_loss": val_loss,
-        "validation_action_rmse": validation_routes,
+        "readback_split": readback_split,
+        f"{readback_split}_loss": val_loss,
+        f"{readback_split}_action_rmse": validation_routes,
         "checkpoint": str(checkpoint_path),
         "dataset_run": str(train_dataset.dataset_run),
         "train_samples": len(train_dataset),
-        "validation_samples": len(val_dataset),
+        "train_motion_keys": train_dataset.motion_keys,
+        "validation_samples": len(readback_dataset) if use_validation else 0,
         "architecture_version": model.ARCHITECTURE_VERSION,
     }
     (output_dir / "summary.json").write_text(

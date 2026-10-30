@@ -810,6 +810,40 @@ def _run_cvae(config, run_dir: Path, device: torch.device, args_cli, prepared: d
     return env, manifest
 
 
+def _select_sonic_causal_motions(config) -> list[str]:
+    """Pin DAgger motions to keys the C-stage student actually trained on."""
+
+    import random
+
+    checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    seen = sorted(str(key) for key in payload.get("train_motion_keys") or [])
+    if not seen:
+        raise ValueError(
+            f"{checkpoint} has no train_motion_keys; retrain C with the current sonic_causal_train"
+        )
+    requested = [str(key) for key in (config.dagger.get("motion_keys", []) or [])]
+    if requested:
+        unseen = sorted(set(requested) - set(seen))
+        if unseen:
+            raise ValueError(f"DAgger motion keys were not seen in C training: {unseen}")
+    else:
+        count = int(config.dagger.get("motion_count", 0) or 0)
+        if count <= 0 or count > len(seen):
+            raise ValueError(
+                f"motion_count={count} must be in [1, {len(seen)}] C-trained motions"
+            )
+        seed = int(config.dagger.get("motion_seed", int(config.seed)))
+        requested = random.Random(seed).sample(seen, count)
+    config.dagger.motion_keys = requested
+    config.dagger.max_unique_motions = len(requested)
+    print(
+        f"[dagger] sonic_causal motions={requested} (from {len(seen)} C-trained motions)",
+        flush=True,
+    )
+    return seen
+
+
 def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
     """Run the independent 10-history/10-reference single-step DAgger path."""
 
@@ -836,6 +870,12 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
             action_clip_value=config.student.get("action_clip_value", 20.0),
             kl_beta=float(config.student.get("kl_beta", 0.002)),
         )
+        loaded_motions = [str(key) for key in (getattr(env, "motion_keys", None) or [])]
+        unseen = sorted(set(loaded_motions) - set(student.train_motion_keys))
+        if not loaded_motions or unseen:
+            raise RuntimeError(
+                f"DAgger env loaded motions not seen in C training: {unseen or 'none loaded'}"
+            )
         teacher = SonicReleaseTeacher(
             config=prepared["release_config"],
             env=env,
@@ -959,6 +999,8 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
             "sonic_commit": _git_head(prepared["sonic_root"]),
             "teacher_checkpoint": str(Path(str(config.teacher_checkpoint)).expanduser().resolve()),
             "teacher_checkpoint_sha256": teacher.checkpoint_sha256,
+            "c_train_motion_keys": list(student.train_motion_keys),
+            "dagger_motion_keys": loaded_motions,
             "student_checkpoint": str(checkpoint),
             "student_checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
             "source_dataset_run": str(source_dataset.dataset_run),
@@ -2328,6 +2370,8 @@ def main() -> None:
         f"device={device}",
         flush=True,
     )
+    if str(config.mode).startswith("sonic_causal"):
+        _select_sonic_causal_motions(config)
     prepared = _prepare_release_env(config, run_dir)
     print("[dagger] launching Isaac app", flush=True)
     launcher, args_cli = _launch_app(config)

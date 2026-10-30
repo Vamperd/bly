@@ -70,6 +70,7 @@ class SonicCausalStudentAdapter:
             raise ValueError("SONIC causal checkpoint architecture signature mismatch")
         self.model.load_state_dict(payload["model_state_dict"], strict=True)
         self.model.eval()
+        self.train_motion_keys = [str(key) for key in payload.get("train_motion_keys") or []]
         self.checkpoint_path = checkpoint_path
         self.checkpoint_sha256 = _sha256(checkpoint_path)
         self.model_signature = expected
@@ -282,6 +283,7 @@ class SonicCausalStudentAdapter:
             },
             "source_checkpoint": str(self.checkpoint_path),
             "source_checkpoint_sha256": self.checkpoint_sha256,
+            "train_motion_keys": list(self.train_motion_keys),
             "round_index": int(round_index),
             "latent_mode": self.latent_mode,
             "kl_beta": self.kl_beta,

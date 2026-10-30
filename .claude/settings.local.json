@@ -15,7 +15,24 @@
       "Bash(git -C /c/Users/86136/Desktop/code/RL/bly status --short)",
       "Bash(git -C /c/Users/86136/Desktop/code/RL/bly diff --stat)",
       "Read(//c/Users/86136/.claude/**)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(PYTHONPATH=src python -m pytest tests/test_sonic_causal_model.py -q)",
+      "Bash(PYTHONPATH=\"src;.\" python /tmp/causal_c_smoke.py)",
+      "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python /tmp/causal_c_smoke.py)",
+      "Bash(sed -n 385,430p src/cvae_sa/dataset.py)",
+      "Bash(sed -n 183,195p tests/fixtures.py)",
+      "Bash(sed -n 130,160p ../sonic-repro-kit/consolidate_physics_state_action.py)",
+      "Bash(sed -n 130,145p ../sonic-repro-kit/verify_physics_state_action.py)",
+      "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python -W ignore /tmp/causal_c_smoke.py)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" /c/python/envs/pytorch/python -m pytest tests/test_sonic_causal_loop.py tests/test_sonic_causal_student.py tests/test_sonic_causal_window.py tests/test_sonic_env_contract.py -q)",
+      "Bash(PYTHONPATH=\"src;.;../dagger/src\" /c/python/envs/pytorch/python -W ignore /tmp/causal_c_smoke.py)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" /c/python/envs/pytorch/python -m unittest tests.test_sonic_causal_loop tests.test_sonic_causal_student tests.test_sonic_causal_window tests.test_sonic_env_contract)",
+      "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python -m unittest tests.test_sonic_causal_model)",
+      "Bash(grep -n '=\\\\\"\\\\${')",
+      "Bash(sed -n 1565,1650p ../sonic-repro-kit/sonic_repro.sh)",
+      "Bash(bash -n dagger/scripts/run_dagger.sh)",
+      "Bash(/c/python/envs/pytorch/python -)",
+      "Bash(/c/python/envs/pytorch/python -m pip download omegaconf --no-deps -d /tmp/omega -q)"
     ]
   }
 }

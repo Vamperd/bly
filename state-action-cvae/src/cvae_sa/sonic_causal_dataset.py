@@ -118,6 +118,14 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
     def __len__(self) -> int:
         return len(self.refs)
 
+    @property
+    def motion_keys(self) -> list[str]:
+        """Motion keys that actually contribute samples after ``max_samples``."""
+
+        return sorted(
+            {str(self.episodes[ref.episode_index]["motion_key"]) for ref in self.refs}
+        )
+
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state["_handles"] = {}
