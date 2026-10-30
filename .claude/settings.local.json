@@ -32,7 +32,12 @@
       "Bash(sed -n 1565,1650p ../sonic-repro-kit/sonic_repro.sh)",
       "Bash(bash -n dagger/scripts/run_dagger.sh)",
       "Bash(/c/python/envs/pytorch/python -)",
-      "Bash(/c/python/envs/pytorch/python -m pip download omegaconf --no-deps -d /tmp/omega -q)"
+      "Bash(/c/python/envs/pytorch/python -m pip download omegaconf --no-deps -d /tmp/omega -q)",
+      "Read(//c/c/Users/86136/Desktop/code/RL/bly/**)",
+      "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python -m unittest discover -s tests -p \"test_sonic_causal*.py\")",
+      "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python /tmp/causal_check/check.py /tmp/causal_check/old_dataset.py)",
+      "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python -m unittest tests.test_sonic_causal_model tests.test_indexer_dataset)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src;.\" /c/python/envs/pytorch/python -m unittest discover -s tests -p \"*sonic_causal*\")"
     ]
   }
 }

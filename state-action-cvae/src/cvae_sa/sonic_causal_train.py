@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 from pathlib import Path
 from typing import Any
 
@@ -211,10 +212,15 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
     output_dir = Path(config.get("output_dir", "runs/sonic_causal_cvae"))
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "checkpoints" / "best.pt"
+    latest_path = output_dir / "checkpoints" / "latest.pt"
+    max_train_seconds = training.get("max_train_seconds")
+    checkpoint_interval = int(training.get("checkpoint_interval", 0))
+    started = time.monotonic()
+    out_of_time = False
     best = math.inf
     step = 0
     model.train()
-    while step < max_steps:
+    while step < max_steps and not out_of_time:
         for cpu_batch in train_loader:
             batch = _device_batch(cpu_batch, device)
             loss, _terms = _batch_loss(model, batch, kl_beta=kl_beta)
@@ -227,8 +233,27 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
             )
             optimizer.step()
             step += 1
+            elapsed = time.monotonic() - started
             if step % int(training.get("log_interval", 50)) == 0 or step == max_steps:
-                print(f"[sonic-causal] step={step}/{max_steps} loss={float(loss):.6g}")
+                print(
+                    f"[sonic-causal] step={step}/{max_steps} loss={float(loss):.6g} "
+                    f"elapsed={elapsed / 3600:.2f}h it/s={step / max(elapsed, 1e-9):.2f}",
+                    flush=True,
+                )
+            if checkpoint_interval > 0 and step % checkpoint_interval == 0:
+                save_checkpoint(
+                    latest_path,
+                    model,
+                    optimizer,
+                    config=config,
+                    step=step,
+                    best_metric=float(loss),
+                    dataset=train_dataset,
+                )
+            if max_train_seconds is not None and elapsed >= float(max_train_seconds):
+                print(f"[sonic-causal] time limit reached at step={step}", flush=True)
+                out_of_time = True
+                break
             if step >= max_steps:
                 break
     model.eval()
@@ -262,6 +287,8 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
         "execution_pass": True,
         "stage": "C",
         "optimizer_steps": step,
+        "train_seconds": time.monotonic() - started,
+        "stopped_by_time_limit": out_of_time,
         "readback_split": readback_split,
         f"{readback_split}_loss": val_loss,
         f"{readback_split}_action_rmse": validation_routes,

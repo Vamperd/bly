@@ -766,3 +766,38 @@ sha256:        abd1a3dcccdeb43e163ef0d6f21d9eec2e6d426c97fb255d4c3dfe452aa34455
 该 C 多动作 run、原始 G1+ bundle、asset audit run 和 final fixed6 run 在视频归档后仍需保留。
 旧单动作 neck compare、zero-body-control dynamics compare、z-fight/prepare 中间 run 只在其
 manifest/失败证据已归档后作为候选清理，不自动删除。
+
+## 23. 10 历史 reference CVAE 的 Physics v5 数据链路（2026-10-30）
+
+`sonic-10history-reference-cvae-v1` 的 C/DAgger 全部基于下列 run，按依赖顺序排列，
+均需保留；任一被删除都必须从该步起整条链路重建（采集、索引、C、DAgger），不能混用：
+
+```text
+# 32-motion 选择（第 12 节重建，seed=20260828，8 package x 4）
+/home/helloworld/bly/runs/cvae_overfit_subset_rebuilt_20260928_193357
+# 2048-motion BONES ingest（PKL 真实来源，子集只读符号链接指向这里）
+/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447
+# 32-motion reference 采集输入（robot_filtered/*.pkl 为绝对符号链接）
+/home/helloworld/bly/runs/prepare_overfit_reference_subset_20261030_174517
+# Physics v5 采集 A：startup，variant 0-3，canonical 128，completion 126/128
+/home/helloworld/bly/runs/collect_physics_state_action_reference_20261030_175230
+# Physics v5 采集 B：initial_state_mild，variant 4-7，canonical 128，completion 126/128
+/home/helloworld/bly/runs/collect_physics_state_action_reference_20261030_181411
+# CVAE v5 索引：32 motion / 256 episode，split 32/0/0（无验证集），seed=20260828
+/home/helloworld/bly/runs/cvae_physics_dataset_v5
+# C smoke（2 step / 32 sample，仅链路验证）
+/home/helloworld/bly/runs/sonic_causal_c_smoke
+```
+
+索引 `episodes_index_sha256=7a3cac2f41418f6e8ce5edee1e2299d9e99d806714a8760ea269ac6fca2d9a60`；
+子集 `motion_manifest_sha256=5dbb426217bcee62348cfd4d5cea5104bef87009e93c775976533a6ff618e9b7`。
+`cvae_physics_dataset_v5`、`sonic_causal_c`、`sonic_causal_c_8h`、`sonic_causal_c_smoke` 是固定
+路径，重建前只能改名备份旧目录，不能原地覆盖。正式 C 采用 8 小时墙钟预算
+（`configs/sonic_causal_cvae_c_8h.json`，`max_train_seconds=28800`，每 5000 步写
+`checkpoints/latest.pt`，结束写 `checkpoints/best.pt`），输出
+`/home/helloworld/bly/runs/sonic_causal_c_8h`；checkpoint 写入 `train_motion_keys`，DAgger 只从
+这些 motion 中抽取。
+
+本轮修正：`sonic_repro.sh` 统计 motion PKL 时改用 `find -L`，否则符号链接子集被计为 0 条；
+`sonic-repro-kit/README.md` 的 `OVERFIT_SELECTION_RUN` 改指向重建子集。SONIC 分支中补丁
+0006/0007 已被并入提交 `05248f3`，按标题查不到属预期，0008 为 `6a1166a`。

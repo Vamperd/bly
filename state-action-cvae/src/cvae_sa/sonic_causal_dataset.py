@@ -114,6 +114,7 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
             raise ValueError("Physics v5 dataset contains no causal samples")
         self._handles: dict[str, h5py.File] = {}
         self._schema_cache: dict[str, dict[str, Any]] = {}
+        self._episode_cache: dict[int, dict[str, np.ndarray]] = {}
 
     def __len__(self) -> int:
         return len(self.refs)
@@ -129,6 +130,7 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state["_handles"] = {}
+        state["_episode_cache"] = {}
         return state
 
     def close(self) -> None:
@@ -163,18 +165,16 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
         del steps
         return state_indices, action_indices
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        ref = self.refs[int(index)]
-        metadata = self.episodes[ref.episode_index]
+    def _episode_arrays(self, episode_index: int) -> dict[str, np.ndarray]:
+        cached = self._episode_cache.get(episode_index)
+        if cached is not None:
+            return cached
+        metadata = self.episodes[episode_index]
         steps = int(metadata["steps"])
         stream = self._handle(str(metadata["hdf5_path"]))
         episode = stream[f"data/{metadata['episode']}"]
         schema = self._schema(str(metadata["schema_path"]))
         env_id = int(metadata["env_id"])
-        state_indices_raw, action_indices = self._history_indices(ref.target_step, steps)
-        state_valid = state_indices_raw >= 0
-        state_indices = np.clip(state_indices_raw, 0, max(steps - 1, 0))
-
         physical = read_physics_states(episode["states"], 0, steps + 1)
         reference, offsets = read_reference_future(episode, 0, steps)
         actions = np.asarray(
@@ -184,10 +184,6 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
             raise ValueError(f"{episode.name}: invalid Action shape {actions.shape}")
         if reference.shape != (steps, REFERENCE_FRAMES, REFERENCE_DIMENSION):
             raise ValueError(f"{episode.name}: invalid reference shape {reference.shape}")
-
-        state_history = physical[state_indices]
-        action_history = np.zeros((HISTORY_STEPS, ACTION_DIM), dtype=np.float32)
-        action_valid = action_indices >= 0
         # SONIC's action history is initialized with the reset action.  The
         # v5 recorder stores the initial processed target for the first
         # transition, which is the only stable offline seed available here.
@@ -196,6 +192,41 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
         )
         if action_before.shape != (ACTION_DIM,):
             raise ValueError(f"{episode.name}: invalid initial Action seed")
+        cached = {
+            "physical": physical,
+            "reference": reference,
+            "offsets": offsets,
+            "actions": actions,
+            "action_before": action_before,
+            "nominal": resolve_parameter(
+                schema["nominal_default_joint_pos"], env_id
+            ).reshape(ACTION_DIM),
+            "scale": resolve_parameter(schema["action_scale"], env_id).reshape(ACTION_DIM),
+            "offset": np.asarray(
+                stream[f"contexts/{metadata['context_id']}/action_offset"],
+                dtype=np.float32,
+            ).reshape(ACTION_DIM),
+        }
+        self._episode_cache[episode_index] = cached
+        return cached
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        ref = self.refs[int(index)]
+        metadata = self.episodes[ref.episode_index]
+        steps = int(metadata["steps"])
+        arrays = self._episode_arrays(ref.episode_index)
+        state_indices_raw, action_indices = self._history_indices(ref.target_step, steps)
+        state_valid = state_indices_raw >= 0
+        state_indices = np.clip(state_indices_raw, 0, max(steps - 1, 0))
+        physical = arrays["physical"]
+        reference = arrays["reference"]
+        offsets = arrays["offsets"]
+        actions = arrays["actions"]
+        action_before = arrays["action_before"]
+
+        state_history = physical[state_indices]
+        action_history = np.zeros((HISTORY_STEPS, ACTION_DIM), dtype=np.float32)
+        action_valid = action_indices >= 0
         for position, source in enumerate(action_indices.tolist()):
             action_history[position] = action_before if source < 0 else actions[source]
         target_action = actions[ref.target_step]
@@ -208,14 +239,9 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
             target_reference - self.reference_mean[None]
         ) / self.reference_std[None]
         mapping = {
-            "nominal": resolve_parameter(
-                schema["nominal_default_joint_pos"], env_id
-            ).reshape(ACTION_DIM),
-            "scale": resolve_parameter(schema["action_scale"], env_id).reshape(ACTION_DIM),
-            "offset": np.asarray(
-                stream[f"contexts/{metadata['context_id']}/action_offset"],
-                dtype=np.float32,
-            ).reshape(ACTION_DIM),
+            "nominal": arrays["nominal"],
+            "scale": arrays["scale"],
+            "offset": arrays["offset"],
         }
         return {
             "state_history": torch.from_numpy(state_history.astype(np.float32)),
