@@ -164,7 +164,7 @@ git am "$PATCH_8"
 BONES ingest；该步骤不复制或修改 PKL：
 
 ```bash
-export OVERFIT_SELECTION_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_20260828_234506
+export OVERFIT_SELECTION_RUN=/home/helloworld/bly/runs/cvae_overfit_subset_rebuilt_20260928_193357
 export BONES_INGEST_RUN=/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447
 COLLECT_SEED=20260828 bash ./sonic_repro.sh prepare-overfit-reference-subset
 
