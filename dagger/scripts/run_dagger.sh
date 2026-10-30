@@ -196,7 +196,9 @@ if [[ "$MODE" == sonic-causal-smoke || "$MODE" == sonic-causal-pilot || "$MODE" 
   }
 fi
 
-LOG_PATH="$SONIC_RUNS_ROOT/dagger_${MODE}_command_$(date +%Y%m%d_%H%M%S).log"
+LOG_DIR="$SONIC_RUNS_ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_PATH="$LOG_DIR/dagger_${MODE}_command_$(date +%Y%m%d_%H%M%S).log"
 echo "[run_dagger] CONFIG=$CONFIG" >> "$LOG_PATH"
 echo "[run_dagger] DAGGER_MOTION_FILE=$DAGGER_MOTION_FILE" >> "$LOG_PATH"
 echo "[run_dagger] DAGGER_RESUME_RUN=$DAGGER_RESUME_RUN" >> "$LOG_PATH"
