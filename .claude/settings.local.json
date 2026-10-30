@@ -37,7 +37,15 @@
       "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python -m unittest discover -s tests -p \"test_sonic_causal*.py\")",
       "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python /tmp/causal_check/check.py /tmp/causal_check/old_dataset.py)",
       "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python -m unittest tests.test_sonic_causal_model tests.test_indexer_dataset)",
-      "Bash(PYTHONPATH=\"src;../state-action-cvae/src;.\" /c/python/envs/pytorch/python -m unittest discover -s tests -p \"*sonic_causal*\")"
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src;.\" /c/python/envs/pytorch/python -m unittest discover -s tests -p \"*sonic_causal*\")",
+      "Bash(/c/python/envs/pytorch/python -c ' *)",
+      "Read(//c/tmp/causal_check/**)",
+      "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python /tmp/causal_check/check.py)",
+      "Bash(grep -o 'nohup[^\"]\\\\{0,300\\\\}sonic_causal_c_8h[^\"]\\\\{0,200\\\\}' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)",
+      "Bash(grep -o '.\\\\{0,700\\\\}nohup \\\\$PY -m cvae_sa.cli sonic-causal-train' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)",
+      "Bash(grep -o 'export \\\\\\(CFG\\\\|LOG\\\\|PY\\\\\\)=[^\\\\\\\\]*' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)",
+      "Bash(grep -o '\\\\\\(CFG\\\\|LOG\\\\|PY\\\\\\)=[^ \\\\\\\\]*' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)",
+      "Bash(grep -o '\\\\\\(cd \\\\$STATE_ACTION_CVAE_ROOT[^\\\\\\\\]*\\\\|export PYTHONPATH=[^\\\\\\\\]*\\\\|export BLY=[^\\\\\\\\]*\\\\|export SONIC_RUNS_ROOT=[^\\\\\\\\]*\\\\|export STATE_ACTION_CVAE_ROOT=[^\\\\\\\\]*\\\\\\)' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)"
     ]
   }
 }

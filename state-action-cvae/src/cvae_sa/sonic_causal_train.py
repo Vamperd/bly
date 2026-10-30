@@ -119,6 +119,30 @@ def _batch_loss(
     )
 
 
+def _learning_rate_at(step: int, training: dict[str, Any], max_steps: int) -> float:
+    peak = float(training.get("learning_rate", 1.0e-4))
+    schedule = str(training.get("lr_schedule", "constant"))
+    warmup = int(training.get("warmup_steps", 0))
+    if warmup > 0 and step < warmup:
+        return peak * (step + 1) / warmup
+    if schedule == "constant":
+        return peak
+    if schedule != "cosine":
+        raise ValueError(f"unsupported lr_schedule: {schedule}")
+    floor = float(training.get("min_learning_rate", 0.0))
+    progress = min(1.0, (step - warmup) / max(1, max_steps - warmup))
+    return floor + 0.5 * (peak - floor) * (1.0 + math.cos(math.pi * progress))
+
+
+def _kl_beta_at(step: int, training: dict[str, Any]) -> float:
+    target = float(training.get("kl_beta", 0.002))
+    start = float(training.get("kl_beta_start", target))
+    warmup = int(training.get("kl_warmup_steps", 0))
+    if warmup <= 0 or step >= warmup:
+        return target
+    return start + (target - start) * step / warmup
+
+
 @torch.no_grad()
 def _evaluate_routes(
     model: SonicCausalCVAE,
@@ -223,7 +247,11 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
     while step < max_steps and not out_of_time:
         for cpu_batch in train_loader:
             batch = _device_batch(cpu_batch, device)
-            loss, _terms = _batch_loss(model, batch, kl_beta=kl_beta)
+            current_lr = _learning_rate_at(step, training, max_steps)
+            for group in optimizer.param_groups:
+                group["lr"] = current_lr
+            current_beta = _kl_beta_at(step, training)
+            loss, terms = _batch_loss(model, batch, kl_beta=current_beta)
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"non-finite causal C loss at step {step + 1}")
             optimizer.zero_grad(set_to_none=True)
@@ -237,6 +265,9 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
             if step % int(training.get("log_interval", 50)) == 0 or step == max_steps:
                 print(
                     f"[sonic-causal] step={step}/{max_steps} loss={float(loss):.6g} "
+                    f"post={float(terms['posterior_action']):.4g} "
+                    f"std={float(terms['standard_normal_action']):.4g} "
+                    f"kl={float(terms['kl']):.4g} beta={current_beta:.4g} lr={current_lr:.3g} "
                     f"elapsed={elapsed / 3600:.2f}h it/s={step / max(elapsed, 1e-9):.2f}",
                     flush=True,
                 )
