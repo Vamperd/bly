@@ -131,6 +131,13 @@ def _motion_info(config, sonic_root: Path) -> dict:
     }
 
 
+def _render_disables_tracking_terminations(config) -> bool:
+    if str(config.mode) != "mlp_render":
+        return False
+    value = str(config.dagger.get("render_disable_tracking_terminations", False)).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def _prepare_release_env(config, run_dir: Path) -> dict:
     sonic_root = Path(str(config.sonic_repo_root)).expanduser().resolve()
     motion = _motion_info(config, sonic_root)
@@ -154,6 +161,13 @@ def _prepare_release_env(config, run_dir: Path) -> dict:
         terminations=motion["terminations"],
     )
     print("[dagger] SONIC release config composed", flush=True)
+    if _render_disables_tracking_terminations(config):
+        # Isaac auto-resets terminated envs, so ignoring done would jump the robot back to the start.
+        terminations_cfg = release_config.manager_env.terminations
+        dropped = [key for key in terminations_cfg if key not in ("_target_", "time_out")]
+        for key in dropped:
+            del terminations_cfg[key]
+        print(f"[dagger] render tracking terminations disabled: {dropped}", flush=True)
     release_config.manager_env.config.experiment_dir = str(run_dir)
     release_config.manager_env.config.save_rendering_dir = str(run_dir / "renderings")
     reference_terms = [
@@ -728,6 +742,7 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         "frames": len(dof_frames),
         "fps": fps,
         "terminated": terminated,
+        "tracking_terminations_disabled": _render_disables_tracking_terminations(config),
         "executed_action_abs_max": executed_max,
         "trajectory": str(trajectory_path),
         "video": str(video_path),

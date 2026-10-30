@@ -22,6 +22,7 @@ dagger:
   terminations: tracking/base_adaptive_strict_ori_foot_xyz
   smpl_motion_file: zeros
   render_latent_mode: ${oc.env:DAGGER_RENDER_LATENT_MODE,fixed_standard_normal}
+  render_disable_tracking_terminations: ${oc.env:DAGGER_RENDER_KEEP_RUNNING,true}
 
 student:
   checkpoint: ${oc.env:DAGGER_RENDER_CHECKPOINT,}
