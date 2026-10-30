@@ -968,8 +968,22 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
         if len(beta_schedule) < rounds:
             beta_schedule.extend([beta_schedule[-1]] * (rounds - len(beta_schedule)))
         beta_schedule = beta_schedule[:rounds]
+        max_hours = config.dagger.get("max_train_hours", None)
+        max_seconds = None if max_hours is None else float(max_hours) * 3600.0
+        started = time.monotonic()
+        stopped_by_time_limit = False
         metrics = []
         for round_index, beta in enumerate(beta_schedule):
+            if max_seconds is not None and round_index > 0:
+                elapsed = time.monotonic() - started
+                if elapsed + elapsed / round_index > max_seconds:
+                    print(
+                        f"[sonic-causal] time budget {max_hours}h: stop before round {round_index} "
+                        f"(elapsed={elapsed / 3600:.2f}h, mean_round={elapsed / round_index / 60:.1f}min)",
+                        flush=True,
+                    )
+                    stopped_by_time_limit = True
+                    break
             dynamic = loop.collect_round(round_index, beta)
             data_path = run_dir / "data" / "dagger" / f"round_{round_index:02d}.pt"
             data_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1016,9 +1030,19 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
                     "samples": len(loop.samples),
                     "train": train_metrics,
                     "student_only": eval_metrics,
+                    "elapsed_seconds": time.monotonic() - started,
                 }
             )
             _write_json(run_dir / "manifests" / "sonic_causal_metrics.partial.json", metrics)
+            print(
+                f"[sonic-causal] round={round_index} beta={beta:.2f} samples={len(loop.samples)} "
+                f"train_loss={train_metrics['train_loss']:.4g} "
+                f"eval_rmse={eval_metrics['teacher_action_rmse']:.4f} "
+                f"term_rate={eval_metrics['termination_rate']:.4f} "
+                f"survival={eval_metrics['survival_ratio']:.2f} "
+                f"elapsed={(time.monotonic() - started) / 3600:.2f}h",
+                flush=True,
+            )
         baseline = metrics[0]["student_only"] if metrics else None
         final = metrics[-1]["student_only"] if metrics else None
         baseline_by_motion = (baseline or {}).get("teacher_action_rmse_by_motion", {})
@@ -1076,6 +1100,8 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
             "data_root": str(run_dir / "data" / "dagger"),
             "sample_format": "sonic_causal_dagger_samples_v1",
             "rounds": metrics,
+            "max_train_hours": max_hours,
+            "stopped_by_time_limit": stopped_by_time_limit,
             "imitation_gate": gate,
             "teacher_information_contract": {
                 "teacher_input_keys": sorted(

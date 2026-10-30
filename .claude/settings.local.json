@@ -60,7 +60,10 @@
       "Bash(/c/python/envs/pytorch/python -m py_compile dagger/src/dagger/cli.py sonic-repro-kit/render_policy_ghost.py)",
       "Bash(/c/python/envs/pytorch/python -c \"import mujoco, cv2, imageio, imageio_ffmpeg; print\\(mujoco.__version__\\)\")",
       "WebSearch",
-      "Bash(grep -n \"sonic-causal\\\\|mlp-causal-motions\\\\|\\)$\" dagger/scripts/run_dagger.sh)"
+      "Bash(grep -n \"sonic-causal\\\\|mlp-causal-motions\\\\|\\)$\" dagger/scripts/run_dagger.sh)",
+      "Bash(sed -n 70,110p scripts/run_dagger.sh)",
+      "Bash(sed -n 170,240p scripts/run_dagger.sh)",
+      "Bash(/c/python/envs/pytorch/python *)"
     ]
   }
 }
