@@ -26,7 +26,7 @@
     "warmup_steps": 4000,
     "min_learning_rate": 0.00001,
     "weight_decay": 0.0,
-    "max_optimizer_steps": 220000,
+    "max_optimizer_steps": 245000,
     "max_train_seconds": 30600,
     "checkpoint_interval": 5000,
     "max_val_batches": 128,

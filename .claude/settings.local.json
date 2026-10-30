@@ -45,7 +45,8 @@
       "Bash(grep -o '.\\\\{0,700\\\\}nohup \\\\$PY -m cvae_sa.cli sonic-causal-train' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)",
       "Bash(grep -o 'export \\\\\\(CFG\\\\|LOG\\\\|PY\\\\\\)=[^\\\\\\\\]*' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)",
       "Bash(grep -o '\\\\\\(CFG\\\\|LOG\\\\|PY\\\\\\)=[^ \\\\\\\\]*' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)",
-      "Bash(grep -o '\\\\\\(cd \\\\$STATE_ACTION_CVAE_ROOT[^\\\\\\\\]*\\\\|export PYTHONPATH=[^\\\\\\\\]*\\\\|export BLY=[^\\\\\\\\]*\\\\|export SONIC_RUNS_ROOT=[^\\\\\\\\]*\\\\|export STATE_ACTION_CVAE_ROOT=[^\\\\\\\\]*\\\\\\)' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)"
+      "Bash(grep -o '\\\\\\(cd \\\\$STATE_ACTION_CVAE_ROOT[^\\\\\\\\]*\\\\|export PYTHONPATH=[^\\\\\\\\]*\\\\|export BLY=[^\\\\\\\\]*\\\\|export SONIC_RUNS_ROOT=[^\\\\\\\\]*\\\\|export STATE_ACTION_CVAE_ROOT=[^\\\\\\\\]*\\\\\\)' /c/Users/86136/.claude/projects/C--Users-86136-Desktop-code-RL-bly/74b9d6a7-e58f-4c23-8a65-299ce5059f8b.jsonl)",
+      "Bash(PYTHONPATH=\"src;.\" /c/python/envs/pytorch/python *)"
     ]
   }
 }

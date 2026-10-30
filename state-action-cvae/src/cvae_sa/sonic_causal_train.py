@@ -344,8 +344,19 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train the SONIC causal CVAE")
     parser.add_argument("--config", required=True)
+    parser.add_argument("--max-steps", type=int, help="override training.max_optimizer_steps")
+    parser.add_argument("--max-hours", type=float, help="override training.max_train_seconds")
     args = parser.parse_args()
     config = load_config(Path(args.config))
+    training = config.setdefault("training", {})
+    if args.max_steps is not None:
+        if args.max_steps <= 0:
+            parser.error("--max-steps must be positive")
+        training["max_optimizer_steps"] = args.max_steps
+    if args.max_hours is not None:
+        if args.max_hours <= 0:
+            parser.error("--max-hours must be positive")
+        training["max_train_seconds"] = args.max_hours * 3600.0
     train(config)
     return 0
 
