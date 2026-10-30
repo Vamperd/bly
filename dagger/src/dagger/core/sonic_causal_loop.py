@@ -66,6 +66,7 @@ class SonicCausalDaggerLoop:
             return None
         return self.action_contract.raw_to_canonical(previous.detach())
 
+    @torch.no_grad()
     def collect_round(self, round_index: int, beta: float) -> list[dict[str, torch.Tensor]]:
         observation = self.env.reset()
         current_state = self.env.physics_state()

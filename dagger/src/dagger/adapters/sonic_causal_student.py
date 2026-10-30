@@ -140,6 +140,7 @@ class SonicCausalStudentAdapter:
             raise ValueError(f"unsupported causal latent mode: {mode}")
         self.latent_mode = mode
 
+    @torch.no_grad()
     def observe(self, reference_future: torch.Tensor) -> SonicCausalRollout:
         if self._buffer is None or self._epsilon is None:
             raise RuntimeError("causal student has not been reset")
