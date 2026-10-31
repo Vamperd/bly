@@ -5,10 +5,12 @@
 #   solo video per rollout + one 4-way ghost (sonic / mlp_best_survival / cvae_c_before / cvae_dagger_after).
 # C_CKPT is the pre-DAgger C checkpoint (sonic_causal_train output), CVAE_DAGGER_CKPT the post-DAgger one.
 # LIST_ONLY=1 prints the shared motions and exits without Isaac.
+# SKIP_C=1 drops the cvae_c_before rollout/layer (ghost becomes sonic / mlp / cvae_dagger_after).
 # Overrides: C_CKPT (default: student_checkpoint in the DAgger run manifest), CVAE_DAGGER_CKPT (default: best.pt).
 
 set -Eeuo pipefail
 
+SKIP_C="${SKIP_C:-0}"
 MLP_RUN="${1:-}"
 CVAE_RUN="${2:-}"
 NUM_MOTIONS="${3:-0}"
@@ -33,15 +35,20 @@ if [[ -n "${C_CKPT:-}" && "$(realpath -m "$C_CKPT")" == "$(realpath -m "${CVAE_D
   exit 2
 fi
 CVAE_MANIFEST="$CVAE_RUN/manifests/sonic_causal_manifest.json"
-if [[ -z "${C_CKPT:-}" ]]; then
+if [[ "$SKIP_C" == 1 ]]; then
+  C_CKPT=""
+elif [[ -z "${C_CKPT:-}" ]]; then
   test -s "$CVAE_MANIFEST" || { echo "Missing $CVAE_MANIFEST; set C_CKPT" >&2; exit 2; }
   C_CKPT="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["student_checkpoint"])' "$CVAE_MANIFEST")"
 fi
 CVAE_DAGGER_CKPT="${CVAE_DAGGER_CKPT:-$CVAE_RUN/checkpoints/best.pt}"
-for f in "$C_CKPT" "$CVAE_DAGGER_CKPT" "$SONIC_TEACHER_CHECKPOINT" "$MLP_RENDER_CONFIG" "$MODEL" \
+for f in "$CVAE_DAGGER_CKPT" "$SONIC_TEACHER_CHECKPOINT" "$MLP_RENDER_CONFIG" "$MODEL" \
          "$SONIC_KIT_ROOT/render_policy_ghost.py" "$SONIC_KIT_ROOT/render_mujoco_trajectory.py"; do
   test -s "$f" || { echo "Missing file: $f" >&2; exit 2; }
 done
+if [[ "$SKIP_C" != 1 ]]; then
+  test -s "$C_CKPT" || { echo "Missing C checkpoint: $C_CKPT (set C_CKPT or SKIP_C=1)" >&2; exit 2; }
+fi
 for tag in "${MLP_TAGS[@]}"; do
   test -s "$MLP_RUN/checkpoints/$tag.pt" || { echo "Missing $MLP_RUN/checkpoints/$tag.pt; run keep_best_last.py first" >&2; exit 2; }
 done
@@ -57,8 +64,8 @@ mapfile -t MOTION_KEYS < <("$PYTHON" -c '
 import sys, torch
 load = lambda p: torch.load(p, map_location="cpu", weights_only=False)
 m = set(load(sys.argv[1]).get("motion_keys") or [])
-c = set(load(sys.argv[2]).get("train_motion_keys") or [])
 d = set(load(sys.argv[3]).get("train_motion_keys") or [])
+c = set(load(sys.argv[2]).get("train_motion_keys") or []) if sys.argv[2] else d
 shared = sorted(m & c & d)
 print(f"mlp={len(m)} c={len(c)} dagger={len(d)} shared={len(shared)}", file=sys.stderr)
 n = int(sys.argv[4])
@@ -73,7 +80,7 @@ export DAGGER_RENDER_STEPS="$STEPS"
 OUT_ROOT="$SONIC_RUNS_ROOT/ghost4_batch_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT_ROOT/videos/solo" "$OUT_ROOT/videos/ghost4"
 {
-  echo "mlp_run=$MLP_RUN"; echo "cvae_c=$C_CKPT"; echo "cvae_dagger=$CVAE_DAGGER_CKPT"
+  echo "mlp_run=$MLP_RUN"; echo "cvae_c=${C_CKPT:-<skipped>}"; echo "cvae_dagger=$CVAE_DAGGER_CKPT"
   echo "motion_file=$DAGGER_MOTION_FILE"; echo "steps=$STEPS"; printf 'motion=%s\n' "${MOTION_KEYS[@]}"
 } > "$OUT_ROOT/sources.txt"
 echo "[ghost4-batch] out=$OUT_ROOT"
@@ -116,7 +123,9 @@ render_motion() {
   export DAGGER_RENDER_MOTION_KEY="$key"
   echo "[ghost4-batch] ===== motion=$key ====="
   trajs[sonic]="$(rollout sonic sonic "" "")" || return 1
-  trajs[cvae_c_before]="$(rollout cvae_c_before sonic_causal "$C_CKPT" "")" || return 1
+  if [[ "$SKIP_C" != 1 ]]; then
+    trajs[cvae_c_before]="$(rollout cvae_c_before sonic_causal "$C_CKPT" "")" || return 1
+  fi
   trajs[cvae_dagger_after]="$(rollout cvae_dagger_after sonic_causal "$CVAE_DAGGER_CKPT" "")" || return 1
   for tag in "${MLP_TAGS[@]}"; do
     trajs[mlp_$tag]="$(rollout "mlp_$tag" mlp "$MLP_RUN/checkpoints/$tag.pt" "$MLP_RENDER_CONFIG")" || return 1
@@ -128,11 +137,10 @@ render_motion() {
   done
   for tag in "${MLP_TAGS[@]}"; do
     out="$dir/ghost4_mlp_$tag"
-    MUJOCO_GL=egl "$PYTHON" "$SONIC_KIT_ROOT/render_policy_ghost.py" \
-      --layer "sonic=${trajs[sonic]}" \
-      --layer "mlp_${tag}=${trajs[mlp_$tag]}" \
-      --layer "cvae_c_before=${trajs[cvae_c_before]}" \
-      --layer "cvae_dagger_after=${trajs[cvae_dagger_after]}" \
+    local layers=(--layer "sonic=${trajs[sonic]}" --layer "mlp_${tag}=${trajs[mlp_$tag]}")
+    [[ "$SKIP_C" != 1 ]] && layers+=(--layer "cvae_c_before=${trajs[cvae_c_before]}")
+    layers+=(--layer "cvae_dagger_after=${trajs[cvae_dagger_after]}")
+    MUJOCO_GL=egl "$PYTHON" "$SONIC_KIT_ROOT/render_policy_ghost.py" "${layers[@]}" \
       --model "$MODEL" --output-run "$out" --title "${safe}_mlp_${tag}" --gl egl || return 1
     cp "$out"/videos/*.mp4 "$OUT_ROOT/videos/ghost4/${safe}__mlp_${tag}.mp4"
   done

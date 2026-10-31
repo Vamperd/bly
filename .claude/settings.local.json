@@ -94,7 +94,8 @@
       "Bash(PYTHONPATH=src:../state-action-cvae/src python -m pytest -q tests/test_cvae_window.py tests/test_cvae_kl2_contract.py)",
       "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest -q tests/test_cvae_window.py tests/test_cvae_kl2_contract.py)",
       "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest -q tests)",
-      "Bash(bash -n scripts/render_ghost4_batch.sh)"
+      "Bash(bash -n scripts/render_ghost4_batch.sh)",
+      "Bash(bash -n \"C:/Users/86136/Desktop/code/RL/bly/dagger/scripts/render_ghost4_batch.sh\")"
     ]
   }
 }

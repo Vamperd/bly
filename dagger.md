@@ -646,7 +646,7 @@ bash scripts/run_dagger_auto.sh cvae-kl2-pilot-dagger-v2-2m-2h   # cvae_kl2_pilo
 | standard-normal 质量 | 待 pilot 评估 |
 | teacher action information contract | 待多 motion/reference probe |
 | 10-step CVAE DAgger 8h | `dagger_sonic_causal_8h_20261031_032743` 51 轮完成；best rmse 0.0634（round 49，survival 0.25）；见末节 |
-| MLP DAgger 6h（同 8 motion） | `dagger_mlp_causal_6h_20261031_133715` 172 轮完成，`memorization_pass=True`；末轮 rmse 0.0784 |
+| MLP DAgger 6h（同 8 motion） | `dagger_mlp_causal_6h_20261031_133715` 172 轮完成，`memorization_pass=True`；best survival 0.875（round 70），best rmse 0.0618（round 163） |
 | 四路 ghost 视频（MLP / C / DAgger / SONIC） | `render_ghost4_batch.sh` 已写，待 Ubuntu 执行 |
 | chunk CVAE future-reference DAgger | 代码与 `cvae_kl2_pilot_future_ref_8h.yaml` 已实现，59 tests 通过；待 Ubuntu 执行 |
 
@@ -695,7 +695,8 @@ don_t_know_2_003__A069
 
 ### 10-step CVAE（sonic_causal）DAgger 8h：已完成
 
-- DAgger 前 C：`/home/helloworld/bly/runs/sonic_causal_c_8h/checkpoints/best.pt`（Physics v5 数据，32 motion）。
+- DAgger 前 C：`/home/helloworld/bly/runs/sonic_causal_c_8h/checkpoints/best.pt`（Physics v5 数据，32 motion，
+  sha256 `c97e4cb2…0ff1`）。**2026-10-31 发现该 run 目录已被误删**，DAgger 前 C 的 checkpoint 不可恢复。
 - run：`/home/helloworld/bly/runs/dagger_sonic_causal_8h_20261031_032743`，配置 `sonic_causal_8h.yaml`
   （lr 1e-5、每轮 4000 step、beta 衰减到 0）。
 - 完成 round 0–50 共 51 轮；8h 预算在 round 51 前停止（elapsed 7.90h，平均 9.3 min/轮），最终 408000 样本。
@@ -728,26 +729,38 @@ don_t_know_2_003__A069
 | 170 | 0.0780 | 0.0026 | 0.50 |
 | 171 | 0.0784 | 0.0039 | 0.25 |
 
-- 初步对比：MLP 最终 rmse（约 0.078）高于 10-step CVAE DAgger 的最佳 0.0634，survival 量级相近（0.12–0.50），
-  两者都没有在 192 步内稳定存活全部 8 个 motion。这只是同 motion teacher imitation 的对比。
+- 全程最佳（`keep_best_last.py --by survival` dry run，2026-10-31）：
+
+| 保留文件 | round | rmse | term_rate | survival |
+|---|---|---|---|---|
+| `best_survival.pt` | 70 | 0.0845 | 0.0013 | 0.875 |
+| `best_rmse.pt` | 163 | 0.0618 | 0.0026 | 0.750 |
+| `last.pt` | 171 | 0.0784 | 0.0039 | 0.250 |
+
+  survival 前五：70、76（0.875），151、132、123（0.750）；rmse 前五：163、151、164、132、154。
+  round 151（rmse 0.0647、survival 0.750）在两个排名中都靠前，但不会被保留。
+- 对比 10-step CVAE DAgger（best rmse 0.0634，前五 survival 最高 0.50）：MLP 的最佳 rmse（0.0618）与之相当，
+  最佳 survival（0.875）更高，但 MLP 指标在 round 之间波动很大（末轮 survival 回落到 0.25）。
+  单轮 survival 只看 8 个 env，0.875 可能有运气成分。这只是同 motion teacher imitation 的对比。
 
 ### Checkpoint 保留与 ghost 视频：脚本已写，待 Ubuntu 执行
 
 - `dagger/scripts/keep_best_last.py` 已改为同时写 `best_survival.pt`、`best_rmse.pt`、`last.pt`（另有按 `--by` 选的
   `best.pt` 副本），选中 round 及指标写入 `checkpoints/kept.json`；`--delete` 才删除 round_*.pt。
-  MLP run 尚未执行该脚本，三个 checkpoint 对应的 round 待回填。
+  MLP run 已 dry run，选中 round 见上表；`--delete` 与渲染待执行。
 - `dagger/scripts/render_ghost4_batch.sh <mlp_run> <sonic_causal_dagger_run> [num_motions=0(all)] [steps=192]`：
   对 MLP / C / DAgger 三个 checkpoint 的 motion 交集（预期为上面 8 个）逐个 rollout sonic、`cvae_c_before`（C）、
   `cvae_dagger_after`（DAgger best.pt）、`mlp_best_survival`，每个 rollout 出单独视频，并合成一个四路 ghost 视频
   （sonic 白色不透明、MLP 蓝、C 绿、DAgger 橙）。`C_CKPT` 必须是 DAgger 前的 C，默认从
   `sonic_causal_manifest.json` 的 `student_checkpoint` 读取；`LIST_ONLY=1` 只列交集。
-  输出 `~/bly/runs/ghost4_batch_<时间>/videos/{ghost4,solo}/`，预计 8 个 ghost、32 个单独视频，约 1.5h。
+  `SKIP_C=1` 跳过 C：ghost 只叠 sonic / MLP / DAgger 三层，motion 交集只取 MLP 与 DAgger。
+  输出 `~/bly/runs/ghost4_batch_<时间>/videos/{ghost4,solo}/`，含 C 时预计 8 个 ghost、32 个单独视频，约 1.5h。
+- MLP `--delete` 已执行（2026-10-31），只剩 best_survival / best_rmse / last。C 已丢失，当前用 `SKIP_C=1` 渲染：
 
 ```bash
 cd ~/bly/dagger
-python3 scripts/keep_best_last.py ~/bly/runs/dagger_mlp_causal_6h_20261031_133715 --by survival --delete
-LIST_ONLY=1 C_CKPT=$HOME/bly/runs/sonic_causal_c_8h/checkpoints/best.pt bash scripts/render_ghost4_batch.sh ~/bly/runs/dagger_mlp_causal_6h_20261031_133715 ~/bly/runs/dagger_sonic_causal_8h_20261031_032743
-nohup env C_CKPT=$HOME/bly/runs/sonic_causal_c_8h/checkpoints/best.pt bash scripts/render_ghost4_batch.sh ~/bly/runs/dagger_mlp_causal_6h_20261031_133715 ~/bly/runs/dagger_sonic_causal_8h_20261031_032743 0 192 > ~/bly/runs/ghost4_batch.log 2>&1 &
+LIST_ONLY=1 SKIP_C=1 bash scripts/render_ghost4_batch.sh ~/bly/runs/dagger_mlp_causal_6h_20261031_133715 ~/bly/runs/dagger_sonic_causal_8h_20261031_032743
+nohup env SKIP_C=1 bash scripts/render_ghost4_batch.sh ~/bly/runs/dagger_mlp_causal_6h_20261031_133715 ~/bly/runs/dagger_sonic_causal_8h_20261031_032743 0 192 > ~/bly/runs/ghost4_batch.log 2>&1 &
 ```
 
 ### chunk CVAE（65-token）future-reference DAgger：代码已实现，待 Ubuntu 执行
@@ -772,7 +785,7 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-r
 
 ### 下一步
 
-1. 执行 MLP checkpoint 保留，回填 best_survival / best_rmse 的 round 与指标。
+1. 执行 MLP checkpoint 保留的 `--delete`（round 已回填）。
 2. 渲染 8 个 motion 的四路 ghost 与单独视频，按视频判断各策略的失败形态。
 3. 启动 future-reference chunk CVAE DAgger 8h，与 10-step CVAE DAgger、MLP 在 rmse/survival 上对比。
    两者 motion 集合不同（KL2 manifest vs 上面 8 个），对比时需注明。
