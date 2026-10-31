@@ -175,7 +175,8 @@ if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-
 fi
 
 if [[ "$MODE" == mlp-causal-* ]]; then
-  : "${MLP_MOTION_SOURCE_CHECKPOINT:=${SONIC_CAUSAL_STUDENT_CHECKPOINT:-}}"
+  # Any checkpoint carrying the C train_motion_keys works; the sonic-causal-8h DAgger best.pt copies them from C.
+  : "${MLP_MOTION_SOURCE_CHECKPOINT:=${SONIC_CAUSAL_STUDENT_CHECKPOINT:-$SONIC_RUNS_ROOT/dagger_sonic_causal_8h_20261031_032743/checkpoints/best.pt}}"
   export MLP_MOTION_SOURCE_CHECKPOINT
   test -s "$MLP_MOTION_SOURCE_CHECKPOINT" || {
     echo "Set MLP_MOTION_SOURCE_CHECKPOINT (or SONIC_CAUSAL_STUDENT_CHECKPOINT) to the C checkpoint used by sonic-causal-pilot" >&2

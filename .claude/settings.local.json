@@ -67,7 +67,10 @@
       "Bash(sed -i 's/  mlp-causal-motions\\) CONFIG_MODE=\"mlp_causal_motions\" ;;/  mlp-causal-motions\\) CONFIG_MODE=\"mlp_causal_motions\" ;;\\\\n  mlp-causal-6h\\) CONFIG_MODE=\"mlp_causal_6h\" ;;/; s/|mlp-causal-motions|/|mlp-causal-motions|mlp-causal-6h|/g; s/\"\\\\$MODE\" == mlp-causal-motions/\"$MODE\" == mlp-causal-*/g' run_dagger.sh)",
       "Bash(sed -i 's/mlp-causal-motions|/mlp-causal-motions|mlp-causal-6h|/g' run_dagger_auto.sh)",
       "Bash(bash -n run_dagger.sh)",
-      "Bash(bash -n run_dagger_auto.sh)"
+      "Bash(bash -n run_dagger_auto.sh)",
+      "Bash(sed -n 36,84p dagger/scripts/run_dagger.sh)",
+      "Bash(sed -n 112,200p dagger/scripts/run_dagger.sh)",
+      "Bash(bash -n dagger/scripts/resume_mlp_causal_6h.sh)"
     ]
   }
 }
