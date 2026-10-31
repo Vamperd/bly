@@ -371,6 +371,8 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     rounds_per_process = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
     max_hours = config.dagger.get("max_train_hours", None)
     max_seconds = None if max_hours is None else float(max_hours) * 3600.0
+    deadline_text = os.environ.get("DAGGER_DEADLINE_EPOCH", "").strip()
+    deadline_epoch = float(deadline_text) if deadline_text else None
     stopped_by_time_limit = False
     processed = 0
     for round_index, beta in enumerate(beta_schedule):
@@ -385,6 +387,16 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
                 print(
                     f"[dagger] time budget {max_hours}h: stop before round {round_index} "
                     f"(elapsed={elapsed / 3600:.2f}h, mean_round={elapsed / len(metrics) / 60:.1f}min)",
+                    flush=True,
+                )
+                stopped_by_time_limit = True
+                break
+        if deadline_epoch is not None and metrics:
+            mean_round = sum(float(m.get("round_seconds", 0.0)) for m in metrics) / len(metrics)
+            if time.time() + mean_round > deadline_epoch:
+                print(
+                    f"[dagger] wall deadline {time.strftime('%H:%M', time.localtime(deadline_epoch))}: "
+                    f"stop before round {round_index} (mean_round={mean_round / 60:.1f}min)",
                     flush=True,
                 )
                 stopped_by_time_limit = True
@@ -522,6 +534,7 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         "completed_rounds": len(metrics),
         "complete": all_rounds_complete,
         "max_train_hours": None if max_hours is None else float(max_hours),
+        "deadline_epoch": deadline_epoch,
         "stopped_by_time_limit": stopped_by_time_limit,
         "rounds": metrics,
         "execution_pass": True,
