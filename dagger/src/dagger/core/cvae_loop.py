@@ -35,6 +35,7 @@ class CvaeDaggerLoop:
         post_fall_baseline_steps: int = 10,
         post_fall_max_error_ratio: float = 3.0,
         post_fall_down_steps: int = 50,
+        post_fall_min_error: float = 0.0,
         episode_mix: bool = False,
         teacher_prefix_steps: int = 32,
         student_block_steps: int = 16,
@@ -48,6 +49,8 @@ class CvaeDaggerLoop:
             raise ValueError("post_fall_max_error_ratio must be greater than 1")
         if post_fall_down_steps < 1:
             raise ValueError("post_fall_down_steps must be positive")
+        if post_fall_min_error < 0.0:
+            raise ValueError("post_fall_min_error must be non-negative")
         self.env = env
         self.teacher = teacher
         self.student = student
@@ -67,6 +70,7 @@ class CvaeDaggerLoop:
         self.post_fall_baseline_steps = int(post_fall_baseline_steps)
         self.post_fall_max_error_ratio = float(post_fall_max_error_ratio)
         self.post_fall_down_steps = int(post_fall_down_steps)
+        self.post_fall_min_error = float(post_fall_min_error)
         self.episode_mix = bool(episode_mix)
         self.teacher_prefix_steps = int(teacher_prefix_steps)
         self.student_block_steps = int(student_block_steps)
@@ -350,7 +354,12 @@ class CvaeDaggerLoop:
                                 self.post_fall_baseline_steps, 1
                             )
                             ratio = error / max(baseline, 1.0e-6)
-                            if ratio > self.post_fall_max_error_ratio:
+                            # The baseline sits near zero right after reset, so the ratio alone
+                            # flags normal tracking error as a fall; require an absolute error too.
+                            if (
+                                ratio > self.post_fall_max_error_ratio
+                                and error > self.post_fall_min_error
+                            ):
                                 deviation_count[index] += 1
                             else:
                                 deviation_count[index] = 0
@@ -360,7 +369,7 @@ class CvaeDaggerLoop:
                                 print(
                                     f"[dagger] cvae postfall stop "
                                     f"env={index} step={step_index + 1} "
-                                    f"error_ratio={ratio:.3f}",
+                                    f"error_ratio={ratio:.3f} error={error:.3f}",
                                     flush=True,
                                 )
 

@@ -2241,6 +2241,9 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
                 post_fall_down_steps=int(
                     config.dagger.get("post_fall_down_steps", 50)
                 ),
+                post_fall_min_error=float(
+                    config.dagger.get("post_fall_min_error", 0.0)
+                ),
                 episode_mix=bool(config.dagger.get("episode_mix", False)),
                 teacher_prefix_steps=int(
                     config.dagger.get("teacher_prefix_steps", 32)

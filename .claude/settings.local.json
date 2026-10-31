@@ -105,7 +105,12 @@
       "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest tests/test_cvae_window.py tests/test_cvae_kl2_contract.py -q)",
       "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest tests -q)",
       "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m unittest discover -s tests)",
-      "Bash(grep -ohE \"\\\\\"command\\\\\":\\\\\"[^\\\\\"]{0,200}unittest[^\\\\\"]{0,120}\\\\\"\" dcb00b37-0cad-409d-b4da-f3ec2bf575ff.jsonl)"
+      "Bash(grep -ohE \"\\\\\"command\\\\\":\\\\\"[^\\\\\"]{0,200}unittest[^\\\\\"]{0,120}\\\\\"\" dcb00b37-0cad-409d-b4da-f3ec2bf575ff.jsonl)",
+      "Bash(sed -n 1055,1068p adapters/cvae_student.py)",
+      "Bash(sed -n 392,400p core/cvae_loop.py)",
+      "Bash(sed -n 740,748p core/cvae_loop.py)",
+      "Bash(bash -n render_cvae_ghost_batch.sh)",
+      "Bash(bash -n watch_cvae_kl2.sh)"
     ]
   }
 }

@@ -417,6 +417,54 @@ class CvaeLoopContractTest(unittest.TestCase):
         self.assertEqual(round_data.tensors["teacher_action_canonical"].shape[0], 8)
         self.assertTrue(bool(round_data.tensors["done"].all()))
 
+    def test_post_fall_min_error_ignores_small_errors_over_tiny_baseline(self):
+        class _DriftEnv(_FakeEnv):
+            def __init__(self, num_envs, late_error):
+                super().__init__(num_envs)
+                self.late_error = late_error
+                self.steps = 0
+
+            def step(self, actions):
+                self.steps += 1
+                error = 0.001 if self.steps <= 2 else self.late_error
+                for name in ("error_anchor_pos", "error_body_pos"):
+                    self.command_manager.get_term("motion").metrics[name] = torch.full(
+                        (self.num_envs,), error
+                    )
+                return super().step(actions)
+
+        def collect(late_error):
+            with tempfile.TemporaryDirectory() as directory:
+                loop = CvaeDaggerLoop(
+                    env=_DriftEnv(2, late_error),
+                    teacher=_FakeTeacher(),
+                    student=_FakeStudent(2),
+                    action_contract=_fake_contract(),
+                    num_envs=2,
+                    rollout_steps=8,
+                    run_dir=Path(directory),
+                    seed=11,
+                    state_mean=torch.zeros(70),
+                    state_std=torch.ones(70),
+                    action_mean=torch.zeros(29),
+                    action_std=torch.ones(29),
+                    motion_group=["motion_0", "motion_1"],
+                    mixture_mode="per_step",
+                    post_fall_continuation=True,
+                    post_fall_baseline_steps=2,
+                    post_fall_max_error_ratio=3.0,
+                    post_fall_down_steps=2,
+                    post_fall_min_error=0.3,
+                )
+                return loop.collect_round(0, 1.0)
+
+        tracking = collect(0.1)
+        self.assertEqual(tracking.metadata["post_fall_stopped_envs"], 0)
+        self.assertEqual(tracking.count, 16)
+        fallen = collect(0.5)
+        self.assertEqual(fallen.metadata["post_fall_stopped_envs"], 2)
+        self.assertEqual(fallen.count, 8)
+
     def test_episode_mix_uses_teacher_prefix_and_student_blocks(self):
         with tempfile.TemporaryDirectory() as directory:
             loop = self._loop(directory)

@@ -813,10 +813,18 @@ cd ~/bly/dagger && DAGGER_RENDER_POLICY=cvae DAGGER_RENDER_CHECKPOINT=<run>/chec
 - 配置 `configs/cvae_kl2_pilot_future_ref_chunk_12h.yaml`：在 chunk 8h 基础上改为 12 env、rollout 750、20 轮，其余不变
   （K=8、γ=0.9、k=4、每轮 4000 step）。估计每轮 33–38 min（训练按 2.1–2.7 steps/s 估算，未实测）；数据约 18 万窗口，内存/磁盘约 7 GB。
 - 单轮可能超过默认 2400 s shard timeout，启动时设 `DAGGER_CVAE_SHARD_TIMEOUT=3600`、`DAGGER_MAX_SHARDS=40`。
+- 首次运行 `..._12h_20261101_003849` 的 round 0（beta=1，全 sonic 执行）只收到 2999 个窗口（应约 9000）：12 个 env 全部触发
+  postfall stop，偏离起点最早在第 18 步，部分 error_ratio 仅 3.13。原因是前 10 步基线接近 0，正常跟踪误差即超过 3 倍。
+  该 run 已停用；12h 配置加 `post_fall_min_error: 0.3`（anchor/body 位置误差取大者须同时 > 0.3 m 才计偏离，默认 0 不影响其他配置），
+  stop 日志增加 `error=` 字段。
 
 ```bash
 cd ~/bly/dagger && nohup env DAGGER_CVAE_SHARD_TIMEOUT=3600 DAGGER_MAX_SHARDS=40 bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-ref-chunk-12h > ~/bly/runs/dagger_future_ref_chunk_12h.log 2>&1 &
 ```
+
+- 监控：`watch -n 60 bash scripts/watch_cvae_kl2.sh`（当前 round/阶段/loss + 每轮 rmse/survival 表）。
+- 渲染：`scripts/render_cvae_ghost_batch.sh <cvae_run> [mlp_run] [num_motions] [steps]`，对 checkpoint 的每个训练 motion 出
+  sonic / cvae_dagger（MLP 训练过的 motion 加 mlp_best_survival）单独视频和 ghost。全部 rollout 用 KL2 motion 文件。
 
 ### SONIC 结构 student 纯 DAgger 对照（E0/E1/E2）：代码已实现，待 Ubuntu 执行
 
