@@ -96,6 +96,39 @@ class CvaeWindowTest(unittest.TestCase):
         self.assertFalse(bool(sample["loss_state_mask"][ANCHOR + 20:].any()))
         self.assertEqual(int(sample["loss_action_mask"].sum()), 29)
 
+    def test_teacher_future_relabels_k_steps_with_discount_and_validity(self):
+        states = torch.zeros(60, 70)
+        actions = torch.zeros(59, 29)
+        teacher_future = torch.arange(4, dtype=torch.float32)[:, None].expand(4, 29) + 1.0
+        valid = torch.tensor([True, True, False, False])
+        sample = build_training_window(
+            states, actions, torch.ones(29), torch.zeros(29), step=40,
+            state_mean=torch.zeros(70), state_std=torch.ones(70),
+            action_mean=torch.zeros(29), action_std=torch.full((29,), 2.0),
+            reference_future=torch.zeros(32, 70),
+            teacher_future=teacher_future,
+            teacher_future_valid=valid,
+            relabel_gamma=0.5,
+        )
+        self.assertEqual(tuple(sample["teacher_action_chunk"].shape), (4, 29))
+        self.assertTrue(torch.allclose(sample["teacher_chunk_weight"], torch.tensor([1.0, 0.5, 0.0, 0.0])))
+        self.assertTrue(torch.allclose(sample["teacher_action_chunk"][1], torch.full((29,), 1.0)))
+        self.assertTrue(torch.all(sample["teacher_action_chunk"][2:] == 0.0))
+        self.assertTrue(torch.all(sample["loss_action_mask"][ANCHOR:ANCHOR + 2]))
+        self.assertFalse(bool(sample["loss_action_mask"][ANCHOR + 2:].any()))
+        valid_action = sample["valid_action"]
+        self.assertTrue(torch.all(sample["action_mask"][ANCHOR:][valid_action[ANCHOR:]]))
+
+    def test_teacher_future_rejects_invalid_anchor(self):
+        with self.assertRaises(ValueError):
+            build_training_window(
+                torch.zeros(60, 70), torch.zeros(59, 29), torch.ones(29), torch.zeros(29), step=40,
+                state_mean=torch.zeros(70), state_std=torch.ones(70),
+                action_mean=torch.zeros(29), action_std=torch.ones(29),
+                teacher_future=torch.zeros(4, 29),
+                teacher_future_valid=torch.tensor([False, True, True, True]),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

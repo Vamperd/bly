@@ -95,7 +95,17 @@
       "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest -q tests/test_cvae_window.py tests/test_cvae_kl2_contract.py)",
       "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest -q tests)",
       "Bash(bash -n scripts/render_ghost4_batch.sh)",
-      "Bash(bash -n \"C:/Users/86136/Desktop/code/RL/bly/dagger/scripts/render_ghost4_batch.sh\")"
+      "Bash(bash -n \"C:/Users/86136/Desktop/code/RL/bly/dagger/scripts/render_ghost4_batch.sh\")",
+      "Bash(sed -n 44,48p /c/Users/86136/Desktop/code/RL/bly/dagger/scripts/run_dagger.sh)",
+      "Bash(bash -n /c/Users/86136/Desktop/code/RL/bly/dagger/scripts/run_dagger.sh)",
+      "Bash(git -C /c/Users/86136/Desktop/code/RL/bly status --short dagger/scripts)",
+      "Bash(PYTHONPATH=src python -m unittest discover -s tests)",
+      "Bash(bash -n scripts/run_dagger.sh)",
+      "Bash(bash -n scripts/run_dagger_auto.sh)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest tests/test_cvae_window.py tests/test_cvae_kl2_contract.py -q)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest tests -q)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m unittest discover -s tests)",
+      "Bash(grep -ohE \"\\\\\"command\\\\\":\\\\\"[^\\\\\"]{0,200}unittest[^\\\\\"]{0,120}\\\\\"\" dcb00b37-0cad-409d-b4da-f3ec2bf575ff.jsonl)"
     ]
   }
 }

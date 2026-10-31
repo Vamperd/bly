@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from dagger.adapters.cvae_student import CvaeBlockRollout, CvaeRollout
+from dagger.adapters.cvae_student import CvaeBlockRollout, CvaePlanStep, CvaeRollout, CvaeStudentAdapter
 from dagger.core.cvae_dataset import CvaeDaggerDataset, CvaeDaggerRound
 from dagger.core.cvae_loop import CvaeDaggerLoop
 from dagger.core.cvae_objective import (
@@ -13,6 +13,7 @@ from dagger.core.cvae_objective import (
     masked_future_contact_bce,
     masked_future_state_mse,
     teacher_action_mse,
+    teacher_chunk_mse,
 )
 from dagger.core.motion_groups import build_motion_groups, select_pilot_keys
 from dagger.runtime.cvae_window import (
@@ -439,6 +440,175 @@ class CvaeLoopContractTest(unittest.TestCase):
         self.assertEqual(set(metrics["teacher_action_rmse_by_motion"]), {"motion_0", "motion_1"})
         self.assertAlmostEqual(metrics["survival_ratio"], 1.0)
         self.assertEqual(metrics["latent_mode"], "fixed_standard_normal")
+
+    def test_open_loop_blocks_keep_mixture_choice_and_relabel_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            loop = CvaeDaggerLoop(
+                env=_FakeEnv(2),
+                teacher=_FakeTeacher(),
+                student=_FakePlanStudent(2),
+                action_contract=_fake_contract(),
+                num_envs=2,
+                rollout_steps=16,
+                run_dir=Path(directory),
+                seed=11,
+                state_mean=torch.zeros(70),
+                state_std=torch.ones(70),
+                action_mean=torch.zeros(29),
+                action_std=torch.ones(29),
+                motion_group=["motion_0", "motion_1"],
+                mixture_mode="per_step",
+            )
+            round_data = loop.collect_round(0, 0.5)
+            metrics = loop.evaluate_student_only(4, round_index=0)
+        tensors = round_data.tensors
+        self.assertEqual(tuple(tensors["teacher_action_chunk"].shape), (32, 4, 29))
+        self.assertEqual(tuple(tensors["teacher_chunk_weight"].shape), (32, 4))
+        self.assertEqual(round_data.metadata["execute_steps"], 4)
+        self.assertEqual(metrics["execute_steps"], 4)
+        last = tensors["timestep"] == 15
+        self.assertTrue(torch.allclose(tensors["teacher_chunk_weight"][last], torch.tensor([1.0, 0.0, 0.0, 0.0])))
+        for motion in (0, 1):
+            rows = tensors["motion_id"] == motion
+            order = torch.argsort(tensors["timestep"][rows])
+            mixture = tensors["mixture_teacher"][rows][order].reshape(4, 4)
+            self.assertTrue(torch.all(mixture == mixture[:, :1]))
+
+    def test_open_loop_rejects_episode_mix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                CvaeDaggerLoop(
+                    env=_FakeEnv(2),
+                    teacher=_FakeTeacher(),
+                    student=_FakePlanStudent(2),
+                    action_contract=_fake_contract(),
+                    num_envs=2,
+                    rollout_steps=8,
+                    run_dir=Path(directory),
+                    seed=11,
+                    state_mean=torch.zeros(70),
+                    state_std=torch.ones(70),
+                    action_mean=torch.zeros(29),
+                    action_std=torch.ones(29),
+                    motion_group=["motion_0", "motion_1"],
+                    mixture_mode="per_step",
+                    episode_mix=True,
+                )
+
+
+class _FakePlanStudent(_FakeStudent):
+    execute_steps = 4
+    relabel_steps = 4
+    relabel_gamma = 0.9
+    future_reference = False
+
+    def reset(self, num_envs: int, current_state: torch.Tensor) -> None:
+        super().reset(num_envs, current_state)
+        self.calls = 0
+
+    def plan_action(self) -> CvaePlanStep:
+        fresh = torch.full((self.num_envs,), self.calls % self.execute_steps == 0)
+        self.calls += 1
+        rollout = self.observe()
+        return CvaePlanStep(
+            window=rollout.window,
+            action_canonical=rollout.action_canonical,
+            action_raw=rollout.action_raw,
+            predicted_state=rollout.predicted_state,
+            predicted_action=rollout.predicted_action,
+            epsilon_global=rollout.epsilon_global,
+            epsilon_local=rollout.epsilon_local,
+            action_clip_error=rollout.action_clip_error,
+            offset=torch.zeros(self.num_envs, dtype=torch.long),
+            fresh=fresh,
+        )
+
+
+class _PlanBuffer:
+    def __init__(self, num_envs: int) -> None:
+        self.num_envs = num_envs
+
+    def advance(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+
+def _bare_planner(num_envs: int, execute_steps: int) -> CvaeStudentAdapter:
+    student = CvaeStudentAdapter.__new__(CvaeStudentAdapter)
+    student.execute_steps = execute_steps
+    student.relabel_steps = execute_steps
+    student.raise_on_clip_error = False
+    student._buffer = _PlanBuffer(num_envs)
+    student._plan = None
+    student._plan_offset = None
+    student._reference_future = None
+    student._evaluation_mode = True
+    fake = _FakeStudent(num_envs)
+    calls = [0]
+
+    def observe_block(block_size: int) -> CvaeBlockRollout:
+        calls[0] += 1
+        block = fake.observe_block(block_size)
+        value = calls[0] * 100.0 + torch.arange(block_size, dtype=torch.float32)
+        block.action_raw = value[None, :, None].expand(num_envs, block_size, 29).clone()
+        return block
+
+    student.observe_block = observe_block
+    return student
+
+
+class OpenLoopPlanTest(unittest.TestCase):
+    def _advance(self, student, done):
+        student.after_step(torch.zeros(2, 29), torch.zeros(2, 70), torch.tensor(done))
+
+    def test_plan_replans_every_execute_steps(self):
+        student = _bare_planner(2, 4)
+        values, fresh = [], []
+        for _ in range(8):
+            step = student.plan_action()
+            values.append(float(step.action_raw[0, 0]))
+            fresh.append(bool(step.fresh[0]))
+            self._advance(student, [False, False])
+        self.assertEqual(values, [100.0, 101.0, 102.0, 103.0, 200.0, 201.0, 202.0, 203.0])
+        self.assertEqual(fresh, [True, False, False, False] * 2)
+
+    def test_done_env_replans_while_other_env_continues(self):
+        student = _bare_planner(2, 4)
+        for _ in range(2):
+            student.plan_action()
+            self._advance(student, [False, False])
+        student.plan_action()
+        self._advance(student, [False, True])
+        step = student.plan_action()
+        self.assertEqual(step.fresh.tolist(), [False, True])
+        self.assertEqual(float(step.action_raw[0, 0]), 103.0)
+        self.assertEqual(float(step.action_raw[1, 0]), 200.0)
+
+    def test_teacher_chunk_mse_uses_discount_weights(self):
+        predicted = torch.zeros(1, 64, 29)
+        predicted[:, ANCHOR + 1] = 2.0
+        loss = teacher_chunk_mse(predicted, torch.zeros(1, 3, 29), torch.tensor([[1.0, 0.5, 0.0]]), ANCHOR)
+        self.assertAlmostEqual(float(loss), 0.5 * 4.0 / 1.5, places=6)
+
+    def test_round_checkpoint_rejects_different_execute_steps(self):
+        student = CvaeStudentAdapter.__new__(CvaeStudentAdapter)
+        student.model_signature = {"architecture_version": "v"}
+        student.normalization_sha256 = "h"
+        student.future_reference = True
+        student.relabel_steps, student.relabel_gamma, student.execute_steps = 8, 0.9, 4
+        payload = {
+            "format_version": "dagger_cvae_student_checkpoint_v1",
+            "architecture_version": "v",
+            "normalization_sha256": "h",
+            "future_reference": True,
+            "relabel_steps": 8,
+            "relabel_gamma": 0.9,
+            "execute_steps": 1,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "round.pt"
+            torch.save(payload, path)
+            with self.assertRaisesRegex(ValueError, "relabel/execute"):
+                student.load_round_checkpoint(path, load_optimizer=False)
 
 
 if __name__ == "__main__":

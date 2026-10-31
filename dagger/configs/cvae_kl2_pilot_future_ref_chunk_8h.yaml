@@ -1,0 +1,63 @@
+mode: cvae_kl2_pilot_future_ref_chunk_8h
+seed: 20261031
+device: cuda:0
+run_root: ${oc.env:SONIC_RUNS_ROOT,/home/helloworld/bly/runs}
+sonic_repo_root: ${oc.env:SONIC_REPO_ROOT,/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl}
+teacher_checkpoint: ${oc.env:SONIC_TEACHER_CHECKPOINT}
+
+dagger:
+  motion_manifest: ${oc.env:DAGGER_MOTION_MANIFEST,/home/helloworld/bly/dagger/configs/cvae_kl2_motion_manifest.json}
+  motion_file: ${oc.env:CVAE_KL2_MOTION_FILE,/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered}
+  beta_schedule: [1.0, 1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.0]
+  beta_schedule_extension: hold_last
+  rounds: 18
+  early_stop:
+    enabled: true
+    check_rounds: [4, 9]
+    baseline_round: 0
+    min_teacher_improvement_ratio: 0.98
+    termination_tolerance: 0.0
+  rollout_steps: 1000
+  num_envs: 4
+  mixture_mode: per_step
+  eval_steps: 192
+  post_fall_continuation: true
+  post_fall_baseline_steps: 10
+  post_fall_max_error_ratio: 3.0
+  post_fall_down_steps: 50
+
+student:
+  checkpoint: ${oc.env:CVAE_STUDENT_CHECKPOINT,/home/helloworld/bly/runs/cvae_long_horizon_train_kl2_fp32_300k_20261016_005837_3380803/checkpoints/best.pt}
+  cvae_root: ${oc.env:STATE_ACTION_CVAE_ROOT,/home/helloworld/bly/state-action-cvae}
+  model_config: ${oc.env:CVAE_MODEL_CONFIG,/home/helloworld/bly/state-action-cvae/configs/posterior_hierarchical_standard_cvae_long_horizon_fp32.json}
+  normalization_run: ${oc.env:CVAE_KL2_DATASET_RUN,/home/helloworld/bly/runs/cvae_long_horizon_dataset_rebuilt_20261018_223710_254008}
+  source_dataset_run: ${oc.env:CVAE_KL2_DATASET_RUN,/home/helloworld/bly/runs/cvae_long_horizon_dataset_rebuilt_20261018_223710_254008}
+  source_cache_size: 2048
+  source_dataset_kind: long_horizon
+  source_mask_mode: fixed
+  teacher_mode: dual
+  future_reference: true
+  relabel_steps: 8
+  relabel_gamma: 0.9
+  execute_steps: 4
+  raise_on_clip_error: false
+  source_causal_fraction: 0.5
+  source_mix: 0.5
+  source_mix_mode: random
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+  train_chunk_steps: 500
+  train_steps_per_round: 4000
+  micro_batch: 32
+  mask_seed: 20261016
+  kl_beta: 0.002
+  kl_warmup: 10000
+  teacher_sn_weight: 0.5
+  teacher_pm_weight: 0.5
+  state_weight: 1.0
+  contact_weight: 0.1
+  action_clip_value: 20.0
+  lr_schedule: cosine
+  warmup_steps: 500
+  min_lr_ratio: 0.01
+  load_optimizer: false

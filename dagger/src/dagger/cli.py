@@ -224,6 +224,67 @@ def _motion_weights_from_eval(eval_metrics: dict, keys: list[str]) -> dict[str, 
     }
 
 
+def _build_sonic_arch_student(
+    config, env, prepared: dict, device: torch.device, *, init_mode: str, teacher=None, train: bool = True
+):
+    from .adapters.sonic_arch_student import SonicArchStudent, build_sonic_actor, tokenizer_layout
+
+    observation = env.reset()
+    model = build_sonic_actor(prepared["release_config"], env, device, int(config.seed))
+    backbone = model.actor_module
+    layout = tokenizer_layout(
+        [str(name) for name in env.config.obs.group_obs_names["tokenizer"]],
+        env.config.obs.group_obs_dims["tokenizer"],
+        tuple(prepared["reference_terms"]),
+        [str(name) for name in backbone.encoder_sample_probs.keys()],
+    )
+    g1_index = getattr(env.motion_term, "g1_encoder_index", None)
+    if g1_index is not None and layout["g1_column"] is not None and int(g1_index) != int(layout["g1_column"]):
+        raise ValueError(f"g1 encoder column mismatch: env={g1_index} layout={layout['g1_column']}")
+    if init_mode == "teacher":
+        if teacher is None:
+            raise ValueError("teacher init requires a loaded teacher")
+        model.load_state_dict(teacher.model.state_dict(), strict=True)
+    student = SonicArchStudent(
+        model=model,
+        layout=layout,
+        actor_obs_dim=int(observation["actor_obs"].shape[-1]),
+        action_dim=int(env.action_space.shape[-1]),
+        device=device,
+        init_mode=init_mode,
+        learning_rate=float(config.student.learning_rate) if train else 0.0,
+        weight_decay=float(config.student.weight_decay) if train else 0.0,
+        train_steps=int(config.student.train_steps_per_round) if train else 0,
+        batch_size=int(config.student.get("batch_size", config.student.get("micro_batch", 512))) if train else 1,
+        grad_clip=float(config.student.get("grad_clip", 1.0)),
+        seed=int(config.seed),
+        input_terms=("actor_obs", *prepared["reference_terms"]),
+        motion_keys=prepared["motion"]["loaded_keys"],
+    )
+    checks = {
+        "tokenizer_reconstruction_max_abs_diff": float(
+            (student.act_full_tokenizer(observation) - student.act(student.observe(observation)))
+            .abs()
+            .max()
+            .item()
+        )
+    }
+    if checks["tokenizer_reconstruction_max_abs_diff"] > 1.0e-5:
+        raise RuntimeError(f"tokenizer reconstruction changes the action: {checks}")
+    if init_mode == "teacher" and teacher is not None:
+        teacher.reset(env.num_envs)
+        done = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+        teacher_action = teacher.act(observation, done)
+        checks["teacher_match_max_abs_diff"] = float(
+            (student.act(student.observe(observation)) - teacher_action).abs().max().item()
+        )
+        tolerance = float(config.student.get("teacher_match_tolerance", 1.0e-4))
+        if checks["teacher_match_max_abs_diff"] > tolerance:
+            raise RuntimeError(f"teacher-initialised student does not match teacher: {checks}")
+    print(f"[dagger] sonic_arch student init={init_mode} checks={checks}", flush=True)
+    return student, checks
+
+
 def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
     sonic_root = prepared["sonic_root"]
     release_config = prepared["release_config"]
@@ -281,29 +342,57 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         f"action_dim={teacher.action_dim}",
         flush=True,
     )
-    student = PlainMlpStudent(
-        observation_dim=observation_dim,
-        action_dim=action_dim,
-        device=device,
-        hidden_dims=hidden_dims,
-        learning_rate=float(config.student.learning_rate),
-        weight_decay=float(config.student.weight_decay),
-        train_steps=int(config.student.train_steps_per_round),
-        batch_size=int(config.student.get("batch_size", config.student.get("micro_batch", 256))),
-        seed=int(config.seed),
-        input_terms=input_terms,
-        freeze_normalization=bool(config.student.get("freeze_normalization", False)),
-        motion_keys=motion_info["loaded_keys"],
-        layer_norm=bool(config.student.get("layer_norm", False)),
-        dropout=float(config.student.get("dropout", 0.0)),
-        lr_schedule=str(config.student.get("lr_schedule", "constant")),
-        warmup_steps=int(config.student.get("warmup_steps", 0)),
-        min_lr_ratio=float(config.student.get("min_lr_ratio", 0.01)),
-    )
+    architecture = str(config.student.get("architecture", "plain_mlp"))
+    if architecture == "sonic_arch":
+        init_mode = str(config.student.get("init", "random"))
+        student, student_checks = _build_sonic_arch_student(
+            config, env, prepared, device, init_mode=init_mode, teacher=teacher
+        )
+        student_info = {
+            "student_init": init_mode,
+            "student_checks": student_checks,
+            "student_peak_learning_rate": student.peak_learning_rate,
+            "student_lr_schedule": "constant",
+            "student_aux_loss": "none",
+            "student_tokenizer_layout": student.layout,
+        }
+        normalization_mode = "none"
+    elif architecture == "plain_mlp":
+        student = PlainMlpStudent(
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+            device=device,
+            hidden_dims=hidden_dims,
+            learning_rate=float(config.student.learning_rate),
+            weight_decay=float(config.student.weight_decay),
+            train_steps=int(config.student.train_steps_per_round),
+            batch_size=int(config.student.get("batch_size", config.student.get("micro_batch", 256))),
+            seed=int(config.seed),
+            input_terms=input_terms,
+            freeze_normalization=bool(config.student.get("freeze_normalization", False)),
+            motion_keys=motion_info["loaded_keys"],
+            layer_norm=bool(config.student.get("layer_norm", False)),
+            dropout=float(config.student.get("dropout", 0.0)),
+            lr_schedule=str(config.student.get("lr_schedule", "constant")),
+            warmup_steps=int(config.student.get("warmup_steps", 0)),
+            min_lr_ratio=float(config.student.get("min_lr_ratio", 0.01)),
+        )
+        student_info = {
+            "student_hidden_dims": list(student.hidden_dims),
+            "student_layer_norm": student.layer_norm,
+            "student_dropout": student.dropout,
+            "student_lr_schedule": student.lr_schedule,
+            "student_warmup_steps": student.warmup_steps,
+            "student_peak_learning_rate": student.peak_learning_rate,
+            "student_minimum_learning_rate": student.minimum_learning_rate,
+        }
+        normalization_mode = "frozen" if student.freeze_normalization else "recomputed_per_round"
+    else:
+        raise ValueError("student.architecture must be plain_mlp or sonic_arch")
     print(
-        f"[dagger] student ready params={sum(p.numel() for p in student.model.parameters())} "
-        f"normalization_mode={'frozen' if student.freeze_normalization else 'recomputed'} "
-        f"layer_norm={student.layer_norm} lr_schedule={student.lr_schedule}",
+        f"[dagger] student ready architecture={architecture} "
+        f"params={sum(p.numel() for p in student.model.parameters())} "
+        f"normalization_mode={normalization_mode}",
         flush=True,
     )
     loop = DaggerLoop(
@@ -367,6 +456,20 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     if metrics:
         motion_weights = _motion_weights_from_eval(
             metrics[-1], motion_info["loaded_keys"]
+        )
+    pretrain_path = run_dir / "manifests" / "pretrain_student_only.json"
+    pretrain_student_only = None
+    if pretrain_path.is_file():
+        pretrain_student_only = json.loads(pretrain_path.read_text(encoding="utf-8"))
+    elif bool(config.dagger.get("pretrain_eval", False)) and start_round == 0:
+        print(f"[dagger] pretrain student-only eval steps={eval_steps}", flush=True)
+        pretrain_student_only = loop.evaluate_student_only(eval_steps)
+        _write_json(pretrain_path, pretrain_student_only)
+        print(
+            f"[dagger] pretrain eval_rmse={pretrain_student_only.get('teacher_action_rmse')} "
+            f"term_rate={pretrain_student_only.get('termination_rate')} "
+            f"survival={pretrain_student_only.get('survival_ratio')}",
+            flush=True,
         )
     rounds_per_process = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
     max_hours = config.dagger.get("max_train_hours", None)
@@ -496,14 +599,9 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         "teacher_encoder": "g1",
         "teacher_parameter_count": teacher.parameter_count,
         "teacher_action_dim": teacher.action_dim,
-        "student_architecture": "plain_mlp",
-        "student_hidden_dims": list(student.hidden_dims),
-        "student_layer_norm": student.layer_norm,
-        "student_dropout": student.dropout,
-        "student_lr_schedule": student.lr_schedule,
-        "student_warmup_steps": student.warmup_steps,
-        "student_peak_learning_rate": student.peak_learning_rate,
-        "student_minimum_learning_rate": student.minimum_learning_rate,
+        "student_architecture": architecture,
+        **student_info,
+        "pretrain_student_only": pretrain_student_only,
         "motion_weighting": "termination_rate",
         "student_parameter_count": sum(parameter.numel() for parameter in student.model.parameters()),
         "student_observation_dim": observation_dim,
@@ -517,7 +615,7 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
             "low": action_low.cpu().reshape(-1).tolist() if finite_bounds else None,
             "high": action_high.cpu().reshape(-1).tolist() if finite_bounds else None,
         },
-        "normalization_mode": "frozen" if student.freeze_normalization else "recomputed_per_round",
+        "normalization_mode": normalization_mode,
         "motion": motion_info,
         "motion_keys_requested": motion_info["requested_keys"],
         "motion_keys_loaded": motion_info["loaded_keys"],
@@ -588,8 +686,8 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
     elif clip_value is None:
         clip_value = 20.0
     policy_kind = str(config.dagger.get("render_policy", "mlp")).lower()
-    if policy_kind not in {"mlp", "sonic", "sonic_causal"}:
-        raise ValueError("render_policy must be mlp, sonic or sonic_causal")
+    if policy_kind not in {"mlp", "sonic", "sonic_causal", "sonic_arch", "cvae"}:
+        raise ValueError("render_policy must be mlp, sonic, sonic_causal, sonic_arch or cvae")
     video_name = f"{policy_kind}_policy.mp4"
     extra_manifest: dict = {}
 
@@ -640,6 +738,73 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
             "architecture_version": causal.model.ARCHITECTURE_VERSION,
             "initial_action_from_env": initial_action is not None,
         }
+    elif policy_kind == "cvae":
+        from .adapters.cvae_student import CvaeStudentAdapter
+
+        checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"render checkpoint is missing: {checkpoint}")
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        if payload.get("format_version") != "dagger_cvae_student_checkpoint_v1":
+            raise ValueError(f"render_policy=cvae needs a 65-token CVAE DAgger checkpoint: {checkpoint}")
+        checkpoint_motions = set(payload.get("motion_keys") or []) | set(
+            (payload.get("motion_coverage") or {}).keys()
+        )
+        selected_motions = set(prepared["motion"]["loaded_keys"])
+        if not checkpoint_motions:
+            raise ValueError("CVAE DAgger checkpoint has no motion_keys; cannot verify the render motion was trained")
+        if not selected_motions.issubset(checkpoint_motions):
+            raise ValueError(
+                "render motion is not among the checkpoint training motions: "
+                f"{sorted(selected_motions - checkpoint_motions)}"
+            )
+        normalization_run = config.student.get("normalization_run") or payload.get("normalization_run")
+        contract = SonicActionContract(env)
+        cvae = CvaeStudentAdapter(
+            checkpoint=checkpoint,
+            model_config=config.student.model_config,
+            normalization_run=normalization_run,
+            action_contract=contract,
+            device=device,
+            cvae_root=config.student.get("cvae_root", None),
+            seed=int(config.seed),
+            train_steps=0,
+            batch_size=1,
+            source_mix=0.0,
+            teacher_mode=str(payload.get("teacher_mode", "dual")),
+            action_clip_value=payload.get("action_clip_value", 20.0),
+            raise_on_clip_error=False,
+            future_reference=bool(payload.get("future_reference", False)),
+            relabel_steps=int(payload.get("relabel_steps", 1)),
+            relabel_gamma=float(payload.get("relabel_gamma", 1.0)),
+            execute_steps=int(payload.get("execute_steps", 1)),
+        )
+        latent_mode = str(config.dagger.get("render_latent_mode", "fixed_standard_normal"))
+        cvae.set_latent_mode(latent_mode)
+        cvae.begin_evaluation()
+        cvae.reset(env.num_envs, env.physics_state())
+
+        def policy_action(observation_value, done_value):
+            if cvae.future_reference:
+                cvae.set_reference_future(env.reference_future_states(32))
+            if cvae.execute_steps > 1:
+                return cvae.plan_action().action_raw.detach()
+            return cvae.observe().action_raw.detach()
+
+        def after_step(executed_action, done_value):
+            cvae.after_step(contract.raw_to_canonical(executed_action), env.physics_state(), done_value)
+
+        checkpoint_sha256 = cvae.checkpoint_sha256
+        policy_source = "dagger_cvae_65token_policy_rollout"
+        extra_manifest = {
+            "latent_mode": latent_mode,
+            "round_index": payload.get("round_index"),
+            "future_reference": cvae.future_reference,
+            "relabel_steps": cvae.relabel_steps,
+            "relabel_gamma": cvae.relabel_gamma,
+            "execute_steps": cvae.execute_steps,
+            "checkpoint_motion_count": len(checkpoint_motions),
+        }
     elif policy_kind == "mlp":
         hidden_dims = tuple(
             int(value)
@@ -678,6 +843,29 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
 
         checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
         policy_source = "dagger_mlp_policy_rollout"
+    elif policy_kind == "sonic_arch":
+        checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"render checkpoint is missing: {checkpoint}")
+        arch_student, _checks = _build_sonic_arch_student(
+            config, env, prepared, device, init_mode="random", train=False
+        )
+        payload = arch_student.load(checkpoint)
+        checkpoint_motions = set(payload.get("motion_keys") or [])
+        selected_motions = set(prepared["motion"]["loaded_keys"])
+        if checkpoint_motions and selected_motions and not selected_motions.issubset(checkpoint_motions):
+            raise ValueError(
+                "render motion is not among the checkpoint training motions: "
+                f"{sorted(selected_motions - checkpoint_motions)}"
+            )
+        observation = env.reset()
+
+        def policy_action(observation_value, done_value):
+            return arch_student.act(arch_student.observe(observation_value))
+
+        checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+        policy_source = "dagger_sonic_arch_policy_rollout"
+        extra_manifest = {"student_init": payload.get("init_mode")}
     else:
         checkpoint = Path(str(config.teacher_checkpoint)).expanduser().resolve()
         if not checkpoint.is_file():
@@ -1508,6 +1696,7 @@ def _merge_cvae_eval_metrics(results: list[dict]) -> dict | None:
         "action_clip_error_max": max(
             float(result.get("action_clip_error_max", 0.0)) for result in results
         ),
+        "execute_steps": int(results[0].get("execute_steps", 1)),
         "grouped_eval": True,
         "group_count": len(results),
     }
@@ -1816,6 +2005,9 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
             config.student.get("raise_on_clip_error", False)
         ),
         future_reference=bool(config.student.get("future_reference", False)),
+        relabel_steps=int(config.student.get("relabel_steps", 1)),
+        relabel_gamma=float(config.student.get("relabel_gamma", 1.0)),
+        execute_steps=int(config.student.get("execute_steps", 1)),
     )
     if completed:
         student.load_round_checkpoint(completed[-1][2], load_optimizer=True)
@@ -2514,6 +2706,21 @@ def main() -> None:
         config.dagger.motion_key = None
         config.dagger.motion_count = 1
         _select_sonic_causal_motions(config)
+    if (
+        str(config.mode) == "mlp_render"
+        and str(config.dagger.get("render_policy", "mlp")).lower() == "cvae"
+        and not str(config.dagger.get("motion_key", "") or "")
+    ):
+        payload = torch.load(
+            Path(str(config.student.checkpoint)).expanduser().resolve(),
+            map_location="cpu",
+            weights_only=False,
+        )
+        trained = list(payload.get("motion_keys") or []) or sorted(payload.get("motion_coverage") or {})
+        if not trained:
+            raise ValueError("CVAE DAgger checkpoint has no motion_keys; set DAGGER_RENDER_MOTION_KEY")
+        config.dagger.motion_key = str(trained[0])
+        del payload
     motion_source = str(config.dagger.get("motion_source_checkpoint", "") or "")
     if str(config.mode).startswith("mlp") and str(config.mode) != "mlp_render" and motion_source:
         # Same checkpoint + motion_seed + motion_count as sonic_causal_pilot -> identical motion set.

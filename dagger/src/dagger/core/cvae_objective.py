@@ -19,6 +19,21 @@ def teacher_action_mse(
     return (predicted_action[:, int(anchor)].float() - teacher_action.float()).square().mean()
 
 
+def teacher_chunk_mse(
+    predicted_action: torch.Tensor,
+    teacher_chunk: torch.Tensor,
+    weight: torch.Tensor,
+    anchor: int,
+) -> torch.Tensor:
+    """gamma^i-weighted MSE over window Actions anchor..anchor+K-1."""
+
+    steps = int(teacher_chunk.shape[1])
+    predicted = predicted_action[:, int(anchor) : int(anchor) + steps].float()
+    error = (predicted - teacher_chunk.float()).square().mean(dim=-1)
+    weight = weight.float()
+    return (error * weight).sum() / weight.sum().clamp_min(1.0e-8)
+
+
 def masked_future_state_mse(
     predicted_state: torch.Tensor,
     target_state: torch.Tensor,

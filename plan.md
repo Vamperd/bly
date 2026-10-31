@@ -394,4 +394,11 @@ train_motion_keys；评估为每轮 student-only 192 步、8 env，survival 粒�
   survival 0.25。MLP 最佳 rmse 与 10-step CVAE 相当、最佳 survival 更高，但轮间波动大；两者都未稳定存活全部 motion。
 - chunk CVAE future-reference DAgger：slot 33–64 改为未来 32 帧 reference State（contact 与 Action 32+ mask），
   从 300k C（v4 线数据）出发；代码与配置完成、59 tests 通过，Isaac 未执行。
-- 待执行：MLP 三 checkpoint 保留、四路 ghost 视频渲染、future-reference DAgger 8h。
+- DAgger 前的 C run `sonic_causal_c_8h` 已误删（2026-10-31），ghost 视频改用 `SKIP_C=1`（sonic / MLP / DAgger 三层）。
+- SONIC 结构 student 纯 DAgger 对照：`SonicArchStudent` 使用 release actor 原结构（g1 encoder → FSQ → g1_dyn），
+  只用 action MSE、无输入归一化，其余超参同 MLP 6h。E0/E1 `sonic-arch-check`（teacher 初始化，10 轮，
+  检验流水线）；E2 `sonic-arch-6h`（随机初始化，6h）。代码完成、63 tests 通过，Isaac 未执行。
+- future-reference 的 B+C 变体 `cvae-kl2-pilot-future-ref-chunk-8h`：Action 32..39 用 SONIC 在实际访问 State 上的动作做标签
+  （γ=0.9），student 每 4 步重规划、开环执行；训练、评估、渲染（`DAGGER_RENDER_POLICY=cvae`）共用 `plan_action()`。
+  代码完成、71 tests 通过，Isaac 未执行。
+- 待执行：ghost 视频渲染（运行中）、sonic-arch E1→E2、future-reference DAgger 8h 及其 B+C 变体。

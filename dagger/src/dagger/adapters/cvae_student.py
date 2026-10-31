@@ -25,6 +25,7 @@ from dagger.core.cvae_objective import (
     masked_future_contact_bce,
     masked_future_state_mse,
     teacher_action_mse,
+    teacher_chunk_mse,
 )
 from dagger.runtime.cvae_window import (
     ACTION_DIM,
@@ -61,6 +62,51 @@ class CvaeRollout:
     epsilon_global: torch.Tensor
     epsilon_local: torch.Tensor
     action_clip_error: torch.Tensor | None = None
+
+
+@dataclass
+class CvaePlanStep:
+    """One executed step of a k-step open-loop plan; ``fresh`` marks envs that replanned."""
+
+    window: CvaeWindow
+    action_canonical: torch.Tensor
+    action_raw: torch.Tensor
+    predicted_state: torch.Tensor
+    predicted_action: torch.Tensor
+    epsilon_global: torch.Tensor
+    epsilon_local: torch.Tensor
+    action_clip_error: torch.Tensor
+    offset: torch.Tensor
+    fresh: torch.Tensor
+
+
+def _select_rows(mask: torch.Tensor, new: Any, old: Any) -> Any:
+    if isinstance(new, torch.Tensor):
+        shape = (-1,) + (1,) * (new.ndim - 1)
+        return torch.where(mask.to(new.device).reshape(shape), new, old)
+    if isinstance(new, dict):
+        return {key: _select_rows(mask, value, old[key]) for key, value in new.items()}
+    if isinstance(new, CvaeWindow):
+        return CvaeWindow(
+            batch=_select_rows(mask, new.batch, old.batch),
+            state_mask=_select_rows(mask, new.state_mask, old.state_mask),
+            action_mask=_select_rows(mask, new.action_mask, old.action_mask),
+            loss_state_mask=_select_rows(mask, new.loss_state_mask, old.loss_state_mask),
+            loss_action_mask=_select_rows(mask, new.loss_action_mask, old.loss_action_mask),
+            history_steps=(
+                None
+                if new.history_steps is None or old.history_steps is None
+                else _select_rows(mask, new.history_steps, old.history_steps)
+            ),
+        )
+    if isinstance(new, CvaeBlockRollout):
+        return CvaeBlockRollout(
+            **{
+                name: _select_rows(mask, getattr(new, name), getattr(old, name))
+                for name in new.__dataclass_fields__
+            }
+        )
+    raise TypeError(f"cannot merge {type(new)!r}")
 
 
 def _sha256(path: Path) -> str:
@@ -108,9 +154,23 @@ class CvaeStudentAdapter:
         load_optimizer: bool = False,
         raise_on_clip_error: bool = True,
         future_reference: bool = False,
+        relabel_steps: int = 1,
+        relabel_gamma: float = 1.0,
+        execute_steps: int = 1,
     ) -> None:
         self.future_reference = bool(future_reference)
         self._reference_future: torch.Tensor | None = None
+        self.relabel_steps = int(relabel_steps)
+        self.relabel_gamma = float(relabel_gamma)
+        self.execute_steps = int(execute_steps)
+        if not 1 <= self.relabel_steps <= ACTION_STEPS - ANCHOR:
+            raise ValueError(f"relabel_steps must be in 1..{ACTION_STEPS - ANCHOR}")
+        if not 1 <= self.execute_steps <= self.relabel_steps:
+            raise ValueError("execute_steps must be in 1..relabel_steps so every executed Action has a label")
+        if not 0.0 < self.relabel_gamma <= 1.0:
+            raise ValueError("relabel_gamma must be in (0,1]")
+        self._plan: CvaeBlockRollout | None = None
+        self._plan_offset: torch.Tensor | None = None
         self.device = device
         self.action_contract = action_contract
         self.seed = int(seed)
@@ -327,6 +387,8 @@ class CvaeStudentAdapter:
     def reset(self, num_envs: int, current_state: torch.Tensor) -> None:
         self._buffer = CvaeWindowBuffer(device=self.device, num_envs=int(num_envs))
         self._buffer.reset(current_state)
+        self._plan = None
+        self._plan_offset = None
         self._episode_counter += 1
         if (
             self._epsilon_global is None
@@ -378,6 +440,8 @@ class CvaeStudentAdapter:
             clear_on_done=clear_history_on_done,
         )
         self._reference_future = None
+        if self._plan_offset is not None:
+            self._plan_offset[done.detach().to("cpu", dtype=torch.bool)] = self.execute_steps
         if bool(done.any()) and not self._evaluation_mode:
             self._episode_counter += 1
             self._new_epsilon(done)
@@ -519,6 +583,52 @@ class CvaeStudentAdapter:
             epsilon_global=self._epsilon_global.detach().clone(),
             epsilon_local=self._epsilon_local.detach().clone(),
             action_clip_error=clip_error.detach().clone(),
+        )
+
+    @torch.no_grad()
+    def plan_action(self) -> CvaePlanStep:
+        """Next Action of the cached ``execute_steps`` open-loop plan.
+
+        Envs whose plan is exhausted (or that just finished an episode) replan
+        from the current window; the others keep executing their cached plan.
+        Training rollout, evaluation and rendering all call this method.
+        """
+
+        if self._buffer is None:
+            raise RuntimeError("student has not been reset")
+        steps = self.execute_steps
+        count = self._buffer.num_envs
+        if self._plan_offset is None:
+            self._plan_offset = torch.full((count,), steps, dtype=torch.long)
+        fresh = self._plan_offset >= steps
+        if bool(fresh.any()):
+            block = self.observe_block(steps)
+            if self.raise_on_clip_error and bool(
+                (block.action_clip_error[fresh.to(block.action_clip_error.device)] > 1.0e-4).any()
+            ):
+                raise ValueError("CVAE canonical/raw action round-trip exceeds 1e-4")
+            self._plan = block if self._plan is None else _select_rows(fresh, block, self._plan)
+            self._plan_offset[fresh] = 0
+        plan = self._plan
+        if plan is None:
+            raise RuntimeError("open-loop plan is missing")
+        offset = self._plan_offset.clone()
+        rows = torch.arange(count, device=plan.action_raw.device)
+        index = offset.to(plan.action_raw.device)
+        self._plan_offset += 1
+        clip_error = plan.action_clip_error[rows, index]
+        self.last_action_clip_error = float(clip_error.max().detach().cpu())
+        return CvaePlanStep(
+            window=plan.window,
+            action_canonical=plan.action_canonical[rows, index],
+            action_raw=plan.action_raw[rows, index],
+            predicted_state=plan.predicted_state,
+            predicted_action=plan.predicted_action,
+            epsilon_global=plan.epsilon_global,
+            epsilon_local=plan.epsilon_local,
+            action_clip_error=clip_error,
+            offset=offset,
+            fresh=fresh.clone(),
         )
 
     def act(self, student_input: CvaeRollout) -> torch.Tensor:
@@ -740,6 +850,14 @@ class CvaeStudentAdapter:
             "source_causal": float(use_causal),
         }
 
+    @staticmethod
+    def _teacher_loss(action: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        if "teacher_action_chunk" in batch:
+            return teacher_chunk_mse(
+                action, batch["teacher_action_chunk"], batch["teacher_chunk_weight"], ANCHOR
+            )
+        return teacher_action_mse(action, batch["teacher_action"], ANCHOR)
+
     def _dagger_loss(
         self, batch: dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, dict[str, float]]:
@@ -766,7 +884,7 @@ class CvaeStudentAdapter:
                 batch["physical_state"],
                 batch["loss_state_mask"],
             )
-            teacher = teacher_action_mse(output.action, batch["teacher_action"], ANCHOR)
+            teacher = self._teacher_loss(output.action, batch)
             kl = hierarchical_kl(output.posterior)["total"]
             loss = compose_dagger_loss(
                 future_state=future_state,
@@ -825,12 +943,8 @@ class CvaeStudentAdapter:
             batch["physical_state"],
             batch["loss_state_mask"],
         )
-        teacher_sn = teacher_action_mse(
-            standard_normal.action, batch["teacher_action"], ANCHOR
-        )
-        teacher_pm = teacher_action_mse(
-            posterior_mean.action, batch["teacher_action"], ANCHOR
-        )
+        teacher_sn = self._teacher_loss(standard_normal.action, batch)
+        teacher_pm = self._teacher_loss(posterior_mean.action, batch)
         kl = hierarchical_kl(posterior)["total"]
         loss = compose_dagger_loss(
             future_state=future_state,
@@ -1012,6 +1126,9 @@ class CvaeStudentAdapter:
             "teacher_mode": self.teacher_mode,
             "raise_on_clip_error": bool(self.raise_on_clip_error),
             "future_reference": bool(self.future_reference),
+            "relabel_steps": int(self.relabel_steps),
+            "relabel_gamma": float(self.relabel_gamma),
+            "execute_steps": int(self.execute_steps),
         }
         if extra_metadata:
             payload.update(extra_metadata)
@@ -1036,6 +1153,17 @@ class CvaeStudentAdapter:
             raise ValueError("CVAE DAgger checkpoint normalization mismatch")
         if bool(payload.get("future_reference", False)) != self.future_reference:
             raise ValueError("CVAE DAgger checkpoint future_reference semantics mismatch")
+        stored = (
+            int(payload.get("relabel_steps", 1)),
+            float(payload.get("relabel_gamma", 1.0)),
+            int(payload.get("execute_steps", 1)),
+        )
+        current = (self.relabel_steps, self.relabel_gamma, self.execute_steps)
+        if stored[0] != current[0] or abs(stored[1] - current[1]) > 1.0e-12 or stored[2] != current[2]:
+            raise ValueError(
+                "CVAE DAgger checkpoint relabel/execute semantics mismatch: "
+                f"(relabel_steps, relabel_gamma, execute_steps) {stored} != {current}"
+            )
         state = payload.get("model_state_dict")
         if not isinstance(state, dict):
             raise ValueError("CVAE DAgger checkpoint has no model weights")

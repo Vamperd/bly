@@ -783,9 +783,72 @@ nohup env SKIP_C=1 bash scripts/render_ghost4_batch.sh ~/bly/runs/dagger_mlp_cau
 cd ~/bly/dagger && nohup bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-ref-8h > ~/bly/runs/dagger_future_ref_8h.log 2>&1 &
 ```
 
+#### B（K 步 relabel）+ C（k 步开环执行）：代码已实现，待 Ubuntu 执行
+
+- B `student.relabel_steps: K`（1..32）、`relabel_gamma: γ`：训练窗口 Action 32..32+K−1 都用 SONIC 在**实际访问到的**
+  State 上的动作做标签（`teacher_action_chunk` [K,29]），权重 γ^i；越过 episode 末尾或 post-fall 无效 State 的步权重 0。
+  loss 为 `core/cvae_objective.py` `teacher_chunk_mse`（加权平均），sn/pm 两个分支都用它。K=1 时与旧行为相同。
+- C `student.execute_steps: k`（1..K）：student 每 k 步重规划一次，用 `observe_block(k)` 一次出 k 个动作开环执行，
+  中途 done 的 env 立即重规划（`CvaeStudentAdapter.plan_action`）。约束 k ≤ K，保证每个被执行的动作都有 teacher 标签。
+  k=4 正好覆盖一个 local latent（16 个 local latent × 4 Action）。
+- per_step mixture 下 teacher/student 的选择只在重规划步重新抽样，同一个块内不混用。`episode_mix` 与 k>1 不兼容，启动即报错。
+- 训练 rollout、每轮 student-only 评估和渲染使用同一个 `plan_action()`：同样的 reference push、latent 模式、
+  `begin_evaluation` 和执行步长。checkpoint 写入 `relabel_steps` / `relabel_gamma` / `execute_steps`，续训时不一致即报错；
+  渲染直接从 checkpoint 读取这三项。
+- 配置 `configs/cvae_kl2_pilot_future_ref_chunk_8h.yaml`：在 future-ref 8h 基础上 `relabel_steps: 8`、`relabel_gamma: 0.9`、
+  `execute_steps: 4`，其余相同。
+- 渲染：`DAGGER_RENDER_POLICY=cvae` + `mlp-render`，读取 65-token CVAE DAgger checkpoint。motion 默认取 checkpoint 的第一个训练 motion
+  （也可用 `DAGGER_RENDER_MOTION_KEY` 指定，必须在 checkpoint 的 `motion_keys`/`motion_coverage` 中），motion 文件默认为 `CVAE_KL2_MOTION_FILE`。
+- 验证：Windows 71 tests 通过（新增 relabel 窗口、chunk loss、开环重规划与 done、per-block mixture、checkpoint 不一致）；Isaac 未执行。
+
+```bash
+cd ~/bly/dagger && nohup bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-ref-chunk-8h > ~/bly/runs/dagger_future_ref_chunk_8h.log 2>&1 &
+cd ~/bly/dagger && DAGGER_RENDER_POLICY=cvae DAGGER_RENDER_CHECKPOINT=<run>/checkpoints/round_17.pt bash scripts/run_dagger.sh mlp-render
+```
+
+#### 12-motion 约 12h（B+C）：待 Ubuntu 执行
+
+- motion：`configs/cvae_kl2_motion_manifest_12m.json` 的 `pilot_motion_keys`，包含 MLP 6h 的 8 个 motion（均在 KL2 32 keys 内，
+  即 65-token C 训练过的 motion）、旧 KL2 pilot 中另外 3 个，以及 `jog_arc_cw_loop_001__A182`。32 keys / groups / hash 与原 manifest 相同。
+- 配置 `configs/cvae_kl2_pilot_future_ref_chunk_12h.yaml`：在 chunk 8h 基础上改为 12 env、rollout 750、20 轮，其余不变
+  （K=8、γ=0.9、k=4、每轮 4000 step）。估计每轮 33–38 min（训练按 2.1–2.7 steps/s 估算，未实测）；数据约 18 万窗口，内存/磁盘约 7 GB。
+- 单轮可能超过默认 2400 s shard timeout，启动时设 `DAGGER_CVAE_SHARD_TIMEOUT=3600`、`DAGGER_MAX_SHARDS=40`。
+
+```bash
+cd ~/bly/dagger && nohup env DAGGER_CVAE_SHARD_TIMEOUT=3600 DAGGER_MAX_SHARDS=40 bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-ref-chunk-12h > ~/bly/runs/dagger_future_ref_chunk_12h.log 2>&1 &
+```
+
+### SONIC 结构 student 纯 DAgger 对照（E0/E1/E2）：代码已实现，待 Ubuntu 执行
+
+- 目的：student 换成与 SONIC release actor 完全相同的结构（g1 encoder `[2048,1024,512,512]` → FSQ 2×32 token →
+  g1_dyn decoder `[2048,2048,1024,1024,512,512]`），只用 DAgger、不用 PPO，训练同样 8 个 motion。
+  用来区分“结构/迁移问题”和“DAgger 流水线问题”。
+- 按 SONIC 做法：只用 action MSE（不加 g1_recon 辅助 loss），不做输入归一化（release 配置 `running_mean_std: false`）。
+  其余与 MLP 6h 相同：motion_seed 20261104 + motion_source_checkpoint、beta 表、AdamW lr 1e-4 / wd 1e-4、
+  每轮 2000 step、batch 512、grad clip 1.0。
+- 实现：`adapters/sonic_arch_student.py`（`SonicArchStudent`）。数据集存储与 MLP 相同
+  （`actor_obs` + G1 reference 两项）；前向时把 reference 放回 tokenizer 原偏移、`encoder_index` 置 g1 one-hot，
+  其余 tokenizer 项为零（g1 路径不读它们），只跑 `g1_dyn` decoder。checkpoint 格式
+  `dagger_sonic_arch_student_checkpoint_v1`。
+- 启动时自检（失败即报错）：重建 tokenizer 与真实 tokenizer 的动作差 ≤ 1e-5；teacher 初始化时 student 与
+  `teacher.act()` 差 ≤ 1e-4（`teacher_match_tolerance`）。结果写入 manifest `student_checks`。
+- `dagger.pretrain_eval: true`：round 0 前做一次 student-only 评估，写 `manifests/pretrain_student_only.json`。
+- 配置与模式：
+  - E0/E1 `sonic-arch-check`（`configs/mlp_sonic_arch_teacher_init.yaml`）：teacher 初始化，10 轮。
+    pretrain 评估即 E0（teacher 上界）；10 轮后 student-only 指标应接近 E0，明显变差说明流水线有 bug。
+  - E2 `sonic-arch-6h`（`configs/mlp_sonic_arch_6h.yaml`）：随机初始化，6h 预算。
+- 视频：`DAGGER_RENDER_POLICY=sonic_arch` + `mlp-render`。
+- 验证：Windows 63 tests 通过（含 `tests/test_sonic_arch_student.py`）；Isaac 未执行。
+
+```bash
+cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-check > ~/bly/runs/dagger_sonic_arch_check.log 2>&1 &
+cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/dagger_sonic_arch_6h.log 2>&1 &
+```
+
 ### 下一步
 
-1. 执行 MLP checkpoint 保留的 `--delete`（round 已回填）。
-2. 渲染 8 个 motion 的四路 ghost 与单独视频，按视频判断各策略的失败形态。
+1. 渲染 8 个 motion 的 ghost 与单独视频（`SKIP_C=1`，运行中），按视频判断各策略的失败形态。
+2. 渲染结束后跑 `sonic-arch-check`（E0/E1），通过后再跑 `sonic-arch-6h`（E2），与 MLP 6h 对比。
 3. 启动 future-reference chunk CVAE DAgger 8h，与 10-step CVAE DAgger、MLP 在 rmse/survival 上对比。
    两者 motion 集合不同（KL2 manifest vs 上面 8 个），对比时需注明。
+4. 启动 B+C（`cvae-kl2-pilot-future-ref-chunk-8h`，K=8、γ=0.9、k=4），与第 3 项的 K=k=1 对比，并用 `DAGGER_RENDER_POLICY=cvae` 渲染。

@@ -77,6 +77,19 @@ class CvaeDaggerLoop:
             raise ValueError("student_block_steps must be in 1..32")
         if self.teacher_episode_period < 1:
             raise ValueError("teacher_episode_period must be positive")
+        self.execute_steps = int(getattr(student, "execute_steps", 1))
+        self.relabel_steps = int(getattr(student, "relabel_steps", 1))
+        self.relabel_gamma = float(getattr(student, "relabel_gamma", 1.0))
+        if self.episode_mix and self.execute_steps > 1:
+            raise ValueError("episode_mix has its own student blocks; use execute_steps=1 with it")
+
+    def _student_step(self) -> tuple[Any, torch.Tensor]:
+        """Student Action for this step plus a [B] mask of envs that just (re)planned."""
+
+        if self.execute_steps > 1:
+            step = self.student.plan_action()
+            return step, step.fresh.detach().cpu().bool()
+        return self.student.observe(), torch.ones(self.num_envs, dtype=torch.bool)
 
     def _motion_ids(self) -> torch.Tensor:
         motion = self.env.command_manager.get_term("motion")
@@ -150,7 +163,17 @@ class CvaeDaggerLoop:
         references = record["reference_future"]
         if references and len(references) != actions.shape[0]:
             raise RuntimeError("reference_future must be recorded for every executed step")
-        for step in range(actions.shape[0]):
+        state_valid = torch.stack(record["state_valid"])
+        length = int(actions.shape[0])
+        for step in range(length):
+            teacher_future = None
+            future_valid = None
+            if self.relabel_steps > 1:
+                index = torch.arange(step, step + self.relabel_steps)
+                clamped = index.clamp(max=length - 1)
+                teacher_future = teachers[clamped]
+                future_valid = (index < length) & state_valid[clamped]
+                future_valid[0] = True
             sample = build_training_window(
                 states,
                 actions,
@@ -161,8 +184,11 @@ class CvaeDaggerLoop:
                 state_std=self.state_std,
                 action_mean=self.action_mean,
                 action_std=self.action_std,
-                state_valid=torch.stack(record["state_valid"]),
+                state_valid=state_valid,
                 reference_future=references[step] if references else None,
+                teacher_future=teacher_future,
+                teacher_future_valid=future_valid,
+                relabel_gamma=self.relabel_gamma,
             )
             for source, target in (
                 ("teacher_raw", "teacher_action_raw"),
@@ -226,7 +252,7 @@ class CvaeDaggerLoop:
 
         for step_index in range(self.rollout_steps):
             reference = self._push_reference()
-            student_rollout = self.student.observe()
+            student_rollout, fresh = self._student_step()
             teacher_done = (
                 torch.zeros_like(done) if postfall else done
             )
@@ -237,9 +263,11 @@ class CvaeDaggerLoop:
             student_raw = student_rollout.action_raw.detach()
             student_canonical = student_rollout.action_canonical.detach()
             if self.mixture_mode == "per_step":
-                teacher_mask = (
+                # With open-loop plans the teacher/student choice is per plan block.
+                resampled = (
                     torch.rand(self.num_envs, generator=random) < float(beta)
                 ).to(self.env.device)
+                teacher_mask = torch.where(fresh.to(self.env.device), resampled, teacher_mask)
             executed_raw = torch.where(teacher_mask[:, None], teacher_raw, student_raw)
             executed_canonical = self.action_contract.raw_to_canonical(executed_raw)
             if teacher_raw.shape != student_raw.shape or tuple(teacher_raw.shape[-1:]) != (29,):
@@ -381,6 +409,9 @@ class CvaeDaggerLoop:
             "sample_count": int(round_data.count),
             "post_fall_continuation": bool(postfall),
             "post_fall_stopped_envs": sum(stopped),
+            "execute_steps": self.execute_steps,
+            "relabel_steps": self.relabel_steps,
+            "relabel_gamma": self.relabel_gamma,
         }
         self.dataset.append(round_data)
         self.dataset.save_round(round_index, self.run_dir)
@@ -625,7 +656,7 @@ class CvaeDaggerLoop:
         for step_index in range(int(steps)):
             motion_ids = self._motion_ids()
             self._push_reference()
-            rollout = self.student.observe()
+            rollout, _fresh = self._student_step()
             student_raw = rollout.action_raw.detach()
             student_canonical = rollout.action_canonical.detach()
             teacher_raw = self.action_contract.clip_raw(
@@ -733,6 +764,7 @@ class CvaeDaggerLoop:
             "steps": float(steps),
             "num_envs": float(self.num_envs),
             "latent_mode": latent_mode,
+            "execute_steps": self.execute_steps,
             "done_count": float(done_count),
             "mean_reward": reward_sum / max(1, int(steps)),
             "teacher_action_rmse": (canonical_sse / max(1, element_count)) ** 0.5,

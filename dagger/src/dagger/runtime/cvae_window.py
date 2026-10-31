@@ -225,11 +225,17 @@ def build_training_window(
     state_valid: torch.Tensor | None = None,
     action_valid: torch.Tensor | None = None,
     reference_future: torch.Tensor | None = None,
+    teacher_future: torch.Tensor | None = None,
+    teacher_future_valid: torch.Tensor | None = None,
+    relabel_gamma: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     """Build one complete target window around a local episode step.
 
     The input condition is causal, but the returned target retains the actual
     future simulator States.  Invalid padding is never included in a loss.
+    ``teacher_future`` [K,29] holds teacher labels on the actually visited
+    States s_t..s_{t+K-1}; they supervise window Actions 32..32+K-1 with
+    weight gamma^i.
     """
 
     if states.ndim != 2 or states.shape[-1] != STATE_DIM:
@@ -287,7 +293,33 @@ def build_training_window(
             valid_action=valid_action,
             contact_target_valid=contact_valid,
         )
+    chunk: dict[str, torch.Tensor] = {}
+    if teacher_future is not None:
+        steps = int(teacher_future.shape[0])
+        if teacher_future.ndim != 2 or teacher_future.shape[-1] != ACTION_DIM:
+            raise ValueError("teacher_future must have shape [K,29]")
+        if not 1 <= steps <= ACTION_STEPS - ANCHOR:
+            raise ValueError(f"teacher_future length must be in 1..{ACTION_STEPS - ANCHOR}")
+        if teacher_future_valid is None:
+            teacher_future_valid = torch.ones(steps, dtype=torch.bool, device=teacher_future.device)
+        if tuple(teacher_future_valid.shape) != (steps,) or not bool(teacher_future_valid[0]):
+            raise ValueError("teacher_future_valid must be [K] with the anchor label valid")
+        future = teacher_future.to(actions.device, dtype=actions.dtype)
+        valid = teacher_future_valid.to(actions.device, dtype=torch.bool)
+        future = torch.where(valid[:, None], future, torch.zeros_like(future))
+        powers = torch.arange(steps, device=actions.device, dtype=actions.dtype)
+        weight = (float(relabel_gamma) ** powers) * valid.to(actions.dtype)
+        lam[0, ANCHOR : ANCHOR + steps] |= valid[:, None]
+        chunk = {
+            "teacher_action_chunk": torch.where(
+                valid[:, None],
+                (future - action_mean) / action_std.clamp_min(1.0e-6),
+                torch.zeros_like(future),
+            ),
+            "teacher_chunk_weight": weight,
+        }
     return {
+        **chunk,
         "physical_state": state_norm[0],
         "action": action_norm[0],
         "valid_state": valid_state[0],

@@ -12,6 +12,8 @@ case "$MODE" in
   cvae-kl2-pilot-intensive) CONFIG_MODE="cvae_kl2_pilot_intensive" ;;
   cvae-kl2-pilot-intensive-8h) CONFIG_MODE="cvae_kl2_pilot_intensive_8h" ;;
   cvae-kl2-pilot-future-ref-8h) CONFIG_MODE="cvae_kl2_pilot_future_ref_8h" ;;
+  cvae-kl2-pilot-future-ref-chunk-8h) CONFIG_MODE="cvae_kl2_pilot_future_ref_chunk_8h" ;;
+  cvae-kl2-pilot-future-ref-chunk-12h) CONFIG_MODE="cvae_kl2_pilot_future_ref_chunk_12h" ;;
   cvae-kl2-pilot-dagger-v2) CONFIG_MODE="cvae_kl2_pilot_dagger_v2" ;;
   cvae-kl2-pilot-dagger-v2-2m) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m" ;;
   cvae-kl2-pilot-dagger-v2-2m-2h) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m_2h" ;;
@@ -30,8 +32,10 @@ case "$MODE" in
   mlp-causal-motions) CONFIG_MODE="mlp_causal_motions" ;;
   mlp-causal-6h) CONFIG_MODE="mlp_causal_6h" ;;
   mlp-render) CONFIG_MODE="mlp_render" ;;
+  sonic-arch-check) CONFIG_MODE="mlp_sonic_arch_teacher_init" ;;
+  sonic-arch-6h) CONFIG_MODE="mlp_sonic_arch_6h" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|sonic-causal-8h|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|mlp-render" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|sonic-causal-8h|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|mlp-render|sonic-arch-check|sonic-arch-6h" >&2
   exit 2
     ;;
 esac
@@ -41,7 +45,7 @@ SONIC_REPO_ROOT="${SONIC_REPO_ROOT:-$HOME/bly/sonic-repro/GR00T-WholeBodyControl
 SONIC_TEACHER_CHECKPOINT="${SONIC_TEACHER_CHECKPOINT:-$SONIC_REPO_ROOT/sonic_release/last.pt}"
 SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$HOME/bly/runs}"
 STATE_ACTION_CVAE_ROOT="${STATE_ACTION_CVAE_ROOT:-$HOME/bly/state-action-cvae}"
-if [[ ( "$MODE" == sonic-causal-* || "$MODE" == mlp-causal-* || ( "$MODE" == mlp-render && "${DAGGER_RENDER_POLICY:-}" == sonic_causal ) ) && -z "${DAGGER_MOTION_FILE:-}" ]]; then
+if [[ ( "$MODE" == sonic-causal-* || "$MODE" == mlp-causal-* || "$MODE" == sonic-arch-* || ( "$MODE" == mlp-render && ( "${DAGGER_RENDER_POLICY:-}" == sonic_causal || "${DAGGER_RENDER_POLICY:-}" == sonic_arch ) ) ) && -z "${DAGGER_MOTION_FILE:-}" ]]; then
   # C training data comes from the Physics v5 reference subset; DAgger motions must be loadable from it.
   REFERENCE_SUBSET_POINTER="$SONIC_RUNS_ROOT/latest_overfit_reference_motion_subset_run_dir.txt"
   test -s "$REFERENCE_SUBSET_POINTER" || {
@@ -49,6 +53,10 @@ if [[ ( "$MODE" == sonic-causal-* || "$MODE" == mlp-causal-* || ( "$MODE" == mlp
     exit 2
   }
   DAGGER_MOTION_FILE="$(<"$REFERENCE_SUBSET_POINTER")/data/robot_filtered"
+fi
+if [[ "$MODE" == mlp-render && "${DAGGER_RENDER_POLICY:-}" == cvae && -z "${DAGGER_MOTION_FILE:-}" ]]; then
+  # 65-token CVAE DAgger trains on the KL2 motion library; render from the same files.
+  DAGGER_MOTION_FILE="${CVAE_KL2_MOTION_FILE:-/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered}"
 fi
 DAGGER_MOTION_FILE="${DAGGER_MOTION_FILE:-$SONIC_REPO_ROOT/data/motion_lib_bones_seed/robot_filtered}"
 DAGGER_RESUME_RUN="${DAGGER_RESUME_RUN:-}"
@@ -111,7 +119,7 @@ if ! flock -n 9; then
 fi
 echo "[run_dagger] acquired $LOCK_PATH"
 
-if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-dynamic2 || "$MODE" == mlp-causal-* || "$MODE" == mlp-render ]]; then
+if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-dynamic2 || "$MODE" == mlp-causal-* || "$MODE" == sonic-arch-* || "$MODE" == mlp-render ]]; then
   test -d "$DAGGER_MOTION_FILE" || {
     echo "DAGGER_MOTION_FILE is missing or not a directory: $DAGGER_MOTION_FILE" >&2
     exit 2
@@ -125,7 +133,7 @@ if [[ "$MODE" == mlp-render ]]; then
       exit 2
     }
   else
-    : "${DAGGER_RENDER_CHECKPOINT:?Set DAGGER_RENDER_CHECKPOINT to an MLP or sonic_causal checkpoint}"
+    : "${DAGGER_RENDER_CHECKPOINT:?Set DAGGER_RENDER_CHECKPOINT to an MLP, sonic_arch, sonic_causal or cvae checkpoint}"
     test -s "$DAGGER_RENDER_CHECKPOINT" || {
       echo "Render checkpoint is missing or empty: $DAGGER_RENDER_CHECKPOINT" >&2
       exit 2
@@ -154,6 +162,8 @@ if [[ "$MODE" == cvae-kl2-* ]]; then
   }
   if [[ "$MODE" == cvae-kl2-pilot-dagger-v2-2m* ]]; then
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_2m.json}"
+  elif [[ "$MODE" == cvae-kl2-pilot-future-ref-chunk-12h ]]; then
+    export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_12m.json}"
   else
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest.json}"
   fi
@@ -175,7 +185,7 @@ if [[ "$MODE" == cvae-kl2-* ]]; then
   fi
 fi
 
-if [[ "$MODE" == mlp-causal-* ]]; then
+if [[ "$MODE" == mlp-causal-* || "$MODE" == sonic-arch-* ]]; then
   # Any checkpoint carrying the C train_motion_keys works; the sonic-causal-8h DAgger best.pt copies them from C.
   : "${MLP_MOTION_SOURCE_CHECKPOINT:=${SONIC_CAUSAL_STUDENT_CHECKPOINT:-$SONIC_RUNS_ROOT/dagger_sonic_causal_8h_20261031_032743/checkpoints/best.pt}}"
   export MLP_MOTION_SOURCE_CHECKPOINT
