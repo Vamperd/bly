@@ -27,9 +27,10 @@ case "$MODE" in
   mlp-intensive) CONFIG_MODE="mlp_intensive" ;;
   mlp-dynamic2) CONFIG_MODE="mlp_dynamic2" ;;
   mlp-causal-motions) CONFIG_MODE="mlp_causal_motions" ;;
+  mlp-causal-6h) CONFIG_MODE="mlp_causal_6h" ;;
   mlp-render) CONFIG_MODE="mlp_render" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|sonic-causal-8h|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-render" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|sonic-causal-8h|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|mlp-render" >&2
   exit 2
     ;;
 esac
@@ -39,7 +40,7 @@ SONIC_REPO_ROOT="${SONIC_REPO_ROOT:-$HOME/bly/sonic-repro/GR00T-WholeBodyControl
 SONIC_TEACHER_CHECKPOINT="${SONIC_TEACHER_CHECKPOINT:-$SONIC_REPO_ROOT/sonic_release/last.pt}"
 SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$HOME/bly/runs}"
 STATE_ACTION_CVAE_ROOT="${STATE_ACTION_CVAE_ROOT:-$HOME/bly/state-action-cvae}"
-if [[ ( "$MODE" == sonic-causal-* || "$MODE" == mlp-causal-motions || ( "$MODE" == mlp-render && "${DAGGER_RENDER_POLICY:-}" == sonic_causal ) ) && -z "${DAGGER_MOTION_FILE:-}" ]]; then
+if [[ ( "$MODE" == sonic-causal-* || "$MODE" == mlp-causal-* || ( "$MODE" == mlp-render && "${DAGGER_RENDER_POLICY:-}" == sonic_causal ) ) && -z "${DAGGER_MOTION_FILE:-}" ]]; then
   # C training data comes from the Physics v5 reference subset; DAgger motions must be loadable from it.
   REFERENCE_SUBSET_POINTER="$SONIC_RUNS_ROOT/latest_overfit_reference_motion_subset_run_dir.txt"
   test -s "$REFERENCE_SUBSET_POINTER" || {
@@ -109,7 +110,7 @@ if ! flock -n 9; then
 fi
 echo "[run_dagger] acquired $LOCK_PATH"
 
-if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-dynamic2 || "$MODE" == mlp-causal-motions || "$MODE" == mlp-render ]]; then
+if [[ "$MODE" == mlp-smoke || "$MODE" == mlp-pilot || "$MODE" == mlp-debug || "$MODE" == mlp-scale || "$MODE" == mlp-repro || "$MODE" == mlp-long || "$MODE" == mlp-intensive || "$MODE" == mlp-dynamic2 || "$MODE" == mlp-causal-* || "$MODE" == mlp-render ]]; then
   test -d "$DAGGER_MOTION_FILE" || {
     echo "DAGGER_MOTION_FILE is missing or not a directory: $DAGGER_MOTION_FILE" >&2
     exit 2
@@ -173,7 +174,7 @@ if [[ "$MODE" == cvae-kl2-smoke || "$MODE" == cvae-kl2-pilot || "$MODE" == cvae-
   fi
 fi
 
-if [[ "$MODE" == mlp-causal-motions ]]; then
+if [[ "$MODE" == mlp-causal-* ]]; then
   : "${MLP_MOTION_SOURCE_CHECKPOINT:=${SONIC_CAUSAL_STUDENT_CHECKPOINT:-}}"
   export MLP_MOTION_SOURCE_CHECKPOINT
   test -s "$MLP_MOTION_SOURCE_CHECKPOINT" || {

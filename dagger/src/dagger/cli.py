@@ -320,6 +320,8 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     )
     eval_steps = int(config.dagger.get("eval_steps", config.dagger.rollout_steps) or config.dagger.rollout_steps)
     beta_schedule = [float(value) for value in config.dagger.beta_schedule]
+    rounds = int(config.dagger.get("rounds", len(beta_schedule)) or len(beta_schedule))
+    beta_schedule = (beta_schedule + [beta_schedule[-1]] * rounds)[:rounds]
     train_steps_per_round = int(config.student.train_steps_per_round)
     total_training_steps = len(beta_schedule) * train_steps_per_round
     motion_weights: dict[str, float] | None = None
@@ -367,12 +369,26 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
             metrics[-1], motion_info["loaded_keys"]
         )
     rounds_per_process = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
+    max_hours = config.dagger.get("max_train_hours", None)
+    max_seconds = None if max_hours is None else float(max_hours) * 3600.0
+    stopped_by_time_limit = False
     processed = 0
     for round_index, beta in enumerate(beta_schedule):
         if round_index < start_round:
             continue
         if rounds_per_process > 0 and processed >= rounds_per_process:
             break
+        if max_seconds is not None and metrics:
+            # Summed over resumed shards; excludes Isaac startup between shards.
+            elapsed = sum(float(m.get("round_seconds", 0.0)) for m in metrics)
+            if elapsed + elapsed / len(metrics) > max_seconds:
+                print(
+                    f"[dagger] time budget {max_hours}h: stop before round {round_index} "
+                    f"(elapsed={elapsed / 3600:.2f}h, mean_round={elapsed / len(metrics) / 60:.1f}min)",
+                    flush=True,
+                )
+                stopped_by_time_limit = True
+                break
         round_started = time.perf_counter()
         print(f"[dagger] round={round_index} beta={float(beta)} collecting", flush=True)
         collect_started = time.perf_counter()
@@ -445,8 +461,17 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
             f"[dagger] round={round_index} partial metrics written",
             flush=True,
         )
+        student_only = round_metrics["student_only"]
+        print(
+            f"[dagger] round={round_index} beta={float(beta):.2f} "
+            f"eval_rmse={float(student_only.get('teacher_action_rmse', float('nan'))):.4f} "
+            f"term_rate={float(student_only.get('termination_rate', float('nan'))):.4f} "
+            f"survival={float(student_only.get('survival_ratio', float('nan'))):.2f} "
+            f"round_min={round_metrics['round_seconds'] / 60:.1f}",
+            flush=True,
+        )
         processed += 1
-    all_rounds_complete = (start_round + processed) >= len(beta_schedule)
+    all_rounds_complete = stopped_by_time_limit or (start_round + processed) >= len(beta_schedule)
     memorization_pass = same_motion_memorization_pass(metrics)
     manifest = {
         "format_version": "dagger_mlp_manifest_v1",
@@ -496,6 +521,8 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
         "rounds_per_process": rounds_per_process,
         "completed_rounds": len(metrics),
         "complete": all_rounds_complete,
+        "max_train_hours": None if max_hours is None else float(max_hours),
+        "stopped_by_time_limit": stopped_by_time_limit,
         "rounds": metrics,
         "execution_pass": True,
         "quality_pass": None,

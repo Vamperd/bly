@@ -1,0 +1,41 @@
+mode: mlp_causal_6h
+seed: 20261024
+device: cuda:0
+run_root: ${oc.env:SONIC_RUNS_ROOT,/home/helloworld/bly/runs}
+sonic_repo_root: ${oc.env:SONIC_REPO_ROOT,/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl}
+teacher_checkpoint: ${oc.env:SONIC_TEACHER_CHECKPOINT}
+
+# Same C checkpoint + motion_seed + motion_count as configs/sonic_causal_8h.yaml -> identical motions.
+# rounds is an upper bound; the run stops before a round that would exceed max_train_hours.
+dagger:
+  # Slow decay copied from sonic_causal_8h: low-beta rounds extend episodes past early failure states.
+  beta_schedule: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.45, 0.4, 0.35, 0.3,
+                  0.3, 0.3, 0.3, 0.3, 0.25, 0.25, 0.25, 0.25, 0.2, 0.2,
+                  0.2, 0.2, 0.15, 0.15, 0.15, 0.15, 0.1, 0.1, 0.1, 0.1,
+                  0.0]
+  rounds: 150
+  max_train_hours: ${oc.env:DAGGER_MAX_HOURS,6.0}
+  rollout_steps: 1000
+  num_envs: 8
+  action_clip_value: 20.0
+  motion_file: ${oc.env:DAGGER_MOTION_FILE}
+  motion_source_checkpoint: ${oc.env:MLP_MOTION_SOURCE_CHECKPOINT}
+  motion_keys: []
+  motion_count: 8
+  motion_seed: 20261104
+  max_unique_motions: 8
+  sample_unique_motions: true
+  observation_corruption: false
+  events: tracking/level0_4
+  terminations: tracking/base_adaptive_strict_ori_foot_xyz
+  smpl_motion_file: zeros
+  eval_steps: 192
+
+student:
+  hidden_dims: [2048, 2048, 1024, 1024, 512, 512]
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  # constant LR: cosine would be scheduled over the 150-round cap, not the time-limited length.
+  train_steps_per_round: 2000
+  micro_batch: 512
+  freeze_normalization: true
