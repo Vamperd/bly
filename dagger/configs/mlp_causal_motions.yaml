@@ -5,19 +5,18 @@ run_root: ${oc.env:SONIC_RUNS_ROOT,/home/helloworld/bly/runs}
 sonic_repo_root: ${oc.env:SONIC_REPO_ROOT,/home/helloworld/bly/sonic-repro/GR00T-WholeBodyControl}
 teacher_checkpoint: ${oc.env:SONIC_TEACHER_CHECKPOINT}
 
-# MLP DAgger on exactly the sonic_causal_pilot motion set: same C checkpoint,
-# motion_seed and motion_count as configs/sonic_causal_pilot.yaml.
+# Same C checkpoint + motion_seed + motion_count as configs/sonic_causal_8h.yaml -> identical motions.
 dagger:
   beta_schedule: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.0]
   rollout_steps: 1000
-  num_envs: 4
+  num_envs: 8
   action_clip_value: 20.0
   motion_file: ${oc.env:DAGGER_MOTION_FILE}
   motion_source_checkpoint: ${oc.env:MLP_MOTION_SOURCE_CHECKPOINT}
   motion_keys: []
-  motion_count: 4
+  motion_count: 8
   motion_seed: 20261104
-  max_unique_motions: 4
+  max_unique_motions: 8
   sample_unique_motions: true
   observation_corruption: false
   events: tracking/level0_4
