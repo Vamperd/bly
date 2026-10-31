@@ -645,6 +645,10 @@ bash scripts/run_dagger_auto.sh cvae-kl2-pilot-dagger-v2-2m-2h   # cvae_kl2_pilo
 | CVAE KL2 192-step survival | 实时 Isaac 闭环诊断；待 Ubuntu |
 | standard-normal 质量 | 待 pilot 评估 |
 | teacher action information contract | 待多 motion/reference probe |
+| 10-step CVAE DAgger 8h | `dagger_sonic_causal_8h_20261031_032743` 51 轮完成；best rmse 0.0634（round 49，survival 0.25）；见末节 |
+| MLP DAgger 6h（同 8 motion） | `dagger_mlp_causal_6h_20261031_133715` 172 轮完成，`memorization_pass=True`；末轮 rmse 0.0784 |
+| 四路 ghost 视频（MLP / C / DAgger / SONIC） | `render_ghost4_batch.sh` 已写，待 Ubuntu 执行 |
+| chunk CVAE future-reference DAgger | 代码与 `cvae_kl2_pilot_future_ref_8h.yaml` 已实现，59 tests 通过；待 Ubuntu 执行 |
 
 ## sonic-10history-reference-cvae-v1：10-step SONIC 序列化 CVAE（新增）
 
@@ -669,3 +673,106 @@ bash scripts/run_dagger.sh sonic-causal-pilot
 ```
 
 DAgger 新路线是单步 teacher/student mixture；评估范围是 same-motion teacher imitation，不能解释为 new-motion 泛化。
+
+## 2026-10-31 实验进度：10-step CVAE DAgger 8h、MLP DAgger 6h、chunk CVAE future-reference
+
+三条线使用同一批 8 个 motion，均取自 C（`sonic_causal_c_8h`）的 32 个 `train_motion_keys`：
+
+```text
+exercise_2_001__A036
+dance_latino_kick_kick_padeburee_doubled_R_002__A314
+dance_vouge_butterfly_step_270_R_003__A324
+inj_right_leg_stoop_down_R_max_002__A080
+jump_right_004__A029
+baby_full_diaper_walk_ff_360_loop_R_001__A462
+crawl_ff_stop_225_R_003__A233
+don_t_know_2_003__A069
+```
+
+评估口径（两条已完成的线相同）：每轮 student-only、192 步、8 env（每 motion 1 env）。`survival_ratio` 是
+192 步内无终止的 env 比例，粒度为 1/8 = 0.125，单轮波动大，不能只看单个 round。`teacher_action_rmse`
+是 canonical Action 相对 SONIC 的 RMSE。
+
+### 10-step CVAE（sonic_causal）DAgger 8h：已完成
+
+- DAgger 前 C：`/home/helloworld/bly/runs/sonic_causal_c_8h/checkpoints/best.pt`（Physics v5 数据，32 motion）。
+- run：`/home/helloworld/bly/runs/dagger_sonic_causal_8h_20261031_032743`，配置 `sonic_causal_8h.yaml`
+  （lr 1e-5、每轮 4000 step、beta 衰减到 0）。
+- 完成 round 0–50 共 51 轮；8h 预算在 round 51 前停止（elapsed 7.90h，平均 9.3 min/轮），最终 408000 样本。
+- 按 rmse 排序前五：
+
+| round | rmse | term_rate | survival |
+|---|---|---|---|
+| 49 | 0.0634 | 0.0059 | 0.25 |
+| 50 | 0.0665 | 0.0039 | 0.38 |
+| 46 | 0.0673 | 0.0052 | 0.50 |
+| 41 | 0.0749 | 0.0059 | 0.38 |
+| 36 | 0.0800 | 0.0072 | 0.38 |
+
+- 用旧版 `keep_best_last.py`（按 rmse）保留 `best.pt`=round_49、`last.pt`=round_50，其余 51 个 round_*.pt 已删除。
+  round_46（survival 0.50）未保留，不可恢复。
+
+### MLP DAgger 6h：已完成
+
+- run：`/home/helloworld/bly/runs/dagger_mlp_causal_6h_20261031_133715`，配置 `mlp_causal_6h.yaml`
+  （从零训练，hidden `[2048,2048,1024,1024,512,512]`，lr 1e-4，每轮 2000 step，beta 在 round 30 到 0）。
+- motion 选择：`MLP_MOTION_SOURCE_CHECKPOINT` 指向 sonic_causal DAgger 的 `best.pt`（含 C 的 32 个 train_motion_keys），
+  与 sonic_causal DAgger 的 8 个 motion 一致（已从两边日志核对）。
+- 完成 round 0–171 共 172 轮；墙钟 deadline 20:17 在 round 172 前停止，`memorization_pass=True`。
+- 中途两次 shard 以 status=2 退出，原因是续训时未设置 `MLP_MOTION_SOURCE_CHECKPOINT`；补设后从 round 3、round 9 续训。
+- 指标：round 0 rmse 0.6116 / survival 0.00；末三轮：
+
+| round | rmse | term_rate | survival |
+|---|---|---|---|
+| 169 | 0.0810 | 0.0046 | 0.12 |
+| 170 | 0.0780 | 0.0026 | 0.50 |
+| 171 | 0.0784 | 0.0039 | 0.25 |
+
+- 初步对比：MLP 最终 rmse（约 0.078）高于 10-step CVAE DAgger 的最佳 0.0634，survival 量级相近（0.12–0.50），
+  两者都没有在 192 步内稳定存活全部 8 个 motion。这只是同 motion teacher imitation 的对比。
+
+### Checkpoint 保留与 ghost 视频：脚本已写，待 Ubuntu 执行
+
+- `dagger/scripts/keep_best_last.py` 已改为同时写 `best_survival.pt`、`best_rmse.pt`、`last.pt`（另有按 `--by` 选的
+  `best.pt` 副本），选中 round 及指标写入 `checkpoints/kept.json`；`--delete` 才删除 round_*.pt。
+  MLP run 尚未执行该脚本，三个 checkpoint 对应的 round 待回填。
+- `dagger/scripts/render_ghost4_batch.sh <mlp_run> <sonic_causal_dagger_run> [num_motions=0(all)] [steps=192]`：
+  对 MLP / C / DAgger 三个 checkpoint 的 motion 交集（预期为上面 8 个）逐个 rollout sonic、`cvae_c_before`（C）、
+  `cvae_dagger_after`（DAgger best.pt）、`mlp_best_survival`，每个 rollout 出单独视频，并合成一个四路 ghost 视频
+  （sonic 白色不透明、MLP 蓝、C 绿、DAgger 橙）。`C_CKPT` 必须是 DAgger 前的 C，默认从
+  `sonic_causal_manifest.json` 的 `student_checkpoint` 读取；`LIST_ONLY=1` 只列交集。
+  输出 `~/bly/runs/ghost4_batch_<时间>/videos/{ghost4,solo}/`，预计 8 个 ghost、32 个单独视频，约 1.5h。
+
+```bash
+cd ~/bly/dagger
+python3 scripts/keep_best_last.py ~/bly/runs/dagger_mlp_causal_6h_20261031_133715 --by survival --delete
+LIST_ONLY=1 C_CKPT=$HOME/bly/runs/sonic_causal_c_8h/checkpoints/best.pt bash scripts/render_ghost4_batch.sh ~/bly/runs/dagger_mlp_causal_6h_20261031_133715 ~/bly/runs/dagger_sonic_causal_8h_20261031_032743
+nohup env C_CKPT=$HOME/bly/runs/sonic_causal_c_8h/checkpoints/best.pt bash scripts/render_ghost4_batch.sh ~/bly/runs/dagger_mlp_causal_6h_20261031_133715 ~/bly/runs/dagger_sonic_causal_8h_20261031_032743 0 192 > ~/bly/runs/ghost4_batch.log 2>&1 &
+```
+
+### chunk CVAE（65-token）future-reference DAgger：代码已实现，待 Ubuntu 执行
+
+- 问题：旧 KL2 DAgger 把 slot 33–64 置零并 mask，与 C 训练语义不符。
+- 新语义（`student.future_reference: true`）：slot 33–64 填 motion lib 的未来 32 帧 reference State
+  （current+1..+32，越界取最后一帧），dims 0:68 可见、contact 68:70 mask；Action 32 起 mask，只取 anchor
+  Action 32 与 SONIC 对照做 DAgger 监督。训练窗口中 33+ 的真实仿真 contact 作为隐藏 BCE 目标。
+  source replay 的 causal 分支同样 mask 33+ 的 contact 与 Action，并监督全部被 mask 项。
+- 代码：`runtime/sonic_env.py` `reference_future_states`、`runtime/cvae_window.py` `reference_masks`、
+  `adapters/cvae_student.py`、`core/cvae_loop.py`、`cli.py`；checkpoint 写入 `future_reference`，续训时不一致即报错。
+- 配置 `dagger/configs/cvae_kl2_pilot_future_ref_8h.yaml`：从 300k C
+  `cvae_long_horizon_train_kl2_fp32_300k_20261016_005837_3380803/checkpoints/best.pt` 出发，源数据与 normalizer 为
+  `cvae_long_horizon_dataset_rebuilt_20261018_223710_254008`（v4 线，非 v5），motion 来自
+  `cvae_kl2_motion_manifest.json`，`source_causal_fraction: 0.5`。按用户决定不做离线评估，直接 DAgger。
+- 验证：Windows 59 tests 通过；真实模型配置随机权重 forward 接受逐特征 mask，改变 reference 使 Action 32 变化约 0.225；
+  Isaac rollout 未验证。
+
+```bash
+cd ~/bly/dagger && nohup bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-ref-8h > ~/bly/runs/dagger_future_ref_8h.log 2>&1 &
+```
+
+### 下一步
+
+1. 执行 MLP checkpoint 保留，回填 best_survival / best_rmse 的 round 与指标。
+2. 渲染 8 个 motion 的四路 ghost 与单独视频，按视频判断各策略的失败形态。
+3. 启动 future-reference chunk CVAE DAgger 8h，与 10-step CVAE DAgger、MLP 在 rmse/survival 上对比。
+   两者 motion 集合不同（KL2 manifest vs 上面 8 个），对比时需注明。

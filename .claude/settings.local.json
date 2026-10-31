@@ -70,7 +70,31 @@
       "Bash(bash -n run_dagger_auto.sh)",
       "Bash(sed -n 36,84p dagger/scripts/run_dagger.sh)",
       "Bash(sed -n 112,200p dagger/scripts/run_dagger.sh)",
-      "Bash(bash -n dagger/scripts/resume_mlp_causal_6h.sh)"
+      "Bash(bash -n dagger/scripts/resume_mlp_causal_6h.sh)",
+      "Bash(awk 'NR>=3063 && /memory|cat\\\\\\(|condition_tokens|history/ {print NR\": \"$0}' state-action-cvae/src/cvae_sa/models.py)",
+      "Bash(sed -n '3300,3400p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/envs/manager_env/mdp/commands.py\")",
+      "Bash(sed -n '895,960p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/envs/manager_env/mdp/commands.py\")",
+      "Bash(sed -n '355,420p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/utils/motion_lib/motion_lib_base.py\")",
+      "Bash(sed -n '1320,1420p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/utils/motion_lib/motion_lib_base.py\")",
+      "Bash(sed -n '640,700p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/envs/manager_env/mdp/recorders.py\")",
+      "Bash(sed -n '275,340p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro/GR00T-WholeBodyControl/gear_sonic/envs/manager_env/mdp/commands.py\")",
+      "Bash(sed -n '690,740p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro-kit/sonic_repro.sh\")",
+      "Bash(sed -n '118,150p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro-kit/consolidate_physics_state_action.py\")",
+      "Bash(sed -n '240,320p' \"C:/Users/86136/Desktop/code/RL/bly/sonic-repro-kit/consolidate_physics_state_action.py\")",
+      "Bash(sed -n 170,180p commands.py)",
+      "Bash(sed -n 1165,1185p commands.py)",
+      "Bash(sed -n 1694,1745p commands.py)",
+      "Bash(sed -n 1855,1885p commands.py)",
+      "Bash(sed -n 3318,3345p commands.py)",
+      "Bash(sed -n 435,450p recorders.py)",
+      "Bash(sed -n 485,510p recorders.py)",
+      "Bash(sed -n 860,895p recorders.py)",
+      "Bash(sed -n 1205,1225p src/dagger/cli.py)",
+      "Bash(sed -n 80,100p scripts/run_dagger.sh)",
+      "Bash(PYTHONPATH=src:../state-action-cvae/src python -m pytest -q tests/test_cvae_window.py tests/test_cvae_kl2_contract.py)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest -q tests/test_cvae_window.py tests/test_cvae_kl2_contract.py)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m pytest -q tests)",
+      "Bash(bash -n scripts/render_ghost4_batch.sh)"
     ]
   }
 }

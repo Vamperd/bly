@@ -180,6 +180,56 @@ class SonicDaggerEnv:
             raise FloatingPointError("SONIC physics State contains non-finite values")
         return value.detach()
 
+    @torch.no_grad()
+    def reference_future_states(self, num_frames: int = 32) -> torch.Tensor:
+        """Reference frames +1..+num_frames in the 70-D physics State layout.
+
+        Contact dims (68:70) are zero because the motion lib has no contact
+        labels; callers must keep them masked.
+        """
+
+        from isaaclab.utils.math import quat_apply, quat_inv
+        from gear_sonic.envs.manager_env.mdp.recorders import (
+            _action_term,
+            _physics_nominal_joint_pos,
+        )
+
+        actual_env = getattr(self.env, "env", self.env)
+        motion = self.motion_term
+        lib = motion.motion_lib
+        joint_ids = getattr(_action_term(actual_env), "_joint_ids")
+        nominal = _physics_nominal_joint_pos(actual_env, joint_ids).to(self.device)
+        count, frames_n = self.num_envs, int(num_frames)
+        offsets = torch.arange(1, frames_n + 1, device=self.device, dtype=torch.long)
+        current = (motion.motion_start_time_steps + motion.time_steps).long()
+        last = (motion.motion_num_steps - 1).long()
+        frames = torch.minimum(current[:, None] + offsets[None, :], last[:, None])
+        ids = motion.motion_ids.long()[:, None].expand_as(frames).reshape(-1)
+        steps = frames.reshape(-1)
+        dof_pos = lib.get_dof_pos(ids, steps)[:, joint_ids].reshape(count, frames_n, -1)
+        dof_vel = lib.get_dof_vel(ids, steps)[:, joint_ids].reshape(count, frames_n, -1)
+        root_quat = lib.get_root_quat_w(ids, steps)
+        inverse = quat_inv(root_quat)
+        lin_b = quat_apply(inverse, lib.get_root_lin_vel_w(ids, steps))
+        ang_b = quat_apply(inverse, lib.get_root_ang_vel_w(ids, steps))
+        down = motion.down_dir[:, None, :].expand(count, frames_n, 3).reshape(-1, 3)
+        gravity = quat_apply(inverse, down)
+        height = lib.get_root_pos_w(ids, steps)[:, 2:3]
+        body = torch.cat(
+            (lin_b, ang_b, gravity, height, torch.zeros_like(height).expand(-1, 2)),
+            dim=-1,
+        ).reshape(count, frames_n, -1)
+        value = torch.cat(
+            (dof_pos - nominal[:, None, :], dof_vel, body), dim=-1
+        ).float()
+        if tuple(value.shape) != (count, frames_n, PHYSICS_STATE_DIM):
+            raise RuntimeError(
+                f"reference future must be [B,{frames_n},70], found {tuple(value.shape)}"
+            )
+        if not torch.isfinite(value).all():
+            raise FloatingPointError("reference future contains non-finite values")
+        return value.detach()
+
     def __getattr__(self, name: str):
         return getattr(self.env, name)
 

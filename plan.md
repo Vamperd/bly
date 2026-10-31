@@ -381,3 +381,16 @@ free-floating drift smoke未通过（测试把非neck torque ctrl设为零），
 本轮修正：`sonic_repro.sh` 统计 motion PKL 时改用 `find -L`，否则符号链接子集被计为 0 条；
 `sonic-repro-kit/README.md` 的 `OVERFIT_SELECTION_RUN` 改指向重建子集。SONIC 分支中补丁
 0006/0007 已被并入提交 `05248f3`，按标题查不到属预期，0008 为 `6a1166a`。
+
+## 24. 同 8 motion 的 DAgger 结果与 chunk CVAE future-reference（2026-10-31）
+
+细节、命令与表格见 `dagger.md` 末节“2026-10-31 实验进度”。8 个 motion 取自 `sonic_causal_c_8h` 的 32 个
+train_motion_keys；评估为每轮 student-only 192 步、8 env，survival 粒度 0.125。
+
+- 10-step CVAE DAgger 8h `dagger_sonic_causal_8h_20261031_032743`：51 轮（8h 预算停止）；best rmse 0.0634
+  （round 49，survival 0.25），last round 50 rmse 0.0665 / survival 0.38；round_46 survival 0.50 已随 round_*.pt 删除。
+- MLP DAgger 6h `dagger_mlp_causal_6h_20261031_133715`：从零训练 172 轮，`memorization_pass=True`；
+  末轮 rmse 0.0784 / survival 0.25。rmse 高于 10-step CVAE，survival 同量级，两者都未稳定存活全部 motion。
+- chunk CVAE future-reference DAgger：slot 33–64 改为未来 32 帧 reference State（contact 与 Action 32+ mask），
+  从 300k C（v4 线数据）出发；代码与配置完成、59 tests 通过，Isaac 未执行。
+- 待执行：MLP 三 checkpoint 保留、四路 ghost 视频渲染、future-reference DAgger 8h。

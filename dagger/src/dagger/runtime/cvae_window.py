@@ -70,6 +70,43 @@ def causal_masks(
     return state_mask, action_mask, loss_state_mask, loss_action_mask
 
 
+def reference_masks(
+    batch_size: int,
+    *,
+    device: torch.device,
+    valid_state: torch.Tensor,
+    valid_action: torch.Tensor,
+    contact_target_valid: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Masks for windows whose future States 33..64 hold the reference motion.
+
+    Future continuous State dims stay visible; future contacts (unknown from
+    the motion lib) and every Action from the anchor on are hidden.
+    """
+
+    state_mask = torch.zeros(batch_size, STATE_STEPS, STATE_DIM, device=device, dtype=torch.bool)
+    action_mask = torch.zeros(batch_size, ACTION_STEPS, ACTION_DIM, device=device, dtype=torch.bool)
+    state_mask[:, ANCHOR + 1 :, 68:] = True
+    action_mask[:, ANCHOR:] = True
+    state_mask &= valid_state[..., None]
+    action_mask &= valid_action[..., None]
+
+    loss_state_mask = torch.zeros_like(state_mask)
+    if contact_target_valid is not None:
+        loss_state_mask[:, ANCHOR + 1 :, 68:] = contact_target_valid[:, ANCHOR + 1 :, None]
+        loss_state_mask &= valid_state[..., None]
+    loss_action_mask = torch.zeros_like(action_mask)
+    loss_action_mask[:, ANCHOR] = True
+    loss_action_mask &= valid_action[:, ANCHOR, None, None]
+    return state_mask, action_mask, loss_state_mask, loss_action_mask
+
+
+def _check_reference(reference_future: torch.Tensor, batch: int) -> None:
+    expected = (batch, STATE_STEPS - ANCHOR - 1, STATE_DIM)
+    if tuple(reference_future.shape) != expected:
+        raise ValueError(f"reference_future must be {list(expected)}, found {tuple(reference_future.shape)}")
+
+
 class CvaeWindowBuffer:
     """Per-environment history with an explicit current-state anchor."""
 
@@ -128,10 +165,15 @@ class CvaeWindowBuffer:
             self._current[index] = next_state[index].detach().clone()
 
     def build_condition(self, *, state_mean: torch.Tensor, state_std: torch.Tensor,
-                        action_mean: torch.Tensor, action_std: torch.Tensor) -> CvaeWindow:
+                        action_mean: torch.Tensor, action_std: torch.Tensor,
+                        reference_future: torch.Tensor | None = None) -> CvaeWindow:
         if any(value is None for value in self._current):
             raise RuntimeError("window buffer was not reset")
         state, action, valid_state, valid_action = _zeros(self.device, self.num_envs)
+        if reference_future is not None:
+            _check_reference(reference_future, self.num_envs)
+            state[:, ANCHOR + 1 :] = reference_future.to(self.device, dtype=torch.float32)
+            state[:, ANCHOR + 1 :, 68:] = 0.0
         for env_index in range(self.num_envs):
             states = self._states[env_index]
             actions = self._actions[env_index]
@@ -149,7 +191,8 @@ class CvaeWindowBuffer:
         action = (action - action_mean) / action_std.clamp_min(1.0e-6)
         valid_state[:, ANCHOR + 1 :] = True
         valid_action[:, ANCHOR:] = True
-        sm, am, lsm, lam = causal_masks(
+        masks = causal_masks if reference_future is None else reference_masks
+        sm, am, lsm, lam = masks(
             self.num_envs, device=self.device, valid_state=valid_state, valid_action=valid_action
         )
         return CvaeWindow(
@@ -181,6 +224,7 @@ def build_training_window(
     action_std: torch.Tensor,
     state_valid: torch.Tensor | None = None,
     action_valid: torch.Tensor | None = None,
+    reference_future: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Build one complete target window around a local episode step.
 
@@ -214,15 +258,35 @@ def build_training_window(
         if 0 <= source < actions.shape[0] and bool(action_valid[source]):
             action[0, local] = actions[source]
             valid_action[0, local] = True
+    contact_valid = None
+    if reference_future is not None:
+        reference_future = reference_future.to(states.device, dtype=states.dtype)
+        _check_reference(reference_future[None], 1)
+        # Contacts keep the simulator outcome as a hidden target; the rest is the reference.
+        contact_valid = valid_state.clone()
+        state[0, ANCHOR + 1 :, :68] = reference_future[:, :68]
+        state[0, ANCHOR + 1 :, 68:] = torch.where(
+            contact_valid[0, ANCHOR + 1 :, None], state[0, ANCHOR + 1 :, 68:], 0.0
+        )
+        valid_state[0, ANCHOR + 1 :] = True
     state_mean = state_mean.to(states.device, dtype=states.dtype)
     state_std = state_std.to(states.device, dtype=states.dtype)
     action_mean = action_mean.to(actions.device, dtype=actions.dtype)
     action_std = action_std.to(actions.device, dtype=actions.dtype)
     state_norm = (state - state_mean) / state_std.clamp_min(1.0e-6)
     action_norm = (action - action_mean) / action_std.clamp_min(1.0e-6)
-    sm, am, lsm, lam = causal_masks(
-        1, device=states.device, valid_state=valid_state, valid_action=valid_action
-    )
+    if reference_future is None:
+        sm, am, lsm, lam = causal_masks(
+            1, device=states.device, valid_state=valid_state, valid_action=valid_action
+        )
+    else:
+        sm, am, lsm, lam = reference_masks(
+            1,
+            device=states.device,
+            valid_state=valid_state,
+            valid_action=valid_action,
+            contact_target_valid=contact_valid,
+        )
     return {
         "physical_state": state_norm[0],
         "action": action_norm[0],

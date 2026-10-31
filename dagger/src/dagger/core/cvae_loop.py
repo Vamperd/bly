@@ -107,9 +107,17 @@ class CvaeDaggerLoop:
             return str(keys[index])
         return f"motion_{index}"
 
+    def _push_reference(self) -> torch.Tensor | None:
+        if not getattr(self.student, "future_reference", False):
+            return None
+        reference = self.env.reference_future_states(32)
+        self.student.set_reference_future(reference)
+        return reference
+
     @staticmethod
     def _new_record(state: torch.Tensor, episode_id: int = 0) -> dict[str, list[torch.Tensor]]:
         return {
+            "reference_future": [],
             "states": [state.detach().cpu().clone()],
             "state_valid": [torch.tensor(True, dtype=torch.bool)],
             "executed_canonical": [],
@@ -139,6 +147,9 @@ class CvaeDaggerLoop:
         teachers = torch.stack(record["teacher_canonical"])
         students = torch.stack(record["student_canonical"])
         samples: list[dict[str, torch.Tensor]] = []
+        references = record["reference_future"]
+        if references and len(references) != actions.shape[0]:
+            raise RuntimeError("reference_future must be recorded for every executed step")
         for step in range(actions.shape[0]):
             sample = build_training_window(
                 states,
@@ -151,6 +162,7 @@ class CvaeDaggerLoop:
                 action_mean=self.action_mean,
                 action_std=self.action_std,
                 state_valid=torch.stack(record["state_valid"]),
+                reference_future=references[step] if references else None,
             )
             for source, target in (
                 ("teacher_raw", "teacher_action_raw"),
@@ -213,6 +225,7 @@ class CvaeDaggerLoop:
         deviation_count = [0] * self.num_envs
 
         for step_index in range(self.rollout_steps):
+            reference = self._push_reference()
             student_rollout = self.student.observe()
             teacher_done = (
                 torch.zeros_like(done) if postfall else done
@@ -251,6 +264,8 @@ class CvaeDaggerLoop:
                 if stopped[index]:
                     continue
                 record = episode_records[index]
+                if reference is not None:
+                    record["reference_future"].append(reference[index].cpu())
                 record["executed_canonical"].append(executed_canonical[index].cpu())
                 record["teacher_canonical"].append(teacher_canonical[index].cpu())
                 record["student_canonical"].append(student_canonical[index].cpu())
@@ -398,6 +413,7 @@ class CvaeDaggerLoop:
         block_index = [0] * self.num_envs
 
         for step_index in range(self.rollout_steps):
+            reference = self._push_reference()
             rollout = self.student.observe()
             teacher_raw = self.action_contract.clip_raw(
                 self.teacher.act(observation, done).detach()
@@ -463,6 +479,8 @@ class CvaeDaggerLoop:
             for index in range(self.num_envs):
                 record = episode_records[index]
                 item = sample_rollout[index]
+                if reference is not None:
+                    record["reference_future"].append(reference[index].cpu())
                 window = item.window
                 history_steps = (
                     window.history_steps
@@ -606,6 +624,7 @@ class CvaeDaggerLoop:
         per_motion: dict[str, dict[str, float]] = {}
         for step_index in range(int(steps)):
             motion_ids = self._motion_ids()
+            self._push_reference()
             rollout = self.student.observe()
             student_raw = rollout.action_raw.detach()
             student_canonical = rollout.action_canonical.detach()

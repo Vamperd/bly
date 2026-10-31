@@ -1815,6 +1815,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         raise_on_clip_error=bool(
             config.student.get("raise_on_clip_error", False)
         ),
+        future_reference=bool(config.student.get("future_reference", False)),
     )
     if completed:
         student.load_round_checkpoint(completed[-1][2], load_optimizer=True)

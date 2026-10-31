@@ -33,6 +33,7 @@ from dagger.runtime.cvae_window import (
     CvaeWindow,
     CvaeWindowBuffer,
     causal_masks,
+    reference_masks,
 )
 
 
@@ -106,7 +107,10 @@ class CvaeStudentAdapter:
         min_lr_ratio: float = 0.01,
         load_optimizer: bool = False,
         raise_on_clip_error: bool = True,
+        future_reference: bool = False,
     ) -> None:
+        self.future_reference = bool(future_reference)
+        self._reference_future: torch.Tensor | None = None
         self.device = device
         self.action_contract = action_contract
         self.seed = int(seed)
@@ -373,6 +377,7 @@ class CvaeStudentAdapter:
             done,
             clear_on_done=clear_history_on_done,
         )
+        self._reference_future = None
         if bool(done.any()) and not self._evaluation_mode:
             self._episode_counter += 1
             self._new_epsilon(done)
@@ -399,17 +404,35 @@ class CvaeStudentAdapter:
         ):
             self.action_contract.set_raw_action_clip_value(self.action_clip_value)
 
+    def set_reference_future(self, reference_future: torch.Tensor) -> None:
+        """Provide this step's reference States +1..+32; consumed until after_step."""
+
+        self._reference_future = reference_future.to(self.device, dtype=torch.float32)
+
+    def _build_condition(self) -> CvaeWindow:
+        if self._buffer is None:
+            raise RuntimeError("student has not been reset")
+        reference = None
+        if self.future_reference:
+            if self._reference_future is None:
+                raise RuntimeError(
+                    "future_reference student needs set_reference_future() before observe"
+                )
+            reference = self._reference_future
+        return self._buffer.build_condition(
+            state_mean=self.state_mean,
+            state_std=self.state_std,
+            action_mean=self.action_mean,
+            action_std=self.action_std,
+            reference_future=reference,
+        )
+
     @torch.no_grad()
     def observe(self) -> CvaeRollout:
         if self._buffer is None or self._epsilon_global is None or self._epsilon_local is None:
             raise RuntimeError("student has not been reset")
         self.model.eval()
-        window = self._buffer.build_condition(
-            state_mean=self.state_mean,
-            state_std=self.state_std,
-            action_mean=self.action_mean,
-            action_std=self.action_std,
-        )
+        window = self._build_condition()
         if self.latent_mode == "posterior_mean":
             output = self.model(window.batch, stage="A")
         else:
@@ -453,12 +476,7 @@ class CvaeStudentAdapter:
                 f"block_size must be in 1..{ACTION_STEPS - ANCHOR}"
             )
         self.model.eval()
-        window = self._buffer.build_condition(
-            state_mean=self.state_mean,
-            state_std=self.state_std,
-            action_mean=self.action_mean,
-            action_std=self.action_std,
-        )
+        window = self._build_condition()
         if self.latent_mode == "posterior_mean":
             output = self.model(window.batch, stage="A")
         else:
@@ -676,7 +694,17 @@ class CvaeStudentAdapter:
             valid_state[:, ANCHOR + 1 :].any() or valid_action[:, ANCHOR].any()
         ):
             use_causal = False
-        if use_causal:
+        if use_causal and self.future_reference:
+            sm, am, lsm, _ = reference_masks(
+                int(valid_state.shape[0]),
+                device=self.device,
+                valid_state=valid_state,
+                valid_action=valid_action,
+                contact_target_valid=valid_state,
+            )
+            lam = am
+            masked_weight, full_weight = 1.0, 0.0
+        elif use_causal:
             sm, am, lsm, lam = causal_masks(
                 int(valid_state.shape[0]),
                 device=self.device,
@@ -983,6 +1011,7 @@ class CvaeStudentAdapter:
             "action_clip_value": self.action_clip_value,
             "teacher_mode": self.teacher_mode,
             "raise_on_clip_error": bool(self.raise_on_clip_error),
+            "future_reference": bool(self.future_reference),
         }
         if extra_metadata:
             payload.update(extra_metadata)
@@ -1005,6 +1034,8 @@ class CvaeStudentAdapter:
             raise ValueError("CVAE DAgger checkpoint architecture mismatch")
         if str(payload.get("normalization_sha256")) != str(self.normalization_sha256):
             raise ValueError("CVAE DAgger checkpoint normalization mismatch")
+        if bool(payload.get("future_reference", False)) != self.future_reference:
+            raise ValueError("CVAE DAgger checkpoint future_reference semantics mismatch")
         state = payload.get("model_state_dict")
         if not isinstance(state, dict):
             raise ValueError("CVAE DAgger checkpoint has no model weights")

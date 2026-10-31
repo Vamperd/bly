@@ -4,7 +4,7 @@ set -u
 
 MODE="${1:-mlp-pilot}"
 case "$MODE" in
-  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal) ;;
+  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal) ;;
   *)
     echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal" >&2
     exit 2
