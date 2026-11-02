@@ -110,7 +110,8 @@
       "Bash(sed -n 392,400p core/cvae_loop.py)",
       "Bash(sed -n 740,748p core/cvae_loop.py)",
       "Bash(bash -n render_cvae_ghost_batch.sh)",
-      "Bash(bash -n watch_cvae_kl2.sh)"
+      "Bash(bash -n watch_cvae_kl2.sh)",
+      "Bash(bash -n \"C:/Users/86136/Desktop/code/RL/bly/dagger/scripts/watch_cvae_kl2.sh\")"
     ]
   }
 }

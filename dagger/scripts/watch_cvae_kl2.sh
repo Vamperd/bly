@@ -17,7 +17,7 @@ if [[ -n "$LOG" ]]; then
   grep -E "Traceback|Error|SIGSEGV|exit_code" "$LOG" | tail -n 3
 fi
 [[ -f "$RUN/markers/dagger_cvae_kl2_early_stop.ok" ]] && echo "EARLY STOP: $RUN/manifests/dagger_cvae_kl2_early_stop.json"
-[[ -f "$RUN/manifests/dagger_cvae_kl2_manifest.json" ]] && echo "FINAL manifest exists"
+grep -q '"complete": true' "$RUN/manifests/dagger_cvae_kl2_manifest.json" 2>/dev/null && echo "FINAL: all rounds complete"
 METRICS="$RUN/manifests/dagger_cvae_kl2_metrics.partial.json"
 [[ -f "$METRICS" ]] || { echo "no completed round yet"; exit 0; }
 "$PYTHON" - "$METRICS" <<'PY'

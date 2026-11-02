@@ -817,6 +817,9 @@ cd ~/bly/dagger && DAGGER_RENDER_POLICY=cvae DAGGER_RENDER_CHECKPOINT=<run>/chec
   postfall stop，偏离起点最早在第 18 步，部分 error_ratio 仅 3.13。原因是前 10 步基线接近 0，正常跟踪误差即超过 3 倍。
   该 run 已停用；12h 配置加 `post_fall_min_error: 0.3`（anchor/body 位置误差取大者须同时 > 0.3 m 才计偏离，默认 0 不影响其他配置），
   stop 日志增加 `error=` 字段。
+- 重跑 `..._12h_20261101_005928` round 0：4611 窗口；12 个 env 仍全部 stop，但 stop 时误差 0.39–1.07 m，多数在 motion
+  播完（12 个 motion 共 4383 帧）后约 50 步，属正常结束。post-fall 关闭了 auto reset，每轮上限约等于 motion 总帧数，
+  20 轮约 9 万窗口（上面 18 万的估计按 750×12 计算，不成立）。
 
 ```bash
 cd ~/bly/dagger && nohup env DAGGER_CVAE_SHARD_TIMEOUT=3600 DAGGER_MAX_SHARDS=40 bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-ref-chunk-12h > ~/bly/runs/dagger_future_ref_chunk_12h.log 2>&1 &

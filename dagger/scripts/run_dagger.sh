@@ -14,6 +14,7 @@ case "$MODE" in
   cvae-kl2-pilot-future-ref-8h) CONFIG_MODE="cvae_kl2_pilot_future_ref_8h" ;;
   cvae-kl2-pilot-future-ref-chunk-8h) CONFIG_MODE="cvae_kl2_pilot_future_ref_chunk_8h" ;;
   cvae-kl2-pilot-future-ref-chunk-12h) CONFIG_MODE="cvae_kl2_pilot_future_ref_chunk_12h" ;;
+  cvae-kl2-pilot-future-ref-chunk-diag) CONFIG_MODE="cvae_kl2_pilot_future_ref_chunk_diag" ;;
   cvae-kl2-pilot-dagger-v2) CONFIG_MODE="cvae_kl2_pilot_dagger_v2" ;;
   cvae-kl2-pilot-dagger-v2-2m) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m" ;;
   cvae-kl2-pilot-dagger-v2-2m-2h) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m_2h" ;;
@@ -35,7 +36,7 @@ case "$MODE" in
   sonic-arch-check) CONFIG_MODE="mlp_sonic_arch_teacher_init" ;;
   sonic-arch-6h) CONFIG_MODE="mlp_sonic_arch_6h" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|sonic-causal-8h|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|mlp-render|sonic-arch-check|sonic-arch-6h" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-future-ref-chunk-diag|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|sonic-causal-8h|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|mlp-render|sonic-arch-check|sonic-arch-6h" >&2
   exit 2
     ;;
 esac
@@ -162,7 +163,7 @@ if [[ "$MODE" == cvae-kl2-* ]]; then
   }
   if [[ "$MODE" == cvae-kl2-pilot-dagger-v2-2m* ]]; then
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_2m.json}"
-  elif [[ "$MODE" == cvae-kl2-pilot-future-ref-chunk-12h ]]; then
+  elif [[ "$MODE" == cvae-kl2-pilot-future-ref-chunk-12h || "$MODE" == cvae-kl2-pilot-future-ref-chunk-diag ]]; then
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_12m.json}"
   else
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest.json}"
