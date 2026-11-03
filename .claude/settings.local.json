@@ -111,7 +111,22 @@
       "Bash(sed -n 740,748p core/cvae_loop.py)",
       "Bash(bash -n render_cvae_ghost_batch.sh)",
       "Bash(bash -n watch_cvae_kl2.sh)",
-      "Bash(bash -n \"C:/Users/86136/Desktop/code/RL/bly/dagger/scripts/watch_cvae_kl2.sh\")"
+      "Bash(bash -n \"C:/Users/86136/Desktop/code/RL/bly/dagger/scripts/watch_cvae_kl2.sh\")",
+      "Bash(git log *)",
+      "Bash(PYTHONPATH=\"src;../state-action-cvae/src\" python -m unittest tests.test_reference_table -v)",
+      "Bash(sed -n 55,130p src/cvae_sa/posterior_hierarchical_standard_cvae.py)",
+      "Bash(sed -n 1,152p src/cvae_sa/posterior_t64_protocol.py)",
+      "Bash(sed -n 60,110p src/cvae_sa/cvae_diagnostics.py)",
+      "Bash(sed -n 1,80p tests/test_long_horizon_dataset.py)",
+      "Bash(sed -n 113,135p tests/fixtures.py)",
+      "Bash(sed -n 255,300p tests/fixtures.py)",
+      "Bash(sed -n 1,50p tests/test_cvae_protocol_v2.py)",
+      "Bash(sed -n 225,310p tests/test_cvae_protocol_v2.py)",
+      "Bash(sed -n 15,56p tests/test_posterior_hierarchical_standard_cvae.py)",
+      "Bash(bash -n cvae_repro.sh)",
+      "Bash(sed -n 1,60p state-action-cvae/src/cvae_sa/reference_anchor_dataset.py)",
+      "Bash(sed -n 100,140p state-action-cvae/src/cvae_sa/reference_anchor_dataset.py)",
+      "Bash(sed -n 1,40p dagger/src/dagger/export_reference_table.py)"
     ]
   }
 }

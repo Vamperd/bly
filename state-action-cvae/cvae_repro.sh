@@ -1229,6 +1229,53 @@ long_horizon_render() {
   printf '%s\n' "$run_dir"
 }
 
+reference_mixed_dataset() {
+  local long_run="${CVAE_LONG_HORIZON_DATASET_RUN:-}" table_run="${CVAE_REFERENCE_TABLE_RUN:-}" run_dir
+  local extra_args=()
+  [[ -n "$long_run" ]] || die "CVAE_LONG_HORIZON_DATASET_RUN is required"
+  [[ -f "$long_run/markers/cvae_long_horizon_dataset.ok" ]] || die "long-horizon dataset marker is missing: $long_run"
+  [[ -n "$table_run" ]] || die "CVAE_REFERENCE_TABLE_RUN is required"
+  [[ -f "$table_run/markers/cvae_reference_table.ok" ]] || die "reference table marker is missing: $table_run"
+  [[ -z "${CVAE_COMPARE_NORMALIZATION:-}" ]] || extra_args+=(--compare-normalization "$CVAE_COMPARE_NORMALIZATION")
+  run_dir="$(new_run_dir cvae_reference_mixed_dataset)"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" build_reference_mixed_dataset.log \
+    "$PYTHON" -m cvae_sa.reference_anchor_dataset \
+      --long-horizon-run "$long_run" --reference-table-run "$table_run" --output-run "$run_dir" \
+      --anchor-stride "${CVAE_REFERENCE_ANCHOR_STRIDE:-4}" \
+      --history-truncation-probability "${CVAE_REFERENCE_TRUNCATION_PROBABILITY:-0.25}" \
+      --allow-precreated-output "${extra_args[@]}"
+  [[ -f "$run_dir/markers/cvae_reference_mixed_dataset.ok" ]] || die "reference mixed dataset marker is missing"
+  update_latest cvae_reference_mixed_dataset "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+reference_train() {
+  local smoke="$1" dataset_run="${CVAE_REFERENCE_DATASET_RUN:-}" checkpoint="${CVAE_INIT_CHECKPOINT:-}"
+  local config="${CVAE_REFERENCE_CONFIG:-$SCRIPT_DIR/configs/posterior_hierarchical_standard_cvae_v5_reference_fp32.json}"
+  local kind=cvae_reference_train run_dir
+  local budget_args=()
+  [[ -n "$dataset_run" ]] || die "CVAE_REFERENCE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_reference_mixed_dataset.ok" ]] || die "reference mixed dataset marker is missing: $dataset_run"
+  [[ -f "$checkpoint" ]] || die "CVAE_INIT_CHECKPOINT must point to the KL C checkpoint (best.pt)"
+  if [[ "$smoke" == "true" ]]; then
+    kind=cvae_reference_train_smoke
+    budget_args=(--max-steps 2000 --validation-interval 1000 --full-validation-interval 2000 --checkpoint-interval 1000)
+  else
+    [[ -z "${CVAE_REFERENCE_MAX_STEPS:-}" ]] || budget_args+=(--max-steps "$CVAE_REFERENCE_MAX_STEPS")
+  fi
+  run_dir="$(new_run_dir "$kind")"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" reference_train.log \
+    "$PYTHON" -m cvae_sa.posterior_hierarchical_standard_cvae \
+      --dataset-run "$dataset_run" --output-run "$run_dir" --config "$config" --stage C \
+      --mask-mode fixed --init-checkpoint "$checkpoint" --allow-cross-dataset-init \
+      --eval-samples "${CVAE_POSTERIOR_EVAL_SAMPLES:-8}" "${budget_args[@]}"
+  [[ -f "$run_dir/markers/cvae_posterior_standard_cvae_execution.ok" ]] || die "reference training marker is missing"
+  update_latest "$kind" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
 posterior_h50_action_replay() {
   local dataset_run="${CVAE_DATASET_RUN:-}"
   local source_run="${CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN:-}"
@@ -1574,7 +1621,10 @@ case "${1:-}" in
   long-horizon-train) long_horizon_train ;;
   long-horizon-eval) long_horizon_eval ;;
   long-horizon-render) long_horizon_render ;;
+  build-reference-mixed-dataset) reference_mixed_dataset ;;
+  reference-train-smoke) reference_train true ;;
+  reference-train) reference_train false ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
-  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|build-long-horizon-dataset|long-horizon-dataset-smoke|long-horizon-train-smoke|long-horizon-train|long-horizon-eval|long-horizon-render|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-condition|posterior-hierarchical-standard-cvae-condition-fixed|posterior-hierarchical-standard-cvae-condition-dynamic|posterior-hierarchical-standard-cvae-condition-smoke|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|posterior-h50-action-replay-exact-init|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
+  *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|build-long-horizon-dataset|long-horizon-dataset-smoke|long-horizon-train-smoke|long-horizon-train|long-horizon-eval|long-horizon-render|build-reference-mixed-dataset|reference-train-smoke|reference-train|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-condition|posterior-hierarchical-standard-cvae-condition-fixed|posterior-hierarchical-standard-cvae-condition-dynamic|posterior-hierarchical-standard-cvae-condition-smoke|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|posterior-h50-action-replay-exact-init|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;
 esac

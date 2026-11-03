@@ -261,6 +261,8 @@ def write_physics_collection_run(
                 ("global_motion_id", 0), ("variant_id", variant), ("attempt_id", 0),
             ):
                 motion.create_dataset(field, data=np.asarray(value, dtype=np.int64))
+            if reference:
+                motion.create_dataset("motion_step", data=np.arange(steps, dtype=np.int64) + 3)
             index.append(
                 {
                     "episode": episode_name,

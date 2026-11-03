@@ -540,6 +540,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--continue-checkpoint", type=Path)
     parser.add_argument("--additional-steps", type=int)
     parser.add_argument("--allow-legacy-identity", action="store_true")
+    parser.add_argument("--allow-cross-dataset-init", action="store_true",
+                        help="Stage C: load only model weights from --init-checkpoint trained on another dataset")
     parser.add_argument("--mask-mode", choices=("fixed", "dynamic"), default="fixed")
     parser.add_argument("--eval-samples", type=int, default=8)
     parser.add_argument("--beta-warmup-steps", type=int)
@@ -576,6 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         continue_checkpoint=args.continue_checkpoint,
         additional_steps=args.additional_steps,
         allow_legacy_identity=args.allow_legacy_identity,
+        allow_cross_dataset_init=args.allow_cross_dataset_init,
         mask_mode=args.mask_mode,
         eval_samples=args.eval_samples,
         beta_warmup_steps=args.beta_warmup_steps,

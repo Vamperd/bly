@@ -23,7 +23,7 @@ from .cvae_protocol import (CHECKPOINT, LEGACY_CHECKPOINT, PROTOCOL, Fixtures, R
 from .cvae_diagnostics import ablations, batch_ids, epsilon_for, evaluate, read_normalization, route_output
 from .models import build_model
 from .posterior_direct_output import assert_output_isolated
-from .posterior_t64_protocol import make_physical_masks, _svg
+from .posterior_t64_protocol import make_physical_masks, make_reference_masks, _svg
 from .util import atomic_write_json, atomic_write_text, file_sha256, seed_everything
 
 
@@ -206,7 +206,7 @@ def _precision_call(fn, device, precision):
 def _make_train_callable(model, code, device, precision, compile_cfg):
     from .posterior_hierarchical_standard_cvae import hierarchical_kl, weighted_reconstruction_loss
 
-    def core(batch, state_mask, action_mask, beta_tensor):
+    def core(batch, state_mask, action_mask, beta_tensor, loss_state_mask, loss_action_mask):
         if code == "A":
             output = model.forward_stage_a(batch)
         else:
@@ -216,10 +216,10 @@ def _make_train_callable(model, code, device, precision, compile_cfg):
                 # C uses a deterministic epsilon supplied by the caller only
                 # for evaluation; training samples internally.
                 output = model(batch, state_mask, action_mask, stage="C")
-        valid_state = batch["valid_state"][..., None].expand_as(batch["physical_state"])
-        valid_action = batch["valid_action"][..., None].expand_as(batch["action"])
-        reconstruction = weighted_reconstruction_loss(output, batch, valid_state, valid_action,
-                                                       masked_weight=0., full_weight=1.)
+        # Physical rows pass their valid masks (full-window objective);
+        # reference-anchor rows pass target-only masks.
+        reconstruction = weighted_reconstruction_loss(output, batch, loss_state_mask, loss_action_mask,
+                                                       masked_weight=1., full_weight=0.)
         if code == "C":
             kl = hierarchical_kl(output.posterior)
         else:
@@ -297,6 +297,78 @@ def make_dataset(dataset_run, config, smoke=False):
     return dataset, indices
 
 
+def make_reference_dataset(dataset_run, config, smoke=False):
+    """Reference-anchor half of a mixed C batch, or None when not configured."""
+    data = config.get("data", {})
+    fraction = float(data.get("reference_fraction", 0.0))
+    if fraction <= 0.0:
+        return None, []
+    if not 0.0 < fraction < 1.0:
+        raise ValueError("reference_fraction must be in [0, 1)")
+    from .reference_anchor_dataset import ReferenceAnchorDataset
+    dataset = ReferenceAnchorDataset(dataset_run, "train")
+    manifest = dataset.manifest
+    for key in ("anchor_stride", "history_truncation_probability"):
+        if key in data and data[key] != manifest[key]:
+            dataset.close()
+            raise ValueError(f"config data.{key}={data[key]} differs from the built dataset ({manifest[key]})")
+    return dataset, list(range(min(len(dataset), 2) if smoke else len(dataset)))
+
+
+def valid_loss_masks(batch):
+    return (batch["valid_state"].bool()[..., None].expand_as(batch["physical_state"]),
+            batch["valid_action"].bool()[..., None].expand_as(batch["action"]))
+
+
+def merge_batches(physical, reference):
+    """Concatenate the shared keys of two collated batches (physical rows first)."""
+    merged = {}
+    for key, value in physical.items():
+        if key not in reference:
+            continue
+        other = reference[key]
+        merged[key] = torch.cat((value, other)) if isinstance(value, torch.Tensor) else list(value) + list(other)
+    return merged
+
+
+def reference_anchor_metrics(model, loader, device, action_std, seed):
+    """Standard-normal Action RMSE on reference anchors at slot 32 and slots 32..35."""
+    groups = ("all", "full_history", "short_history")
+    sums = {g: {k: 0.0 for k in ("slot32", "slot32_35", "slot32_raw", "slot32_35_raw")} for g in groups}
+    counts = {g: {"slot32": 0, "slot32_35": 0} for g in groups}
+    anchors = {g: 0 for g in groups}
+    std = torch.as_tensor(action_std, device=device, dtype=torch.float32)
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for cpu in loader:
+                sm, am, _, _ = make_reference_masks(cpu)
+                batch = to_device(cpu, device)
+                output = route_output(model, batch, sm.to(device), am.to(device), "standard_normal",
+                                      epsilon_for(model, cpu, 0, seed, device))
+                error = output.action.float()[:, 32:36] - batch["action"].float()[:, 32:36]
+                valid = batch["target_action_valid"][:, 32:36].bool()
+                full = cpu["history_steps"].to(device) == 32
+                for group, rows in (("all", torch.ones_like(full)), ("full_history", full), ("short_history", ~full)):
+                    anchors[group] += int(rows.sum())
+                    for name, width in (("slot32", 1), ("slot32_35", 4)):
+                        selected = (valid[:, :width] & rows[:, None])[..., None].expand(-1, -1, error.shape[-1])
+                        part = error[:, :width]
+                        sums[group][name] += float(part.square().masked_select(selected).sum())
+                        sums[group][name + "_raw"] += float((part * std).square().masked_select(selected).sum())
+                        counts[group][name] += int(selected.sum())
+    finally:
+        model.train(was_training)
+    report = {"route": "standard_normal", "action_space": "normalized and raw (rad)"}
+    for group in groups:
+        report[group] = {"anchors": anchors[group], **{
+            f"{name}_rmse": (float(np.sqrt(sums[group][name] / counts[group][name.removesuffix("_raw")]))
+                             if counts[group][name.removesuffix("_raw")] else None)
+            for name in sums[group]}}
+    return report
+
+
 def data_identity(dataset_run, windows):
     identity = {"dataset_run": str(dataset_run), "dataset_manifest_sha256": file_sha256(dataset_run / "manifests/dataset_manifest.json"),
         "episodes_index_sha256": file_sha256(dataset_run / "manifests/episodes.jsonl"),
@@ -324,7 +396,9 @@ def check_source_identity(
     recovered_manifest_mismatch = False
     recovered_identity_mismatches = []
     keys = ["dataset_manifest_sha256", "episodes_index_sha256", "normalization_sha256", "selected_windows_sha256", "selected_window_count"]
-    keys.extend(key for key in ("long_horizon_groups_sha256", "long_horizon_windows_sha256") if key in identity)
+    keys.extend(key for key in ("long_horizon_groups_sha256", "long_horizon_windows_sha256",
+                                "reference_anchor_windows_sha256", "reference_table_sha256",
+                                "reference_anchor_count") if key in identity)
     for key in keys:
         if old.get(key) is None:
             missing.append(key)
@@ -365,7 +439,8 @@ def provenance(config, contract, identity, source):
     except (OSError, subprocess.CalledProcessError):
         commit = "unknown"
     paths = list(Path(__file__).parent.glob("cvae_*.py")) + [Path(__file__).with_name(name) for name in
-        ("models.py", "dataset.py", "util.py", "posterior_t64_protocol.py", "posterior_hierarchical_standard_cvae.py")]
+        ("models.py", "dataset.py", "util.py", "posterior_t64_protocol.py", "posterior_hierarchical_standard_cvae.py",
+         "reference_anchor_dataset.py")]
     paths.append(root / "state-action-cvae/cvae_repro.sh")
     return {"protocol_version": PROTOCOL, "config": config, "resolved_training_contract": contract,
         "argv": sys.argv, "git_commit": commit, "source_hashes": {str(p.relative_to(root)): file_sha256(p) for p in paths},
@@ -493,7 +568,7 @@ def run_experiment(dataset_run, output_run, source_run, config, *, stage, init_r
     checkpoint_interval_override=None, log_interval_override=None, eval_micro_batch_override=None,
     full_validation_interval_override=None, resume_run=None, mask_mode="fixed",
     init_checkpoint=None, continue_checkpoint=None, additional_steps=None, allow_legacy_identity=False,
-    eval_samples=8, beta_warmup_steps=None, skip_initial_eval=False):
+    eval_samples=8, beta_warmup_steps=None, skip_initial_eval=False, allow_cross_dataset_init=False):
     from .posterior_hierarchical_standard_cvae import _stage_key, hierarchical_kl, load_checkpoint, weighted_reconstruction_loss
     code, stage_name = _stage_key(stage)
     if source_run is not None:
@@ -506,7 +581,9 @@ def run_experiment(dataset_run, output_run, source_run, config, *, stage, init_r
         raise ValueError("KL override only applies to C")
     if sum(x is not None for x in (init_run, init_checkpoint, resume_run, continue_checkpoint)) > 1:
         raise ValueError("resume, continue, and model-only init are mutually exclusive")
-    if code == "C" and (init_run or init_checkpoint):
+    if allow_cross_dataset_init and (code != "C" or init_checkpoint is None):
+        raise ValueError("--allow-cross-dataset-init only applies to C with --init-checkpoint")
+    if code == "C" and (init_run or (init_checkpoint and not allow_cross_dataset_init)):
         raise ValueError("C starts independently from random initialization; use resume only for its own run")
     if (additional_steps is None) != (continue_checkpoint is None):
         raise ValueError("--continue-checkpoint and --additional-steps must be specified together")
@@ -531,10 +608,14 @@ def run_experiment(dataset_run, output_run, source_run, config, *, stage, init_r
             atomic_write_json(run / "manifests/progress.json", {"status": "running", "phase": "preflight",
                 "run_dir": str(run), "pid": os.getpid(), "stage": code, "protocol_version": PROTOCOL,
                 "optimizer_step": 0, "updated_at": datetime.now(timezone.utc).isoformat()})
-        data = None
+        data = reference = None
         try:
             data, indices = make_dataset(dataset_run, config, smoke)
+            reference, reference_indices = make_reference_dataset(dataset_run, config, smoke)
+            if reference is not None and code != "C":
+                raise ValueError("reference-anchor mixing only applies to C")
             return _train(data, indices, dataset_run, run, config, code, stage_name,
+            reference=reference, reference_indices=reference_indices, allow_cross_dataset_init=allow_cross_dataset_init,
             init_run=init_run, smoke=smoke, kl_beta_override=kl_beta_override, max_steps_override=max_steps_override,
             micro_batch_override=micro_batch_override, learning_rate_override=learning_rate_override, lr_schedule=lr_schedule,
             warmup_steps_override=warmup_steps_override, min_lr_ratio_override=min_lr_ratio_override,
@@ -555,6 +636,8 @@ def run_experiment(dataset_run, output_run, source_run, config, *, stage, init_r
         finally:
             if data is not None:
                 data.close()
+            if reference is not None:
+                reference.close()
 
 
 def _train(data, indices, dataset_run, run, config, code, stage_name, **options):
@@ -621,7 +704,26 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     fixtures = Fixtures(cached_data, indices, expand=code != "A" and options["mask_mode"] == "fixed")
     eval_fixtures = Fixtures(cached_data, indices, expand=code != "A")
     normalization = read_normalization(dataset_run / "data/normalization.npz")
-    selection = {"A": "full_reconstruction_loss", "B": "equal_family_masked_domain_mean_MSE", "C": "standard_normal_masked_energy_score"}[code]
+    reference = options.get("reference")
+    reference_fixtures = reference_eval_fixtures = None
+    reference_batch = 0
+    if reference is not None:
+        reference_fraction = float(data_cfg["reference_fraction"])
+        reference_batch = int(round(batch_size * reference_fraction))
+        if not 0 < reference_batch < batch_size:
+            raise ValueError("reference_fraction must leave both physical and reference rows in each micro batch")
+        reference_indices = list(options["reference_indices"])
+        reference_fixtures = Fixtures(reference, reference_indices, expand=False)
+        eval_count = min(len(reference_indices), int(data_cfg.get("reference_eval_anchors", 512)))
+        eval_positions = np.linspace(0, len(reference_indices) - 1, num=eval_count, dtype=int).tolist()
+        reference_eval_fixtures = Fixtures(reference, [reference_indices[i] for i in dict.fromkeys(eval_positions)],
+                                           expand=False)
+        # Anchor ids are unique by construction (checked when the dataset is built).
+        identity["reference_anchor_windows_sha256"] = reference.manifest["anchor_windows_sha256"]
+        identity["reference_table_sha256"] = reference.manifest["reference_table_sha256"]
+        identity["reference_anchor_count"] = len(reference_indices)
+    train_motion_keys = sorted({str(row["motion_key"]) for row in windows})
+    selection = {"A":"full_reconstruction_loss", "B": "equal_family_masked_domain_mean_MSE", "C": "standard_normal_masked_energy_score"}[code]
     long_horizon_enabled = bool(getattr(data, "long_horizon_manifest", None))
     long_horizon_group_count = int(getattr(data, "group_count", 0)) if long_horizon_enabled else 0
     contract = {"protocol_version": PROTOCOL, "stage": code, "mask_mode": options["mask_mode"], "max_steps": maximum,
@@ -630,7 +732,16 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
         "full_validation_interval": full_validation_interval, "initialization_seed": seed, "training_mask_seed": mask_seed,
         "eval_samples": options["eval_samples"], "skip_initial_eval": skip_initial_eval,
         "kl_beta": beta if code == "C" else 0., "beta_warmup_steps": beta_warmup,
-        "objective": "full_state_continuous_action_contact_equal_mean_v1", "selection": selection,
+        "objective": ("physical_full_plus_reference_target_only_v1" if reference is not None
+                      else "full_state_continuous_action_contact_equal_mean_v1"), "selection": selection,
+        "reference_anchor": None if reference is None else {
+            "physical_rows": batch_size - reference_batch, "reference_rows": reference_batch,
+            "reference_fraction": float(data_cfg["reference_fraction"]),
+            "anchor_stride": reference.manifest["anchor_stride"],
+            "history_truncation_probability": reference.manifest["history_truncation_probability"],
+            "history_truncation_seed": reference.manifest["history_truncation_seed"],
+            "anchor_count": len(reference_fixtures), "eval_anchor_count": len(reference_eval_fixtures),
+            "reference_loss": "action_32_63_and_contact_33_64_by_target_valid"},
         "fixture_count": len(fixtures), "selected_window_count": len(windows), "quality_rule_version": "warnings-v1",
         "evaluation_schedule": {"routine_profile": "summary", "full_profile": "diagnostic",
                                 "summary_only_until_full": bool(cfg.get("summary_only_until_full", False)),
@@ -654,7 +765,9 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     runtime_contract = _runtime_contract(config, device, model, optimizer, precision)
     runtime_contract["cache_enabled"] = bool(cache_info.get("enabled", False))
     contract["runtime_contract"] = runtime_contract
-    sampler = RecoverableSampler(len(fixtures), batch_size, seed)
+    sampler = RecoverableSampler(len(fixtures), batch_size - reference_batch, seed)
+    reference_sampler = (RecoverableSampler(len(reference_fixtures), reference_batch, seed + 900001)
+                         if reference is not None else None)
     effective_config = json.loads(json.dumps(config))
     effective_config["model"] = model.config
     effective_config["compile"] = {
@@ -681,7 +794,17 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             assert_output_isolated(run, [path.parent.parent])
         checkpoint = load_checkpoint(model, path)
         source = source_info(path, checkpoint)
-        source["identity_check"] = check_source_identity(checkpoint, identity, exact=bool(options["resume_run"]), allow_unknown=options["allow_legacy_identity"])
+        if options["allow_cross_dataset_init"]:
+            # Weights-only fine-tune onto a different dataset; record what changed.
+            source["identity_check"] = check_source_identity(checkpoint, identity, allow_unknown=True,
+                                                             allow_identity_mismatch=True)
+            source["cross_dataset_init"] = {"source_dataset_identity": checkpoint.get("dataset_identity"),
+                                            "source_stage": checkpoint.get("stage"),
+                                            "source_training_contract": checkpoint.get("training_contract")}
+            if checkpoint.get("stage") != "C":
+                raise ValueError("cross-dataset C init requires a C checkpoint")
+        else:
+            source["identity_check"] = check_source_identity(checkpoint, identity, exact=bool(options["resume_run"]), allow_unknown=options["allow_legacy_identity"])
         if options["resume_run"]:
             if checkpoint.get("format_version") != CHECKPOINT or checkpoint.get("training_contract") != contract:
                 raise ValueError("exact resume requires v2 and identical training contract")
@@ -695,6 +818,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             source = checkpoint.get("source_checkpoint")
             optimizer.load_state_dict(checkpoint["optimizer"])
             sampler.load_state_dict(checkpoint["sampler"])
+            if reference_sampler is not None:
+                reference_sampler.load_state_dict(checkpoint["reference_sampler"])
             if start > maximum:
                 raise ValueError("checkpoint step exceeds requested maximum")
         elif options["continue_checkpoint"]:
@@ -713,6 +838,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             source_step = int(checkpoint.get("cumulative_step", checkpoint["optimizer_step"]))
             if checkpoint.get("sampler"):
                 sampler.load_state_dict(checkpoint["sampler"])
+                if reference_sampler is not None:
+                    reference_sampler.load_state_dict(checkpoint["reference_sampler"])
                 source["sampling"] = "preserved"
             else:
                 source["sampling"] = "explicit_legacy_sampling_restart_not_exact_resume"
@@ -815,6 +942,8 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             "runtime_contract": {**runtime_contract, "compile_observations": compile_infos},
             "cache_info": cache_info,
             "compile_info": compile_infos, "dataset_identity": identity, "sampler": sampler.state_dict(), "rng_state": capture_rng(),
+            "reference_sampler": reference_sampler.state_dict() if reference_sampler is not None else None,
+            "train_motion_keys": train_motion_keys,
             "source_checkpoint": source, "best_metrics": best, "best_optimizer_step": best_step,
             "best_heldout_metrics": best_heldout, "best_heldout_step": best_heldout_step,
             "best_reconstruction_loss": best_reconstruction, "best_reconstruction_step": best_reconstruction_step,
@@ -897,6 +1026,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 route_callable=held_compiled, non_blocking=non_blocking_transfer,
                 precision=precision, compile_info=held_info, encoding_cache=encoding_cache)
             row["heldout_mask"] = held
+        if reference_eval_fixtures is not None:
+            progress(phase="evaluation", route="reference_anchor", evaluation_batches=0)
+            with isolated_rng():
+                row["reference_anchor"] = reference_anchor_metrics(
+                    model, DataLoader(reference_eval_fixtures, batch_size=eval_batch_size, shuffle=False, num_workers=0),
+                    device, normalization["action"][1], mask_seed)
         eval_rows.append(row)
         if code != "A":
             missing_families = set(("state_gap_4", "state_gap_16", "state_rollout", "action_gap_4", "action_gap_16", "full_action", "joint_gap_2", "joint_gap_8")) - set(primary["mask_families"])
@@ -994,6 +1129,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             plots(run, quality_rows)
         progress(quality_warnings=warnings, evaluation_profile=evaluation_profile)
         print(f"[stage={code}] {evaluation_profile} eval step={last_step}/{maximum} selection={row['selection_score']:.6g} full={row['total_loss']:.6g} state={row['state_rmse']:.6g} action={row['action_rmse']:.6g} max={row['max_abs']:.6g} best={best_step} warnings={warnings}", flush=True)
+        if "reference_anchor" in row:
+            anchor = row["reference_anchor"]
+            print(f"[stage={code}] reference_anchor slot32_raw={anchor['all']['slot32_raw_rmse']} "
+                  f"slot32_35_raw={anchor['all']['slot32_35_raw_rmse']} "
+                  f"full_history={anchor['full_history']['slot32_raw_rmse']} "
+                  f"short_history={anchor['short_history']['slot32_raw_rmse']}", flush=True)
     previous_handlers = {}
     encoder_calls = {"posterior": 0, "condition": 0}
     def count_call(name):
@@ -1070,6 +1211,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 model.eval()
                 encoder_calls.update(posterior=0, condition=0)
                 probe_sm, probe_am, _ = make_physical_masks(probe, mask_seed)
+                probe_lsm, probe_lam = valid_loss_masks(probe)
                 install_route_hooks()
                 try:
                     with torch.no_grad():
@@ -1077,6 +1219,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                             to_device(probe, device, non_blocking=non_blocking_transfer),
                             probe_sm.to(device), probe_am.to(device),
                             torch.tensor(0., device=device, dtype=torch.float32),
+                            probe_lsm.to(device), probe_lam.to(device),
                         )
                 finally:
                     model.train(was_training)
@@ -1099,18 +1242,29 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                     group_ids_seen.update(str(value) for value in values)
                 else:
                     group_ids_seen.add(str(values))
-            cpu = pin_batch(cpu, enabled=pin_memory)
-            batch = to_device(cpu, device, non_blocking=non_blocking_transfer)
-            data_fetch_seconds = time.perf_counter() - fetch_started
-            encoder_calls.update(posterior=0, condition=0)
             if code == "A":
                 sm = cpu["valid_state"][..., None].expand_as(cpu["physical_state"])
                 am = cpu["valid_action"][..., None].expand_as(cpu["action"])
             else:
                 dynamic = source_step + step if options["mask_mode"] == "dynamic" else None
                 sm, am, names = make_physical_masks(cpu, mask_seed, dynamic_step=dynamic)
+            lsm, lam = valid_loss_masks(cpu)
+            if reference_sampler is not None:
+                # Masks are built per half: physical masks use mask_slot, which the merge drops.
+                reference_cpu = reference_sampler.next(reference_fixtures)
+                rsm, ram, rlsm, rlam = make_reference_masks(reference_cpu)
+                sm, am = torch.cat((sm, rsm)), torch.cat((am, ram))
+                lsm, lam = torch.cat((lsm, rlsm)), torch.cat((lam, rlam))
+                names = list(names) + ["reference_anchor"] * len(rsm)
+                cpu = merge_batches(cpu, reference_cpu)
+            cpu = pin_batch(cpu, enabled=pin_memory)
+            batch = to_device(cpu, device, non_blocking=non_blocking_transfer)
+            data_fetch_seconds = time.perf_counter() - fetch_started
+            encoder_calls.update(posterior=0, condition=0)
             state_mask = sm.to(device, non_blocking=non_blocking_transfer)
             action_mask = am.to(device, non_blocking=non_blocking_transfer)
+            loss_state_mask = lsm.to(device, non_blocking=non_blocking_transfer)
+            loss_action_mask = lam.to(device, non_blocking=non_blocking_transfer)
             expected_calls = {"posterior": int(code in {"A", "C"}), "condition": int(code in {"B", "C"})}
             actual_beta = beta * min((source_step + step) / beta_warmup, 1.) if code == "C" else 0.
             beta_tensor = torch.tensor(actual_beta, device=device, dtype=torch.float32)
@@ -1118,10 +1272,10 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
             try:
                 if train_compile_info["cold_start_seconds"] is None and train_compile_info["succeeded"]:
                     compile_started = time.perf_counter()
-                    result = train_callable(batch, state_mask, action_mask, beta_tensor)
+                    result = train_callable(batch, state_mask, action_mask, beta_tensor, loss_state_mask, loss_action_mask)
                     train_compile_info["cold_start_seconds"] = time.perf_counter() - compile_started
                 else:
-                    result = train_callable(batch, state_mask, action_mask, beta_tensor)
+                    result = train_callable(batch, state_mask, action_mask, beta_tensor, loss_state_mask, loss_action_mask)
                 _update_compile_counts(train_compile_info, dynamo_before)
                 if _compile_limit_reached(train_compile_info):
                     _mark_compile_failed(train_compile_info, "recompile_limit_reached", "training")
@@ -1142,7 +1296,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 install_route_hooks()
                 train_callable = eager_train_callable
                 encoder_calls.update(posterior=0, condition=0)
-                result = train_callable(batch, state_mask, action_mask, beta_tensor)
+                result = train_callable(batch, state_mask, action_mask, beta_tensor, loss_state_mask, loss_action_mask)
             if train_compile_info["succeeded"] and not route_hooks:
                 # The eager probe above established the static route; compiled
                 # calls intentionally run without Python forward hooks.
@@ -1157,7 +1311,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                     install_route_hooks()
                     train_callable = eager_train_callable
                     encoder_calls.update(posterior=0, condition=0)
-                    result = train_callable(batch, state_mask, action_mask, beta_tensor)
+                    result = train_callable(batch, state_mask, action_mask, beta_tensor, loss_state_mask, loss_action_mask)
                 if encoder_calls != expected_calls:
                     raise RuntimeError(f"stage route violation: {encoder_calls} expected {expected_calls}")
             loss, reconstruction_total, reconstruction_state, reconstruction_action, reconstruction_contact, kl_global, kl_local, kl_total = result

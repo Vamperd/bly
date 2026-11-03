@@ -547,3 +547,21 @@ FP32；BF16 只用于 CUDA 密集前向，且不使用 GradScaler。CUDA 不支�
 compile 的 cold-start、fallback、graph break/recompile 和 runtime contract 会写入 checkpoint、
 summary 与 manifests。旧 FP32 eager checkpoint 不覆盖；BF16/compile/cache 的 CUDA smoke、数值
 parity 和稳态吞吐必须在 Ubuntu 新 run 中单独验收。
+
+## Physics v5 reference 锚点 C 微调
+
+背景与合同见根目录 `dagger.md` 的“B 路线”小节。依赖顺序：v5 长窗口 run → 参考表 run
+（`dagger/scripts/export_reference_table.sh`，对齐校验通过才写 marker）→ 混合数据集 → C 微调。
+
+```bash
+CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_physics_dataset_v5 bash cvae_repro.sh build-long-horizon-dataset
+CVAE_LONG_HORIZON_DATASET_RUN=<长窗口 run> CVAE_REFERENCE_TABLE_RUN=<参考表 run> bash cvae_repro.sh build-reference-mixed-dataset
+CVAE_REFERENCE_DATASET_RUN=<混合数据集 run> CVAE_INIT_CHECKPOINT=<KL2 300k best.pt> bash cvae_repro.sh reference-train-smoke
+CVAE_REFERENCE_DATASET_RUN=<混合数据集 run> CVAE_INIT_CHECKPOINT=<KL2 300k best.pt> bash cvae_repro.sh reference-train
+```
+
+可选变量：`CVAE_COMPARE_NORMALIZATION`（另一份 `normalization.npz`，构建时打印差异）、
+`CVAE_REFERENCE_ANCHOR_STRIDE`（默认 4）、`CVAE_REFERENCE_TRUNCATION_PROBABILITY`（默认 0.25）、
+`CVAE_REFERENCE_CONFIG`、`CVAE_REFERENCE_MAX_STEPS`。smoke 固定 2000 步；正式训练按配置的 KL 段 100k 步。
+训练只允许 stage C，`--allow-cross-dataset-init` 只加载模型权重；full eval 日志额外打印
+`reference_anchor slot32_raw=... full_history=... short_history=...`。

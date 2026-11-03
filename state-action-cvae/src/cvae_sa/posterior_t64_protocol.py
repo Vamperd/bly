@@ -149,6 +149,32 @@ def make_physical_masks(
     return state_mask, action_mask, names
 
 
+def make_reference_masks(
+    batch: dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Condition and loss masks for reference-anchor windows (anchor slot 32).
+
+    Mirrors ``dagger.runtime.cvae_window.reference_masks``: future contacts and
+    every Action from the anchor on are hidden; slots 33..64 continuous dims are
+    reference inputs and never supervised.  Loss covers Actions 32..63 and
+    contacts 33..64 only where the episode really has those targets.
+    """
+    anchor = 32
+    valid_state = batch["valid_state"].bool()
+    valid_action = batch["valid_action"].bool()
+    state_mask = torch.zeros_like(batch["physical_state"], dtype=torch.bool)
+    action_mask = torch.zeros_like(batch["action"], dtype=torch.bool)
+    state_mask[:, anchor + 1:, 68:] = True
+    action_mask[:, anchor:] = True
+    state_mask &= valid_state[..., None]
+    action_mask &= valid_action[..., None]
+    loss_state_mask = torch.zeros_like(state_mask)
+    loss_action_mask = torch.zeros_like(action_mask)
+    loss_state_mask[:, anchor + 1:, 68:] = batch["target_contact_valid"].bool()[:, anchor + 1:, None]
+    loss_action_mask[:, anchor:] = batch["target_action_valid"].bool()[:, anchor:, None]
+    return state_mask, action_mask, loss_state_mask & state_mask, loss_action_mask & action_mask
+
+
 def make_autoencode_masks(
     batch: dict[str, Any], seed: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:

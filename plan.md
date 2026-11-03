@@ -402,3 +402,19 @@ train_motion_keys；评估为每轮 student-only 192 步、8 env，survival 粒�
   （γ=0.9），student 每 4 步重规划、开环执行；训练、评估、渲染（`DAGGER_RENDER_POLICY=cvae`）共用 `plan_action()`。
   代码完成、71 tests 通过，Isaac 未执行。
 - 待执行：ghost 视频渲染（运行中）、sonic-arch E1→E2、future-reference DAgger 8h 及其 B+C 变体。
+
+## 25. 12 motion chunk CVAE DAgger 早停、diag 与 B 路线 v5 reference C（2026-11-02）
+
+细节、表格与命令见 `dagger.md` 的 12h 小节和“B 路线”小节。
+
+- 12h `dagger_cvae_kl2_pilot_future_ref_chunk_12h_20261101_005928`：round 0–4，1.89 h，round 4 早停。rmse 0.3330→0.3106
+  通过 0.98 门槛；term 0.0473→0.0490 在容差 0 下失败（约多 4 次 done）。survival 0→0.08。训练 loss 0.005–0.016 而
+  student-only rmse 停在 0.31，说明问题不在早停判据本身。
+- 候选原因：300k C 由 v4 数据训练，从未见过 slot 33–64 的 reference 输入；v4 回放（source_mix 0.5）把模型拉回旧语义；
+  开局前 32 步左侧 padding 叠加 reference 未来，C 训练中没有这种布局。
+- diag `cvae-kl2-pilot-future-ref-chunk-diag`：从 12h `round_04.pt` 续训，source_mix 0，6 轮，beta 0.2→0，term 容差 0.005。
+  Ubuntu 运行中，结果待回填。
+- B 路线：在 Physics v5 上用 50% 物理窗口 + 50% reference 锚点（h = min(t,32)，25% 截断）从 KL2 300k `best.pt`
+  跨数据集微调 C；参考行只监督 Action 32..63 与 contact 33..64。参考表导出、混合数据集、训练入口与配置
+  `posterior_hierarchical_standard_cvae_v5_reference_fp32.json` 已实现，Windows 测试通过（唯一失败项
+  `test_long_horizon_dataset` 在 HEAD 上同样失败），Ubuntu 未执行。DAgger 接入（阶段 2）未实现。

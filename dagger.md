@@ -829,6 +829,43 @@ cd ~/bly/dagger && nohup env DAGGER_CVAE_SHARD_TIMEOUT=3600 DAGGER_MAX_SHARDS=40
 - 渲染：`scripts/render_cvae_ghost_batch.sh <cvae_run> [mlp_run] [num_motions] [steps]`，对 checkpoint 的每个训练 motion 出
   sonic / cvae_dagger（MLP 训练过的 motion 加 mlp_best_survival）单独视频和 ghost。全部 rollout 用 KL2 motion 文件。
 
+#### 12h 结果：round 4 早停（2026-11-02）
+
+`dagger_cvae_kl2_pilot_future_ref_chunk_12h_20261101_005928` 跑完 round 0–4（1.89 h）后在 check round 4 早停：
+
+| round | beta | 分钟 | loss | rmse | survival | term |
+|---|---|---|---|---|---|---|
+| 0 | 1.0 | 9.3 | 0.01561 | 0.3330 | 0.00 | 0.0473 |
+| 1 | 1.0 | 26.6 | 0.004922 | 0.3248 | 0.00 | 0.0464 |
+| 2 | 0.8 | 27.0 | 0.008983 | 0.3264 | 0.00 | 0.0460 |
+| 3 | 0.6 | 25.2 | 0.008843 | 0.3248 | 0.00 | 0.0456 |
+| 4 | 0.4 | 25.2 | 0.01629 | 0.3106 | 0.08 | 0.0490 |
+
+- 门禁（`core/cvae_objective.py` 的 early-stop 判据）：rmse 0.3106 ≤ 0.98×0.3330 通过；term 0.0490 > 0.0473 + 0（`termination_tolerance: 0.0`）
+  失败。按 192×12 env-step 估算 done 只多约 4 次，属噪声级差异，单看早停不能说明 round 4 变差。
+- 真正的问题：训练 loss 0.005–0.016，而 student-only rmse 停在 0.31、survival 接近 0；同 motion 的 MLP DAgger 可降到 0.06。
+- 待验证的原因：
+  1. 300k C 用 v4 数据训练，slot 33–64 是真实仿真未来 State，从未见过 reference 输入。
+  2. `source_mix: 0.5` 的 v4 回放一直把模型拉回旧语义。
+  3. 开局前 32 步历史不足（左侧 padding，`valid=False`），和 reference 未来同时出现，C 训练时没有这种布局；
+     eval 中每次 done 后历史清空，会反复经历这段。
+- Ubuntu 的 watch 脚本当时是旧版，显示的 "FINAL manifest exists" 是误报；现已改为匹配 `"complete": true`。
+
+#### diag：去掉 v4 回放续训（2026-11-02，Ubuntu 运行中）
+
+- mode `cvae-kl2-pilot-future-ref-chunk-diag`，配置 `configs/cvae_kl2_pilot_future_ref_chunk_diag.yaml`，相对 12h 只改：
+  初始权重为 12h run 的 `checkpoints/round_04.pt`；`source_mix: 0.0`；6 轮，beta `[0.2, 0.1, 0.0]` 之后保持 0；
+  early_stop check `[3, 5]`、`termination_tolerance: 0.005`；seed 20261101。K=8、γ=0.9、k=4、future_reference 不变。
+- 早停基线是本 run 的 round 0（已用 source_mix=0 训练一轮），不等于 12h 的 round 4。
+- 判读：rmse 明显低于 0.31 说明 v4 回放是主因；仍停在 0.31 附近则更可能是上面第 1、3 条的输入分布问题，由下面的 B 路线处理。
+- 首次启动立即退出：`run_dagger.sh` 的 `pgrep -af 'python -m dagger.cli'` 守卫瞬时匹配到别的终端里 watch 脚本执行的 pgrep，
+  第二次 pgrep 找不到进程返回 1，`set -e` 退出。重新启动即可，守卫未修改。
+
+```bash
+cd ~/bly/dagger && nohup env DAGGER_CVAE_SHARD_TIMEOUT=3600 bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-ref-chunk-diag > ~/bly/runs/dagger_diag_auto.log 2>&1 &
+watch -n 60 bash scripts/watch_cvae_kl2.sh cvae-kl2-pilot-future-ref-chunk-diag
+```
+
 ### SONIC 结构 student 纯 DAgger 对照（E0/E1/E2）：代码已实现，待 Ubuntu 执行
 
 - 目的：student 换成与 SONIC release actor 完全相同的结构（g1 encoder `[2048,1024,512,512]` → FSQ 2×32 token →
@@ -856,10 +893,63 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-check > ~/bly/run
 cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/dagger_sonic_arch_6h.log 2>&1 &
 ```
 
+### B 路线：Physics v5 上重训带 reference 未来与左侧 padding 的 65-token C
+
+目标是让 C 在训练阶段就见过 DAgger 的真实输入布局，再用新 C 做 DAgger。分三阶段：
+阶段 0/1（参考表、混合数据集、C 微调）代码已实现，待 Ubuntu 执行；阶段 2（DAgger 接入）未实现。
+
+已确认的决策：每个 micro batch 内 16 个物理窗口（原 8 种 fixed mask）+ 16 个 reference 锚点；
+从 KL2 300k `best.pt` 只加载权重微调；锚点历史长度 h = min(t, 32)，另有 25% 按确定性种子截断为 U[0, h]。
+
+**阶段 0：参考表导出（dagger 侧）**
+- `runtime/sonic_env.py` 抽出 `reference_states_at(env, motion_ids, frames)`，在线 `reference_future_states` 与离线导出共用。
+- `python -m dagger.export_reference_table`（脚本 `scripts/export_reference_table.sh`，不走 `dagger.cli`，因此不会触发
+  run_dagger.sh 的进程守卫，可与 DAgger 并行）：对 v5 的 32 个 motion 建一次 SonicEnv，导出全部帧的 70 维参考
+  （contact 维为 0），输出 `cvae_reference_table_v5_<ts>/data/reference_states.npz`、
+  `manifests/reference_table_manifest.json`（schema `cvae_reference_table_v1`）和 `markers/cvae_reference_table.ok`。
+- 对齐校验在导出时自动执行：表中 `motion_step[t]+offset` 帧（offset ∈ {−1, 0, +1}）的关节位置/速度与 v5 HDF5 记录的
+  reference 第 0 帧对比，容差 1e-4，要求 offset 0 最优且通过，否则报错且不写 marker。
+- 参数：`CVAE_V5_PHYSICS_DATASET`（默认 `~/bly/runs/cvae_physics_dataset_v5`）、`CVAE_V5_MOTION_FILE`
+  （默认取 `latest_overfit_reference_motion_subset_run_dir.txt` 下的 `data/robot_filtered`）、`DAGGER_DEVICE`（默认 cuda:0）。
+
+**阶段 1：混合数据集与 C 微调（state-action-cvae 侧）**
+- `cvae_sa.reference_anchor_dataset`（`cvae_repro.sh build-reference-mixed-dataset`）：输入 v5 长窗口 run 与参考表 run，
+  输出 `cvae_reference_mixed_dataset_<ts>`（schema `cvae_v5_reference_mixed_dataset_v1`）。复制长窗口 manifest、
+  `normalization.npz` 和参考表，写 `manifests/anchor_windows.jsonl`：每个 episode 每 4 步一个锚点，稳定 id 为
+  episode + anchor_step 的 digest，截断由 `_stable_seed` 决定（seed 20261102）。校验参考表 sha256 及其来源 Physics
+  manifest 与长窗口源一致。
+- 锚点布局与 DAgger 的 `build_condition` 一致：slot `[32-h, 32)` 为真实历史 State/Action，slot 32 为 S_t，
+  slot 33..64 的 dims 0:68 为参考帧 `motion_step[t]+1..+32`（越界取最后一帧），dims 68:70 为真实 contact（隐藏目标）；
+  Action 目标 a_t..a_{t+31}。`target_action_valid` / `target_contact_valid` 标出 episode 内真实存在的目标。
+- Mask 与 loss：参考行用 `make_reference_masks`（mask contact 33..64 与 Action 32..63，和 valid 取与），
+  只监督 Action 32..63 + contact 33..64（按 target valid）；物理行保持原 fixed mask 与全窗口重建。KL 不变。
+  训练合同 objective 记为 `physical_full_plus_reference_target_only_v1`，另写 `reference_anchor` 段。
+- 跨数据集初始化：`--init-checkpoint` + `--allow-cross-dataset-init` 只允许 stage C，只加载模型权重
+  （不加载 optimizer/sampler），源 identity 写入 `training_contract.source.cross_dataset_init`；源 checkpoint 必须是 stage C。
+- checkpoint 新增 `train_motion_keys` 和 `reference_sampler`；full eval 额外输出参考锚点上 standard-normal 的
+  `reference_anchor slot32_raw / slot32_35_raw / full_history / short_history` RMSE（最多 512 个均匀抽取的锚点）。
+- 配置 `state-action-cvae/configs/posterior_hierarchical_standard_cvae_v5_reference_fp32.json`：model 段与
+  `..._long_horizon_fp32.json` 完全一致；lr 5e-5、warmup 1000、kl_beta 0.002、beta warmup 1000、KL 段上限 100k 步、
+  validation 5000 / full validation 与 checkpoint 20000。
+- `cvae_repro.sh` 新命令：`build-reference-mixed-dataset`、`reference-train-smoke`（2000 步）、`reference-train`。
+- 验证：Windows state-action-cvae 255 tests 中 254 通过（新增 `tests/test_reference_anchor_dataset.py` 3 个全过；
+  `test_long_horizon_dataset` 在未改动的 HEAD 上同样失败，与本次无关）；dagger 76 tests 通过。Ubuntu 未执行。
+
+**阶段 2：DAgger 接入（未实现）**：v5 motion manifest；checkpoint 带 `train_motion_keys` 时校验本轮 motion 为其子集；
+新 source kind `reference_mixed`（回放 C 自己的训练分布）；student-only 评估增加前 32 步 / 之后的分桶 RMSE 与摔倒步数分布；
+新 mode `cvae-kl2-pilot-v5ref-12h`。完成后 round 0 与 12h 的 round 0（rmse 0.333、term 0.047）对比。
+
+```bash
+cd ~/bly/state-action-cvae
+CVAE_DATASET_RUN=/home/helloworld/bly/runs/cvae_physics_dataset_v5 bash cvae_repro.sh build-long-horizon-dataset
+bash ~/bly/dagger/scripts/export_reference_table.sh
+CVAE_LONG_HORIZON_DATASET_RUN=<v5 长窗口 run> CVAE_REFERENCE_TABLE_RUN=<参考表 run> bash cvae_repro.sh build-reference-mixed-dataset
+CVAE_REFERENCE_DATASET_RUN=<混合数据集 run> CVAE_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_long_horizon_train_kl2_fp32_300k_20261016_005837_3380803/checkpoints/best.pt bash cvae_repro.sh reference-train-smoke
+```
+
 ### 下一步
 
-1. 渲染 8 个 motion 的 ghost 与单独视频（`SKIP_C=1`，运行中），按视频判断各策略的失败形态。
-2. 渲染结束后跑 `sonic-arch-check`（E0/E1），通过后再跑 `sonic-arch-6h`（E2），与 MLP 6h 对比。
-3. 启动 future-reference chunk CVAE DAgger 8h，与 10-step CVAE DAgger、MLP 在 rmse/survival 上对比。
-   两者 motion 集合不同（KL2 manifest vs 上面 8 个），对比时需注明。
-4. 启动 B+C（`cvae-kl2-pilot-future-ref-chunk-8h`，K=8、γ=0.9、k=4），与第 3 项的 K=k=1 对比，并用 `DAGGER_RENDER_POLICY=cvae` 渲染。
+1. 等 diag 跑完，看 rmse 是否明显低于 0.31，并核对 `manifests/dagger_cvae_kl2_early_stop.json`。
+2. 在 Ubuntu 执行 B 路线阶段 0/1：长窗口 manifest → 参考表（对齐校验必须通过）→ 混合数据集 → 2k smoke → 正式微调。
+3. C 微调期间在 Windows 实现阶段 2，C 完成后跑新 mode 的 round 0，重点看前 32 步分桶指标。
+4. 此前列出的 ghost 视频、`sonic-arch-check`→`sonic-arch-6h`、future-reference 8h 及其 B+C 8h 变体，本次未核对执行状态。
