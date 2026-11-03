@@ -959,6 +959,9 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/d
   `..._long_horizon_fp32.json` 完全一致；lr 5e-5、warmup 1000、kl_beta 0.002、beta warmup 1000、KL 段上限 100k 步、
   validation 5000 / full validation 与 checkpoint 20000。
 - `cvae_repro.sh` 新命令：`build-reference-mixed-dataset`、`reference-train-smoke`（2000 步）、`reference-train`。
+- 正式训练默认 200k 步：每 12500 步验证（共 16 次），75k/150k/200k 为 full（3 次，其余 13 次 summary）。summary 只写
+  jsonl，不存 checkpoint；full 写 `evaluations/step_*/` 诊断并更新 `last.pt`/`best.pt`。配置 `keep_best_reconstruction:
+  false` 不再保存 `best_reconstruction.pt`。`checkpoint_interval` 12500 只覆盖 `last.pt`。
 - 验证：Windows state-action-cvae 255 tests 中 254 通过（新增 `tests/test_reference_anchor_dataset.py` 3 个全过；
   `test_long_horizon_dataset` 在未改动的 HEAD 上同样失败，与本次无关）；dagger 76 tests 通过。Ubuntu 未执行。
 

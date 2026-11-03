@@ -664,6 +664,7 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
     intervals = {k: int(option(k, v)) for k, v in (("validation_interval", 1000), ("checkpoint_interval", 500), ("log_interval", 50))}
     full_validation_interval = int(option("full_validation_interval", intervals["validation_interval"]))
     skip_initial_eval = bool(options["skip_initial_eval"] or cfg.get("skip_initial_eval", False))
+    keep_best_reconstruction = bool(cfg.get("keep_best_reconstruction", True))
     if min(intervals.values()) < 1 or eval_batch_size < 1 or full_validation_interval < 1:
         raise ValueError("intervals must be positive")
     if full_validation_interval < intervals["validation_interval"] or full_validation_interval % intervals["validation_interval"]:
@@ -1059,11 +1060,12 @@ def _train(data, indices, dataset_run, run, config, code, stage_name, **options)
                 best_heldout_step = last_step
         reconstruction_improved = False
         if full_diagnostics:
-            reconstruction_score = reports.get("posterior_mean", primary)["total_loss"]
-            reconstruction_improved = reconstruction_score < best_reconstruction
-            if reconstruction_improved:
-                best_reconstruction = reconstruction_score
-                best_reconstruction_step = last_step
+            if keep_best_reconstruction:
+                reconstruction_score = reports.get("posterior_mean", primary)["total_loss"]
+                reconstruction_improved = reconstruction_score < best_reconstruction
+                if reconstruction_improved:
+                    best_reconstruction = reconstruction_score
+                    best_reconstruction_step = last_step
             # Commit last first. If interrupted between file replacements, its model
             # reconstructs a missing/stale best for this same step on resume.
             checkpoint_names = ["last.pt"]

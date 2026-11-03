@@ -58,11 +58,12 @@
     "lr_schedule": "cosine",
     "warmup_steps": 1000,
     "min_lr_ratio": 0.01,
-    "validation_interval": 5000,
-    "full_validation_interval": 20000,
+    "validation_interval": 12500,
+    "full_validation_interval": 75000,
     "skip_initial_eval": true,
     "summary_only_until_full": true,
-    "checkpoint_interval": 20000,
+    "checkpoint_interval": 12500,
+    "keep_best_reconstruction": false,
     "log_interval": 50,
     "weight_decay": 0.0,
     "posterior": {
@@ -72,7 +73,7 @@
       "max_optimizer_steps": 60000
     },
     "kl": {
-      "max_optimizer_steps": 100000,
+      "max_optimizer_steps": 200000,
       "beta": 0.002,
       "beta_warmup_steps": 1000
     }
