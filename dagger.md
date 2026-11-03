@@ -925,6 +925,15 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/d
 - 2026-11-03 首次 Ubuntu 执行在 `create_manager_env` 失败：`manager_env.config.save_rendering_dir` 的默认值引用
   Hydra 运行时（`HydraConfig was not set`）。导出现与 `dagger.cli` 一样显式设为 `<run>/renderings`。失败留下的
   `cvae_reference_table_v5_20261103_083943` 没有 marker，不可使用。
+- 第二次执行 `cvae_reference_table_v5_20261103_085154` 对齐失败（offset 0 最优，mean |Δpos| 0.0146 rad，但 max
+  |Δpos| 2.30、max |Δvel| 24.4）。原因有两个：
+  1. 校验读错了速度。recorder 把 SONIC 的扁平 `command_multi_future = [pos 10×29 | vel 10×29]` 直接 reshape 成
+     [10,58]，所以 `[:,0,29:58]` 是 +0.1 s 帧的位置；第 0 帧速度在扁平索引 290:319。
+  2. 导出走 motion lib 的训练加载路径（`is_evaluation=False`），sonic_release 打开的 `freeze_frame_aug`（每个 motion
+     10% 概率从随机帧起冻结）会改写参考；采集走 `load_motions_for_evaluation`，不做增强。导出现关闭
+     `freeze_frame_aug / cat_upper_body_poses / randomize_wrist_poses / randomize_heading`。该 run 不可使用。
+  - 报告新增 `motions_over_tolerance` 和 `worst_motions_pos`（offset 0 下每个 motion 的最大位置误差，前 10）。
+  - 遗留：DAgger 运行时同样走训练加载路径，在线参考也可能被 freeze-frame 增强改写，阶段 2 前需确认。
 - v5 长窗口 run 已建成：`cvae_long_horizon_dataset_20261103_083928`（586 group / 1484 window，全部 train，
   normalization sha256 `e498814e3b7cf30d22c3c5f277211a62e38799bfd4970ee3c5cb70420fb4ead5`）。
 - 参数：`CVAE_V5_PHYSICS_DATASET`（默认 `~/bly/runs/cvae_physics_dataset_v5`）、`CVAE_V5_MOTION_FILE`

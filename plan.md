@@ -416,7 +416,8 @@ train_motion_keys；评估为每轮 student-only 192 步、8 env，survival 粒�
   `..._diag_20261103_005142` 4 轮后早停：rmse 0.3739→0.3811，term 0.0642→0.0629，survival ≤0.08；比 12h round 4
   （0.3106 / 0.0490）更差。v4 回放不是主因，转向 B 路线。
 - B 路线 Ubuntu 进度：v5 长窗口 `cvae_long_horizon_dataset_20261103_083928` 已建成（1484 window）；参考表首次导出因
-  `save_rendering_dir` 依赖 Hydra 运行时失败，已修复待重跑。
+  `save_rendering_dir` 依赖 Hydra 运行时失败，已修复；第二次对齐失败（校验误读 recorder reshape 后的速度布局，
+  且导出 motion lib 带 freeze-frame 增强），两处已修复待重跑。DAgger 在线参考是否同样受增强影响，阶段 2 前确认。
 - B 路线：在 Physics v5 上用 50% 物理窗口 + 50% reference 锚点（h = min(t,32)，25% 截断）从 KL2 300k `best.pt`
   跨数据集微调 C；参考行只监督 Action 32..63 与 contact 33..64。参考表导出、混合数据集、训练入口与配置
   `posterior_hierarchical_standard_cvae_v5_reference_fp32.json` 已实现，Windows 测试通过（唯一失败项

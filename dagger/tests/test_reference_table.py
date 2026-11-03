@@ -29,9 +29,10 @@ def _write_episode(stream, name, table, motion, motion_step, shift):
     action_pos = table["states"][frames, :29] + table["nominal_joint_pos"]
     action_vel = table["states"][frames, 29:58]
     inverse = np.argsort(table["joint_ids"])
-    recorded = np.zeros((motion_step.size, 10, 58), dtype=np.float32)
-    recorded[:, 0, :29] = action_pos[:, inverse]
-    recorded[:, 0, 29:] = action_vel[:, inverse]
+    flat = np.zeros((motion_step.size, 580), dtype=np.float32)
+    flat[:, :29] = action_pos[:, inverse]
+    flat[:, 290:319] = action_vel[:, inverse]
+    recorded = flat.reshape(motion_step.size, 10, 58)
     group = stream.create_group(f"data/{name}")
     group.create_dataset("motion/motion_step", data=motion_step.astype(np.int64))
     group.create_dataset("reference/joint_pos_vel_future", data=recorded)

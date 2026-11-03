@@ -61,6 +61,8 @@ def alignment_check(
 ) -> dict:
     """Compare table frame motion_step[t]+d with HDF5 reference frame 0 at t.
 
+    The recorder reshapes SONIC's flat [pos 10x29 | vel 10x29] command to
+    [10,58], so frame-0 pos is flat[:29] and frame-0 vel is flat[290:319].
     The recorded reference is the motion lib's absolute dof order, so it is
     compared both raw and reordered by the action joint ids.
     """
@@ -80,6 +82,7 @@ def alignment_check(
         for name in columns_by_name
     }
     sums = {name: {offset: 0.0 for offset in OFFSETS} for name in columns_by_name}
+    motion_max: dict[str, float] = {}
     rows = 0
     clipped = 0
     handles: dict[str, h5py.File] = {}
@@ -94,9 +97,12 @@ def alignment_check(
                 handles[path] = h5py.File(path, "r")
             group = handles[path][f"data/{item['episode']}"]
             motion_step = np.asarray(group["motion/motion_step"], dtype=np.int64).reshape(-1)
-            recorded = np.asarray(group["reference/joint_pos_vel_future"][:, 0, :], dtype=np.float64)
-            if recorded.shape != (motion_step.shape[0], 58):
-                raise ValueError(f"{item['episode']}: unexpected reference shape {recorded.shape}")
+            future = np.asarray(group["reference/joint_pos_vel_future"], dtype=np.float64)
+            if future.shape != (motion_step.shape[0], 10, 58):
+                raise ValueError(f"{item['episode']}: unexpected reference shape {future.shape}")
+            flat = future.reshape(future.shape[0], -1)
+            recorded_pos = flat[:, :29]
+            recorded_vel = flat[:, 290:319]
             last = int(num_steps[motion]) - 1
             clipped += int(np.count_nonzero((motion_step < 0) | (motion_step > last)))
             rows += int(motion_step.shape[0])
@@ -105,12 +111,14 @@ def alignment_check(
                 pos = states[frame, :29].astype(np.float64) + nominal
                 vel = states[frame, 29:58].astype(np.float64)
                 for name, columns in columns_by_name.items():
-                    pos_diff = np.abs(pos - recorded[:, :29][:, columns])
-                    vel_diff = np.abs(vel - recorded[:, 29:58][:, columns])
+                    pos_diff = np.abs(pos - recorded_pos[:, columns])
+                    vel_diff = np.abs(vel - recorded_vel[:, columns])
                     sums[name][offset] += float(pos_diff.sum())
                     slot = errors[name][offset]
                     slot["pos"] = max(slot["pos"], float(pos_diff.max()))
                     slot["vel"] = max(slot["vel"], float(vel_diff.max()))
+                    if offset == 0 and name == "recorded_reindexed":
+                        motion_max[key] = max(motion_max.get(key, 0.0), float(pos_diff.max()))
     finally:
         for handle in handles.values():
             handle.close()
@@ -138,6 +146,8 @@ def alignment_check(
         },
         "matched_orders": matched,
         "best_offset": int(min(OFFSETS, key=lambda value: ranked[value])),
+        "motions_over_tolerance": sum(value > tolerance for value in motion_max.values()),
+        "worst_motions_pos": dict(sorted(motion_max.items(), key=lambda kv: -kv[1])[:10]),
     }
     report["pass"] = bool(matched) and report["best_offset"] == 0
     return report
@@ -186,6 +196,11 @@ def _export(args) -> Path:
     )
     release_config.manager_env.config.experiment_dir = str(run_dir)
     release_config.manager_env.config.save_rendering_dir = str(run_dir / "renderings")
+    # Collection loads motions with is_evaluation=True; the training load path used
+    # here would otherwise apply sonic_release's freeze-frame / upper-body augments.
+    motion_cfg = release_config.manager_env.commands.motion
+    for flag in ("freeze_frame_aug", "cat_upper_body_poses", "randomize_wrist_poses", "randomize_heading"):
+        motion_cfg[flag] = False
     reference_terms = [str(v) for v in release_config.algo.config.actor.backbone.encoders.g1.inputs]
     env = create_release_env(
         release_config, device=str(args.device), args_cli=args_cli, reference_terms=reference_terms
