@@ -851,7 +851,7 @@ cd ~/bly/dagger && nohup env DAGGER_CVAE_SHARD_TIMEOUT=3600 DAGGER_MAX_SHARDS=40
      eval 中每次 done 后历史清空，会反复经历这段。
 - Ubuntu 的 watch 脚本当时是旧版，显示的 "FINAL manifest exists" 是误报；现已改为匹配 `"complete": true`。
 
-#### diag：去掉 v4 回放续训（2026-11-02，Ubuntu 运行中）
+#### diag：去掉 v4 回放续训（2026-11-03 完成，round 3 早停）
 
 - mode `cvae-kl2-pilot-future-ref-chunk-diag`，配置 `configs/cvae_kl2_pilot_future_ref_chunk_diag.yaml`，相对 12h 只改：
   初始权重为 12h run 的 `checkpoints/round_04.pt`；`source_mix: 0.0`；6 轮，beta `[0.2, 0.1, 0.0]` 之后保持 0；
@@ -860,6 +860,19 @@ cd ~/bly/dagger && nohup env DAGGER_CVAE_SHARD_TIMEOUT=3600 DAGGER_MAX_SHARDS=40
 - 判读：rmse 明显低于 0.31 说明 v4 回放是主因；仍停在 0.31 附近则更可能是上面第 1、3 条的输入分布问题，由下面的 B 路线处理。
 - 首次启动立即退出：`run_dagger.sh` 的 `pgrep -af 'python -m dagger.cli'` 守卫瞬时匹配到别的终端里 watch 脚本执行的 pgrep，
   第二次 pgrep 找不到进程返回 1，`set -e` 退出。重新启动即可，守卫未修改。
+- 结果 `dagger_cvae_kl2_pilot_future_ref_chunk_diag_20261103_005142`（4 轮，1.24 h）：
+
+| round | beta | 分钟 | loss | rmse | survival | term |
+|---|---|---|---|---|---|---|
+| 0 | 0.2 | 10.9 | 0.02018 | 0.3739 | 0.00 | 0.0642 |
+| 1 | 0.1 | 20.9 | 0.02393 | 0.3757 | 0.00 | 0.0621 |
+| 2 | 0.0 | 21.1 | 0.02449 | 0.3538 | 0.08 | 0.0586 |
+| 3 | 0.0 | 21.5 | 0.03059 | 0.3811 | 0.08 | 0.0629 |
+
+- round 3 rmse 0.3811 > 0.98×0.3739，早停。去掉 v4 回放后 rmse 没有下降：一轮 beta 0.2、无回放的训练就让 rmse 从
+  12h round 4 的 0.3106 升到 0.3739，term 从 0.0490 升到 0.0642，训练 loss 也逐轮上升。
+- 结论：v4 回放不是主因，去掉后反而更差（回放可能起了约束作用）。剩下的输入分布问题（C 没见过 reference 未来和开局
+  左侧 padding）转由 B 路线验证。
 
 ```bash
 cd ~/bly/dagger && nohup env DAGGER_CVAE_SHARD_TIMEOUT=3600 bash scripts/run_dagger_auto.sh cvae-kl2-pilot-future-ref-chunk-diag > ~/bly/runs/dagger_diag_auto.log 2>&1 &
@@ -909,6 +922,11 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/d
   `manifests/reference_table_manifest.json`（schema `cvae_reference_table_v1`）和 `markers/cvae_reference_table.ok`。
 - 对齐校验在导出时自动执行：表中 `motion_step[t]+offset` 帧（offset ∈ {−1, 0, +1}）的关节位置/速度与 v5 HDF5 记录的
   reference 第 0 帧对比，容差 1e-4，要求 offset 0 最优且通过，否则报错且不写 marker。
+- 2026-11-03 首次 Ubuntu 执行在 `create_manager_env` 失败：`manager_env.config.save_rendering_dir` 的默认值引用
+  Hydra 运行时（`HydraConfig was not set`）。导出现与 `dagger.cli` 一样显式设为 `<run>/renderings`。失败留下的
+  `cvae_reference_table_v5_20261103_083943` 没有 marker，不可使用。
+- v5 长窗口 run 已建成：`cvae_long_horizon_dataset_20261103_083928`（586 group / 1484 window，全部 train，
+  normalization sha256 `e498814e3b7cf30d22c3c5f277211a62e38799bfd4970ee3c5cb70420fb4ead5`）。
 - 参数：`CVAE_V5_PHYSICS_DATASET`（默认 `~/bly/runs/cvae_physics_dataset_v5`）、`CVAE_V5_MOTION_FILE`
   （默认取 `latest_overfit_reference_motion_subset_run_dir.txt` 下的 `data/robot_filtered`）、`DAGGER_DEVICE`（默认 cuda:0）。
 

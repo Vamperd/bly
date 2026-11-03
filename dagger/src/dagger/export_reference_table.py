@@ -185,6 +185,7 @@ def _export(args) -> Path:
         sample_unique_motions=True,
     )
     release_config.manager_env.config.experiment_dir = str(run_dir)
+    release_config.manager_env.config.save_rendering_dir = str(run_dir / "renderings")
     reference_terms = [str(v) for v in release_config.algo.config.actor.backbone.encoders.g1.inputs]
     env = create_release_env(
         release_config, device=str(args.device), args_cli=args_cli, reference_terms=reference_terms

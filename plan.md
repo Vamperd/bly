@@ -413,7 +413,10 @@ train_motion_keys；评估为每轮 student-only 192 步、8 env，survival 粒�
 - 候选原因：300k C 由 v4 数据训练，从未见过 slot 33–64 的 reference 输入；v4 回放（source_mix 0.5）把模型拉回旧语义；
   开局前 32 步左侧 padding 叠加 reference 未来，C 训练中没有这种布局。
 - diag `cvae-kl2-pilot-future-ref-chunk-diag`：从 12h `round_04.pt` 续训，source_mix 0，6 轮，beta 0.2→0，term 容差 0.005。
-  Ubuntu 运行中，结果待回填。
+  `..._diag_20261103_005142` 4 轮后早停：rmse 0.3739→0.3811，term 0.0642→0.0629，survival ≤0.08；比 12h round 4
+  （0.3106 / 0.0490）更差。v4 回放不是主因，转向 B 路线。
+- B 路线 Ubuntu 进度：v5 长窗口 `cvae_long_horizon_dataset_20261103_083928` 已建成（1484 window）；参考表首次导出因
+  `save_rendering_dir` 依赖 Hydra 运行时失败，已修复待重跑。
 - B 路线：在 Physics v5 上用 50% 物理窗口 + 50% reference 锚点（h = min(t,32)，25% 截断）从 KL2 300k `best.pt`
   跨数据集微调 C；参考行只监督 Action 32..63 与 contact 33..64。参考表导出、混合数据集、训练入口与配置
   `posterior_hierarchical_standard_cvae_v5_reference_fp32.json` 已实现，Windows 测试通过（唯一失败项
