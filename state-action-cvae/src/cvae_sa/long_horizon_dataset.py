@@ -20,6 +20,7 @@ from torch.utils.data import Dataset
 
 from .dataset import WindowRef
 from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
+from .path_mapping import resolve_dataset_path
 
 
 VERSION = "sonic_long_horizon_state_action_dataset_v1"
@@ -271,7 +272,7 @@ class LongHorizonWindowDataset(Dataset[dict[str, Any]]):
     """T64 samples addressed by the derived long-horizon window manifest."""
 
     def __init__(self, dataset_run: Path, split: str = "train", include_tail: bool = True) -> None:
-        self.dataset_run = dataset_run.expanduser().resolve()
+        self.dataset_run = resolve_dataset_path(dataset_run).resolve()
         self.manifest = load_json(self.dataset_run / "manifests" / "dataset_manifest.json")
         if self.manifest.get("schema_version") != VERSION:
             raise ValueError("unsupported long-horizon dataset manifest")
@@ -281,7 +282,7 @@ class LongHorizonWindowDataset(Dataset[dict[str, Any]]):
         if not self.windows:
             raise ValueError(f"split {split!r} has no long-horizon windows")
         from .dataset import StateActionWindowDataset
-        source_run = Path(self.manifest["source_dataset_run"])
+        source_run = resolve_dataset_path(self.manifest["source_dataset_run"])
         self.source = StateActionWindowDataset(source_run, split, 64, 64, max_episodes=None, random_crop=False)
         # replay65 and a few read-only dataset utilities use the fixed-window
         # reference contract to locate adjacent T64 chunks.  Keep the derived

@@ -1,5 +1,10 @@
 # CVAE 必要异常与根因诊断
 
+服务器迁移诊断补充：迁入新目录后，仅改启动环境变量不能修复 manifest 内的
+`/home/helloworld/bly/runs/...` 绝对引用。当前增加显式读取时前缀映射，保留源索引字节和
+逻辑 episode identity，避免直接替换 JSON 导致 hash/fixture 身份变化。Windows 无 h5py/omegaconf，
+对应集成验证应在服务器执行；preflight 的 CUDA 张量测试也不等同于 Isaac simulator smoke。
+
 最后更新：2026-10-26。本文只记录会影响实验判断的反常结果、证据、候选原因和验证边界，
 不复制常规训练流水或整体实验路线。路线与概要结果见 [plan.md](plan.md)，模型合同见 [model.md](model.md)，
 DAgger命令见 [dagger.md](dagger.md)。10-history新路线见plan.md开头与§23；其质量证据必须与旧T64/CVAE结果分开记录，

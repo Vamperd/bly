@@ -113,6 +113,38 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+SOURCE_CACHE_KEYS = (
+    "physical_state",
+    "action",
+    "valid_state",
+    "valid_action",
+    "motion_key",
+    "variant_id",
+    "window_start",
+    "episode_ref",
+)
+REFERENCE_CACHE_KEYS = SOURCE_CACHE_KEYS + ("target_action_valid", "target_contact_valid")
+
+
+def _cache_samples(
+    dataset: Any, keys: tuple[str, ...], size: int, *, spread: bool, label: str
+) -> list[dict[str, Any]]:
+    total = len(dataset)
+    limit = min(total, int(size))
+    if spread and limit > 0:
+        # Evenly spaced rows cover all motions; a prefix would hold only the first few.
+        indices = np.linspace(0, total - 1, limit).round().astype(np.int64).tolist()
+    else:
+        indices = list(range(limit))
+    cache = []
+    for count, index in enumerate(indices, start=1):
+        sample = dataset[int(index)]
+        cache.append({key: sample[key] for key in keys if key in sample})
+        if count % 128 == 0 or count == limit:
+            print(f"[dagger] cvae {label} cache {count}/{limit}", flush=True)
+    return cache
+
+
 class CvaeStudentAdapter:
     """Wrap the existing CVAE without copying or modifying its source code."""
 
@@ -195,6 +227,8 @@ class CvaeStudentAdapter:
             else None
         )
         self._source_cache: list[dict[str, Any]] | None = None
+        self._reference_dataset = None
+        self._reference_cache: list[dict[str, Any]] | None = None
         self.source_mix_exact = bool(self.source_identity.get("source_mix_exact", False))
         self.source_hash_mismatch: str | None = None
         self.state_weight = float(state_weight)
@@ -211,8 +245,8 @@ class CvaeStudentAdapter:
         self.global_step = 0
         if self.source_mix_mode not in {"random", "alternate"}:
             raise ValueError("source_mix_mode must be random or alternate")
-        if self.source_dataset_kind not in {"long_horizon", "base"}:
-            raise ValueError("source_dataset_kind must be long_horizon or base")
+        if self.source_dataset_kind not in {"long_horizon", "base", "reference_mixed"}:
+            raise ValueError("source_dataset_kind must be long_horizon, base or reference_mixed")
         if self.source_mask_mode not in {"fixed", "dynamic"}:
             raise ValueError("source_mask_mode must be fixed or dynamic")
         if self.teacher_mode not in {"dual", "posterior_sample"}:
@@ -223,6 +257,8 @@ class CvaeStudentAdapter:
             raise ValueError("source_mix must be in [0,1]")
         if not 0.0 <= self.source_causal_fraction <= 1.0:
             raise ValueError("source_causal_fraction must be in [0,1]")
+        if self.source_dataset_kind == "reference_mixed" and self.source_causal_fraction > 0.0:
+            raise ValueError("reference_mixed source already carries reference rows; set source_causal_fraction=0")
 
         self.normalization_run = Path(normalization_run).expanduser().resolve()
         self.source_dataset_run = Path(
@@ -272,6 +308,7 @@ class CvaeStudentAdapter:
             self.model_config,
             checkpoint_identity,
             checkpoint_contract,
+            self.train_motion_keys,
         ) = self._load_model(
             self.checkpoint_path,
             Path(model_config).expanduser().resolve(),
@@ -287,8 +324,10 @@ class CvaeStudentAdapter:
             "checkpoint_stage": self.checkpoint_stage,
             "training_contract": checkpoint_contract,
             "model_config": self.model_config,
+            "c_train_motion_keys": list(self.train_motion_keys),
         }
         self.source_mix_exact = bool(self.source_identity.get("source_mix_exact", False))
+        self.reference_fraction = float(checkpoint_contract.get("reference_fraction") or 0.5)
         self.model.eval()
         self.peak_learning_rate = float(learning_rate)
         self.minimum_learning_rate = self.peak_learning_rate * self.min_lr_ratio
@@ -382,6 +421,12 @@ class CvaeStudentAdapter:
             model_config,
             dict(payload.get("dataset_identity") or {}),
             dict(payload.get("training_contract") or {}),
+            sorted(
+                str(key)
+                for key in payload.get("train_motion_keys")
+                or (payload.get("source_identity") or {}).get("c_train_motion_keys")
+                or []
+            ),
         )
 
     def reset(self, num_envs: int, current_state: torch.Tensor) -> None:
@@ -645,7 +690,7 @@ class CvaeStudentAdapter:
                 "source dataset normalization hash does not match the checkpoint "
                 f"normalization: {source_norm}"
             )
-        if self.source_dataset_kind == "long_horizon":
+        if self.source_dataset_kind in {"long_horizon", "reference_mixed"}:
             from cvae_sa.long_horizon_dataset import LongHorizonWindowDataset
 
             expected_windows = self.source_identity.get("long_horizon_windows_sha256")
@@ -677,6 +722,8 @@ class CvaeStudentAdapter:
             self._source_dataset = LongHorizonWindowDataset(
                 self.source_dataset_run, split="train", include_tail=True
             )
+            if self.source_dataset_kind == "reference_mixed":
+                self._load_reference_dataset()
         else:
             from cvae_sa.dataset import StateActionWindowDataset
 
@@ -698,7 +745,15 @@ class CvaeStudentAdapter:
                     "long_horizon_windows_sha256"
                 ),
             }
+            mixed = self.source_dataset_kind == "reference_mixed"
+            if mixed:
+                cache_identity["format_version"] = "dagger_cvae_source_cache_v2"
+                cache_identity["reference_anchor_windows_sha256"] = self.source_identity.get(
+                    "reference_anchor_windows_sha256"
+                )
+                cache_identity["cache_index_rule"] = "evenly_spaced"
             cache: list[dict[str, Any]] | None = None
+            reference_cache: list[dict[str, Any]] | None = None
             if self.source_cache_path is not None and self.source_cache_path.is_file():
                 try:
                     payload = torch.load(
@@ -710,8 +765,10 @@ class CvaeStudentAdapter:
                         isinstance(payload, dict)
                         and payload.get("identity") == cache_identity
                         and isinstance(payload.get("samples"), list)
+                        and (not mixed or isinstance(payload.get("reference_samples"), list))
                     ):
                         cache = payload["samples"]
+                        reference_cache = payload.get("reference_samples") if mixed else None
                         print(
                             f"[dagger] cvae source cache loaded "
                             f"{len(cache)} from {self.source_cache_path}",
@@ -723,28 +780,23 @@ class CvaeStudentAdapter:
                         flush=True,
                     )
             if cache is None:
-                limit = min(len(self._source_dataset), self.source_cache_size)
-                cache = []
-                cache_keys = (
-                    "physical_state",
-                    "action",
-                    "valid_state",
-                    "valid_action",
-                    "motion_key",
-                    "variant_id",
-                    "window_start",
-                    "episode_ref",
+                cache = _cache_samples(
+                    self._source_dataset,
+                    SOURCE_CACHE_KEYS,
+                    self.source_cache_size,
+                    spread=mixed,
+                    label="source",
                 )
-                for index in range(limit):
-                    sample = self._source_dataset[index]
-                    cache.append(
-                        {key: sample[key] for key in cache_keys if key in sample}
+                payload = {"identity": cache_identity, "samples": cache}
+                if mixed:
+                    reference_cache = _cache_samples(
+                        self._reference_dataset,
+                        REFERENCE_CACHE_KEYS,
+                        self.source_cache_size,
+                        spread=True,
+                        label="reference",
                     )
-                    if (index + 1) % 128 == 0 or index + 1 == limit:
-                        print(
-                            f"[dagger] cvae source cache {index + 1}/{limit}",
-                            flush=True,
-                        )
+                    payload["reference_samples"] = reference_cache
                 if self.source_cache_path is not None:
                     self.source_cache_path.parent.mkdir(
                         parents=True, exist_ok=True
@@ -753,32 +805,87 @@ class CvaeStudentAdapter:
                         f"{self.source_cache_path.name}.tmp.{os.getpid()}"
                     )
                     try:
-                        torch.save(
-                            {"identity": cache_identity, "samples": cache},
-                            temporary,
-                        )
+                        torch.save(payload, temporary)
                         os.replace(temporary, self.source_cache_path)
                     finally:
                         if temporary.exists():
                             temporary.unlink()
             self._source_cache = cache
+            self._reference_cache = reference_cache
         self.source_identity["source_mix_exact"] = bool(self.source_mix_exact)
         self.source_identity["source_hash_mismatch"] = self.source_hash_mismatch
         return self._source_dataset
 
-    def _source_batch(self, generator: torch.Generator) -> dict[str, torch.Tensor]:
-        dataset = self._load_source_dataset()
-        if dataset is None or len(dataset) == 0:
+    def _load_reference_dataset(self) -> None:
+        from cvae_sa.reference_anchor_dataset import ReferenceAnchorDataset
+
+        dataset = ReferenceAnchorDataset(self.source_dataset_run, "train")
+        manifest = dataset.manifest
+        if str(manifest.get("normalization_sha256")) != self.normalization_sha256:
+            dataset.close()
+            raise ValueError("reference mixed dataset normalization differs from the checkpoint")
+        expected = self.source_identity.get("reference_anchor_windows_sha256")
+        actual = str(manifest["anchor_windows_sha256"])
+        if expected and actual != str(expected):
+            if self.source_mix_exact:
+                dataset.close()
+                raise ValueError(
+                    f"reference anchor windows hash does not match: {actual} != {expected}"
+                )
+            self.source_hash_mismatch = f"reference_anchors: {actual} != {expected}"
+            self.source_mix_exact = False
+        self.source_identity["reference_anchor_windows_sha256"] = actual
+        self._reference_dataset = dataset
+
+    @staticmethod
+    def _draw(
+        cache: list[dict[str, Any]] | None,
+        dataset: Any,
+        count: int,
+        generator: torch.Generator,
+    ) -> dict[str, Any]:
+        rows = cache if cache is not None else dataset
+        if rows is None or len(rows) == 0:
             raise RuntimeError("source CVAE dataset is unavailable")
-        if self._source_cache is not None:
-            indices = torch.randint(
-                len(self._source_cache), (self.batch_size,), generator=generator
-            ).tolist()
-            return default_collate([self._source_cache[index] for index in indices])
-        indices = torch.randint(
-            len(dataset), (self.batch_size,), generator=generator
-        ).tolist()
-        return default_collate([dataset[index] for index in indices])
+        indices = torch.randint(len(rows), (int(count),), generator=generator).tolist()
+        return default_collate([rows[index] for index in indices])
+
+    def _source_batch(self, generator: torch.Generator) -> dict[str, Any]:
+        dataset = self._load_source_dataset()
+        if self.source_dataset_kind != "reference_mixed":
+            return self._draw(self._source_cache, dataset, self.batch_size, generator)
+        reference_count = int(round(self.batch_size * self.reference_fraction))
+        if not 0 < reference_count < self.batch_size:
+            raise ValueError("reference_fraction must leave physical and reference rows in each batch")
+        return {
+            "physical": self._draw(
+                self._source_cache, dataset, self.batch_size - reference_count, generator
+            ),
+            "reference": self._draw(
+                self._reference_cache, self._reference_dataset, reference_count, generator
+            ),
+        }
+
+    def _reference_mixed_inputs(
+        self, physical: dict[str, Any], reference: dict[str, Any]
+    ) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Same rows/masks as the C reference-anchor fine-tune: masks per half, then merge."""
+
+        from cvae_sa.cvae_training import merge_batches
+        from cvae_sa.posterior_t64_protocol import make_physical_masks, make_reference_masks
+
+        dynamic_step = self.global_step if self.source_mask_mode == "dynamic" else None
+        sm, am, _ = make_physical_masks(physical, self.mask_seed, dynamic_step=dynamic_step)
+        lsm = physical["valid_state"].bool()[..., None].expand_as(physical["physical_state"])
+        lam = physical["valid_action"].bool()[..., None].expand_as(physical["action"])
+        rsm, ram, rlsm, rlam = make_reference_masks(reference)
+        return (
+            merge_batches(physical, reference),
+            torch.cat((sm, rsm)),
+            torch.cat((am, ram)),
+            torch.cat((lsm, rlsm)),
+            torch.cat((lam, rlam)),
+        )
 
     def _source_loss(
         self, batch: dict[str, torch.Tensor], generator: torch.Generator
@@ -789,13 +896,18 @@ class CvaeStudentAdapter:
         )
         from cvae_sa.posterior_t64_protocol import make_physical_masks
 
+        mixed = "physical" in batch and "reference" in batch
+        if mixed:
+            batch, sm, am, lsm, lam = self._reference_mixed_inputs(
+                batch["physical"], batch["reference"]
+            )
         batch = {
             key: value.to(self.device) if isinstance(value, torch.Tensor) else value
             for key, value in batch.items()
         }
         valid_state = batch["valid_state"].bool()
         valid_action = batch["valid_action"].bool()
-        use_causal = (
+        use_causal = not mixed and (
             self.source_causal_fraction > 0.0
             and float(torch.rand((), generator=generator).item())
             < self.source_causal_fraction
@@ -804,7 +916,10 @@ class CvaeStudentAdapter:
             valid_state[:, ANCHOR + 1 :].any() or valid_action[:, ANCHOR].any()
         ):
             use_causal = False
-        if use_causal and self.future_reference:
+        if mixed:
+            lsm, lam = lsm.to(self.device), lam.to(self.device)
+            masked_weight, full_weight = 1.0, 0.0
+        elif use_causal and self.future_reference:
             sm, am, lsm, _ = reference_masks(
                 int(valid_state.shape[0]),
                 device=self.device,
@@ -848,6 +963,7 @@ class CvaeStudentAdapter:
             "source_contact": float(reconstruction["contact"].detach()),
             "source_kl": float(kl.detach()),
             "source_causal": float(use_causal),
+            "source_reference": float(mixed),
         }
 
     @staticmethod

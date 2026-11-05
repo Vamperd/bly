@@ -1,5 +1,10 @@
 # 65-token 层级 CVAE：活动模型与实验合同
 
+服务器迁移合同补充：`CVAE_DATASET_PATH_MAP` 为 JSON 绝对路径前缀映射，只在
+StateActionWindowDataset、LongHorizonWindowDataset、ReferenceAnchorDataset 打开实际文件时使用。
+源 manifest/index/anchor/normalization 文件不重写，`source_run`/`episode_ref` 和稳定采样 identity 不变；
+源哈希及 checkpoint normalization 检查保持启用。该适配不改变模型、loss 或部署路线，也不赋予 DDP 能力。
+
 最后更新：2026-10-30。C 已完成训练但标准正态部署质量未通过；实验结果见[plan.md](plan.md)，异常证据见[process.md](process.md)。
 
 模型架构版本保持 `65-token-hierarchical-standard-cvae-v1`；实验协议为

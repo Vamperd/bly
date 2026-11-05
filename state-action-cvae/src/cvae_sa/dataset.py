@@ -28,6 +28,7 @@ from .physics_schema import (
 )
 from .schema import load_schema, raw_action_to_relative, resolve_parameter
 from .util import file_sha256, load_json
+from .path_mapping import resolve_dataset_path
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,7 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
         action_energy_top_fraction: float = 0.25,
     ) -> None:
         super().__init__()
-        self.dataset_run = dataset_run.expanduser().resolve()
+        self.dataset_run = resolve_dataset_path(dataset_run).resolve()
         marker = self.dataset_run / "markers" / "cvae_dataset.ok"
         if not marker.is_file():
             raise FileNotFoundError(f"dataset marker is missing: {marker}")
@@ -211,14 +212,15 @@ class StateActionWindowDataset(Dataset[dict[str, Any]]):
     def _handle(self, path: str) -> h5py.File:
         handle = self._hdf_handles.get(path)
         if handle is None:
-            handle = h5py.File(path, "r")
+            handle = h5py.File(resolve_dataset_path(path), "r")
             self._hdf_handles[path] = handle
         return handle
 
     def _schema(self, path: str) -> dict[str, Any]:
         schema = self._schema_cache.get(path)
         if schema is None:
-            schema = load_physics_schema(Path(path)) if self.physics_v3 else load_schema(Path(path))
+            resolved = resolve_dataset_path(path)
+            schema = load_physics_schema(resolved) if self.physics_v3 else load_schema(resolved)
             self._schema_cache[path] = schema
         return schema
 

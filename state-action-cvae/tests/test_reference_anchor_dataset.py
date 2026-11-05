@@ -1,6 +1,9 @@
 import json
 import tempfile
+import shutil
+import os
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +56,38 @@ def write_reference_table(root: Path, physics: Path) -> Path:
 
 @unittest.skipUnless(h5py is not None, "requires h5py")
 class ReferenceAnchorDatasetTests(unittest.TestCase):
+    def test_migration_preserves_bytes_identities_and_samples(self):
+        from cvae_sa.long_horizon_dataset import LongHorizonWindowDataset
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = root / "old"
+            old.mkdir()
+            mixed = self.build(old, 0.25)
+            original = ReferenceAnchorDataset(mixed, "train")
+            physical = LongHorizonWindowDataset(mixed, "train")
+            try:
+                expected, expected_physical = original[0], physical[0]
+            finally:
+                original.close()
+                physical.close()
+            new = root / "migrated"
+            shutil.copytree(old, new)
+            manifest_bytes = (new / "mixed/manifests/reference_mixed_manifest.json").read_bytes()
+            # The old IO location really is unavailable: this cannot pass by fallback.
+            old.rename(root / "original_unavailable")
+            with patch.dict(os.environ, {"CVAE_DATASET_PATH_MAP": json.dumps({str(old): str(new)})}):
+                for cls, baseline in ((ReferenceAnchorDataset, expected), (LongHorizonWindowDataset, expected_physical)):
+                    dataset = cls(old / "mixed", "train")
+                    try:
+                        actual = dataset[0]
+                        self.assertEqual(actual["episode_ref"], baseline["episode_ref"])
+                        torch.testing.assert_close(actual["physical_state"], baseline["physical_state"])
+                        torch.testing.assert_close(actual["action"], baseline["action"])
+                    finally:
+                        dataset.close()
+            self.assertEqual((new / "mixed/manifests/reference_mixed_manifest.json").read_bytes(), manifest_bytes)
+
     def build(self, root: Path, probability: float, name: str = "mixed") -> Path:
         physics, long_run = root / "physics", root / "long"
         if not physics.exists():

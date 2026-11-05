@@ -4,16 +4,17 @@ set -u
 
 MODE="${1:-mlp-pilot}"
 case "$MODE" in
-  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-future-ref-chunk-diag|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal) ;;
+  mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-future-ref-chunk-diag|cvae-kl2-pilot-v5ref-12h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal) ;;
   *)
-    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-future-ref-chunk-diag|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal" >&2
+    echo "Usage: $0 mlp-pilot|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-future-ref-chunk-diag|cvae-kl2-pilot-v5ref-12h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal" >&2
     exit 2
     ;;
 esac
 
 DAGGER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$HOME/bly/runs}"
-PYTHON="${PYTHON:-$HOME/bly/sonic-repro/.venv-sonic/bin/python}"
+PROJECT_ROOT="${BLY_PROJECT_ROOT:-$(cd "$DAGGER_ROOT/.." && pwd)}"
+SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$PROJECT_ROOT/runs}"
+PYTHON="${PYTHON:-$PROJECT_ROOT/sonic-repro/.venv-sonic/bin/python}"
 if [[ -n "${DAGGER_SHARD_ROUNDS:-}" ]]; then
   SHARD_ROUNDS="$DAGGER_SHARD_ROUNDS"
 elif [[ "$MODE" == cvae-kl2-* ]]; then

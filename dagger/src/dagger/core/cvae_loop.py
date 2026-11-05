@@ -9,7 +9,26 @@ import hashlib
 import torch
 
 from dagger.core.cvae_dataset import CvaeDaggerDataset, CvaeDaggerRound
-from dagger.runtime.cvae_window import build_training_window
+from dagger.runtime.cvae_window import ANCHOR, build_training_window
+
+
+EVAL_HISTORY_STEPS = ANCHOR
+FALL_STEP_EDGES = (32, 64, 128, 192)
+
+
+def fall_step_histogram(lengths: list[float]) -> dict[str, int]:
+    """Count terminated episodes by length bucket ``[lo, hi)``; the last bucket is open."""
+    edges = (0, *FALL_STEP_EDGES)
+    counts = {f"[{lo},{hi})": 0 for lo, hi in zip(edges[:-1], edges[1:])}
+    counts[f"[{edges[-1]},inf)"] = 0
+    for length in lengths:
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            if lo <= length < hi:
+                counts[f"[{lo},{hi})"] += 1
+                break
+        else:
+            counts[f"[{edges[-1]},inf)"] += 1
+    return counts
 
 
 class CvaeDaggerLoop:
@@ -662,6 +681,10 @@ class CvaeDaggerLoop:
         executed_abs_max = 0.0
         clip_error_max = 0.0
         per_motion: dict[str, dict[str, float]] = {}
+        # Episode-step buckets: [0, ANCHOR) has a left-padded history, [ANCHOR, inf) a full one.
+        bucket_sse = {"early": 0.0, "late": 0.0}
+        bucket_normalized_sse = {"early": 0.0, "late": 0.0}
+        bucket_rows = {"early": 0, "late": 0}
         for step_index in range(int(steps)):
             motion_ids = self._motion_ids()
             self._push_reference()
@@ -694,6 +717,11 @@ class CvaeDaggerLoop:
             env_canonical_mse = error_canonical.square().mean(dim=-1)
             env_raw_mse = error_raw.square().mean(dim=-1)
             env_normalized_mse = error_normalized.square().mean(dim=-1)
+            early = episode_steps < float(EVAL_HISTORY_STEPS)
+            for name, rows in (("early", early), ("late", ~early)):
+                bucket_sse[name] += float(env_canonical_mse[rows].sum().item())
+                bucket_normalized_sse[name] += float(env_normalized_mse[rows].sum().item())
+                bucket_rows[name] += int(rows.sum().item())
             for index in range(self.num_envs):
                 key = self._motion_key(int(motion_ids[index].item()))
                 record = per_motion.setdefault(
@@ -783,6 +811,22 @@ class CvaeDaggerLoop:
             )
             ** 0.5,
             "teacher_action_rmse_by_motion": by_motion,
+            "teacher_action_rmse_by_episode_step": {
+                name: {
+                    "episode_steps": (
+                        f"[0,{EVAL_HISTORY_STEPS})" if name == "early" else f"[{EVAL_HISTORY_STEPS},inf)"
+                    ),
+                    "rows": float(bucket_rows[name]),
+                    "teacher_action_rmse": (bucket_sse[name] / max(1, bucket_rows[name])) ** 0.5,
+                    "teacher_action_rmse_normalized": (
+                        bucket_normalized_sse[name] / max(1, bucket_rows[name])
+                    )
+                    ** 0.5,
+                }
+                for name in ("early", "late")
+            },
+            "fall_steps": sorted(episode_lengths),
+            "fall_step_histogram": fall_step_histogram(episode_lengths),
             "termination_rate": done_count / max(1, int(steps) * self.num_envs),
             "mean_episode_length": (
                 sum(episode_lengths) / len(episode_lengths)

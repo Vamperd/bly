@@ -15,6 +15,7 @@ case "$MODE" in
   cvae-kl2-pilot-future-ref-chunk-8h) CONFIG_MODE="cvae_kl2_pilot_future_ref_chunk_8h" ;;
   cvae-kl2-pilot-future-ref-chunk-12h) CONFIG_MODE="cvae_kl2_pilot_future_ref_chunk_12h" ;;
   cvae-kl2-pilot-future-ref-chunk-diag) CONFIG_MODE="cvae_kl2_pilot_future_ref_chunk_diag" ;;
+  cvae-kl2-pilot-v5ref-12h) CONFIG_MODE="cvae_kl2_pilot_v5ref_12h" ;;
   cvae-kl2-pilot-dagger-v2) CONFIG_MODE="cvae_kl2_pilot_dagger_v2" ;;
   cvae-kl2-pilot-dagger-v2-2m) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m" ;;
   cvae-kl2-pilot-dagger-v2-2m-2h) CONFIG_MODE="cvae_kl2_pilot_dagger_v2_2m_2h" ;;
@@ -36,16 +37,17 @@ case "$MODE" in
   sonic-arch-check) CONFIG_MODE="mlp_sonic_arch_teacher_init" ;;
   sonic-arch-6h) CONFIG_MODE="mlp_sonic_arch_6h" ;;
   *)
-    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-future-ref-chunk-diag|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|sonic-causal-8h|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|mlp-render|sonic-arch-check|sonic-arch-6h" >&2
+    echo "Usage: $0 smoke|pilot|cvae-smoke|cvae-pilot|cvae-kl2-smoke|cvae-kl2-pilot|cvae-kl2-pilot-intensive|cvae-kl2-pilot-intensive-8h|cvae-kl2-pilot-future-ref-8h|cvae-kl2-pilot-future-ref-chunk-8h|cvae-kl2-pilot-future-ref-chunk-12h|cvae-kl2-pilot-future-ref-chunk-diag|cvae-kl2-pilot-v5ref-12h|cvae-kl2-pilot-dagger-v2|cvae-kl2-pilot-dagger-v2-2m|cvae-kl2-pilot-dagger-v2-2m-2h|cvae-kl2-formal|sonic-causal-smoke|sonic-causal-pilot|sonic-causal-8h|mlp-smoke|mlp-pilot|mlp-debug|mlp-scale|mlp-repro|mlp-long|mlp-intensive|mlp-dynamic2|mlp-causal-motions|mlp-causal-6h|mlp-render|sonic-arch-check|sonic-arch-6h" >&2
   exit 2
     ;;
 esac
 
 DAGGER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SONIC_REPO_ROOT="${SONIC_REPO_ROOT:-$HOME/bly/sonic-repro/GR00T-WholeBodyControl}"
+PROJECT_ROOT="${BLY_PROJECT_ROOT:-$(cd "$DAGGER_ROOT/.." && pwd)}"
+SONIC_REPO_ROOT="${SONIC_REPO_ROOT:-$PROJECT_ROOT/sonic-repro/GR00T-WholeBodyControl}"
 SONIC_TEACHER_CHECKPOINT="${SONIC_TEACHER_CHECKPOINT:-$SONIC_REPO_ROOT/sonic_release/last.pt}"
-SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$HOME/bly/runs}"
-STATE_ACTION_CVAE_ROOT="${STATE_ACTION_CVAE_ROOT:-$HOME/bly/state-action-cvae}"
+SONIC_RUNS_ROOT="${SONIC_RUNS_ROOT:-$PROJECT_ROOT/runs}"
+STATE_ACTION_CVAE_ROOT="${STATE_ACTION_CVAE_ROOT:-$PROJECT_ROOT/state-action-cvae}"
 if [[ ( "$MODE" == sonic-causal-* || "$MODE" == mlp-causal-* || "$MODE" == sonic-arch-* || ( "$MODE" == mlp-render && ( "${DAGGER_RENDER_POLICY:-}" == sonic_causal || "${DAGGER_RENDER_POLICY:-}" == sonic_arch ) ) ) && -z "${DAGGER_MOTION_FILE:-}" ]]; then
   # C training data comes from the Physics v5 reference subset; DAgger motions must be loadable from it.
   REFERENCE_SUBSET_POINTER="$SONIC_RUNS_ROOT/latest_overfit_reference_motion_subset_run_dir.txt"
@@ -78,7 +80,7 @@ DAGGER_RENDER_LATENT_MODE="${DAGGER_RENDER_LATENT_MODE:-fixed_standard_normal}"
 export DAGGER_ROOT SONIC_REPO_ROOT SONIC_TEACHER_CHECKPOINT SONIC_RUNS_ROOT STATE_ACTION_CVAE_ROOT DAGGER_MOTION_FILE DAGGER_RESUME_RUN DAGGER_ROUNDS_PER_PROCESS DAGGER_RENDER_CHECKPOINT DAGGER_RENDER_STEPS DAGGER_RENDER_MOTION_KEY DAGGER_RENDER_POLICY DAGGER_RENDER_CONFIG DAGGER_RENDER_LATENT_MODE
 export PYTHONPATH="$DAGGER_ROOT/src:$STATE_ACTION_CVAE_ROOT/src:$SONIC_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
-PYTHON="${PYTHON:-$HOME/bly/sonic-repro/.venv-sonic/bin/python}"
+PYTHON="${PYTHON:-$PROJECT_ROOT/sonic-repro/.venv-sonic/bin/python}"
 [[ -x "$PYTHON" ]] || {
   echo "Python executable is missing or not executable: $PYTHON" >&2
   exit 2
@@ -155,6 +157,15 @@ if [[ "$MODE" == cvae-smoke || "$MODE" == cvae-pilot ]]; then
   }
 fi
 
+if [[ "$MODE" == cvae-kl2-pilot-v5ref-* && -z "${CVAE_KL2_MOTION_FILE:-}" ]]; then
+  # The v5 reference table was exported from the Physics v5 reference subset; online references must match it.
+  REFERENCE_SUBSET_POINTER="$SONIC_RUNS_ROOT/latest_overfit_reference_motion_subset_run_dir.txt"
+  test -s "$REFERENCE_SUBSET_POINTER" || {
+    echo "Set CVAE_KL2_MOTION_FILE or create $REFERENCE_SUBSET_POINTER" >&2
+    exit 2
+  }
+  CVAE_KL2_MOTION_FILE="$(<"$REFERENCE_SUBSET_POINTER")/data/robot_filtered"
+fi
 if [[ "$MODE" == cvae-kl2-* ]]; then
   export CVAE_KL2_MOTION_FILE="${CVAE_KL2_MOTION_FILE:-/home/helloworld/bly/runs/bones_seed_ingest_2048_20260825_132447/data/robot_filtered}"
   test -d "$CVAE_KL2_MOTION_FILE" || {
@@ -165,6 +176,8 @@ if [[ "$MODE" == cvae-kl2-* ]]; then
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_2m.json}"
   elif [[ "$MODE" == cvae-kl2-pilot-future-ref-chunk-12h || "$MODE" == cvae-kl2-pilot-future-ref-chunk-diag ]]; then
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_12m.json}"
+  elif [[ "$MODE" == cvae-kl2-pilot-v5ref-* ]]; then
+    export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest_v5.json}"
   else
     export DAGGER_MOTION_MANIFEST="${DAGGER_MOTION_MANIFEST:-$DAGGER_ROOT/configs/cvae_kl2_motion_manifest.json}"
   fi

@@ -131,6 +131,11 @@ def _motion_info(config, sonic_root: Path) -> dict:
     }
 
 
+def _motion_augmentation_disabled(config) -> bool:
+    value = str(config.dagger.get("disable_motion_augmentation", False)).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def _render_disables_tracking_terminations(config) -> bool:
     if str(config.mode) != "mlp_render":
         return False
@@ -168,6 +173,8 @@ def _prepare_release_env(config, run_dir: Path) -> dict:
         for key in dropped:
             del terminations_cfg[key]
         print(f"[dagger] render tracking terminations disabled: {dropped}", flush=True)
+    if _motion_augmentation_disabled(config):
+        _disable_motion_augmentation(release_config)
     release_config.manager_env.config.experiment_dir = str(run_dir)
     release_config.manager_env.config.save_rendering_dir = str(run_dir / "renderings")
     reference_terms = [
@@ -665,6 +672,43 @@ def _run_plain(config, run_dir: Path, device: torch.device, args_cli, prepared: 
     return env, manifest
 
 
+def _is_raw_c_checkpoint(payload: dict) -> bool:
+    signature = payload.get("model_signature") or {}
+    return (
+        signature.get("architecture_version") == "65-token-hierarchical-standard-cvae-v1"
+        and payload.get("format_version") != "dagger_cvae_student_checkpoint_v1"
+        and bool(payload.get("train_motion_keys"))
+    )
+
+
+def _cvae_checkpoint_motions(payload: dict) -> set[str]:
+    if _is_raw_c_checkpoint(payload):
+        return {str(key) for key in payload["train_motion_keys"]}
+    return {str(key) for key in payload.get("motion_keys") or []} | {
+        str(key) for key in (payload.get("motion_coverage") or {})
+    }
+
+
+def _cvae_render_rollout(config, payload: dict, raw_c: bool) -> dict:
+    """DAgger checkpoints carry their rollout settings; a pre-DAgger C takes them from the render config."""
+
+    if not raw_c:
+        return {
+            "future_reference": bool(payload.get("future_reference", False)),
+            "relabel_steps": int(payload.get("relabel_steps", 1)),
+            "relabel_gamma": float(payload.get("relabel_gamma", 1.0)),
+            "execute_steps": int(payload.get("execute_steps", 1)),
+        }
+    future = str(config.dagger.get("render_c_future_reference", True)).strip().lower()
+    execute_steps = int(config.dagger.get("render_c_execute_steps", 4))
+    return {
+        "future_reference": future in {"1", "true", "yes", "on"},
+        "relabel_steps": execute_steps,
+        "relabel_gamma": 1.0,
+        "execute_steps": execute_steps,
+    }
+
+
 def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
     import numpy as np
 
@@ -745,14 +789,16 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         if not checkpoint.is_file():
             raise FileNotFoundError(f"render checkpoint is missing: {checkpoint}")
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        if payload.get("format_version") != "dagger_cvae_student_checkpoint_v1":
-            raise ValueError(f"render_policy=cvae needs a 65-token CVAE DAgger checkpoint: {checkpoint}")
-        checkpoint_motions = set(payload.get("motion_keys") or []) | set(
-            (payload.get("motion_coverage") or {}).keys()
-        )
+        raw_c = _is_raw_c_checkpoint(payload)
+        if payload.get("format_version") != "dagger_cvae_student_checkpoint_v1" and not raw_c:
+            raise ValueError(
+                f"render_policy=cvae needs a 65-token CVAE DAgger or C checkpoint with train_motion_keys: {checkpoint}"
+            )
+        rollout = _cvae_render_rollout(config, payload, raw_c)
+        checkpoint_motions = _cvae_checkpoint_motions(payload)
         selected_motions = set(prepared["motion"]["loaded_keys"])
         if not checkpoint_motions:
-            raise ValueError("CVAE DAgger checkpoint has no motion_keys; cannot verify the render motion was trained")
+            raise ValueError("CVAE checkpoint has no motion_keys; cannot verify the render motion was trained")
         if not selected_motions.issubset(checkpoint_motions):
             raise ValueError(
                 "render motion is not among the checkpoint training motions: "
@@ -774,10 +820,7 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
             teacher_mode=str(payload.get("teacher_mode", "dual")),
             action_clip_value=payload.get("action_clip_value", 20.0),
             raise_on_clip_error=False,
-            future_reference=bool(payload.get("future_reference", False)),
-            relabel_steps=int(payload.get("relabel_steps", 1)),
-            relabel_gamma=float(payload.get("relabel_gamma", 1.0)),
-            execute_steps=int(payload.get("execute_steps", 1)),
+            **rollout,
         )
         latent_mode = str(config.dagger.get("render_latent_mode", "fixed_standard_normal"))
         cvae.set_latent_mode(latent_mode)
@@ -798,6 +841,7 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
         policy_source = "dagger_cvae_65token_policy_rollout"
         extra_manifest = {
             "latent_mode": latent_mode,
+            "checkpoint_kind": "c_before_dagger" if raw_c else "dagger",
             "round_index": payload.get("round_index"),
             "future_reference": cvae.future_reference,
             "relabel_steps": cvae.relabel_steps,
@@ -1409,6 +1453,34 @@ def _kl2_keys_for_round(mode: str, manifest: dict, round_index: int) -> list[str
     return [str(value) for value in groups[int(round_index) % len(groups)]]
 
 
+MOTION_AUGMENTATION_FLAGS = (
+    "freeze_frame_aug",
+    "cat_upper_body_poses",
+    "randomize_wrist_poses",
+    "randomize_heading",
+)
+
+
+def _disable_motion_augmentation(release_config) -> None:
+    """Match the reference table export: the training motion-lib path would augment the reference."""
+
+    motion_cfg = release_config.manager_env.commands.motion
+    for flag in MOTION_AUGMENTATION_FLAGS:
+        motion_cfg[flag] = False
+
+
+def _check_c_motion_coverage(student, manifest: dict) -> None:
+    """Every DAgger motion must come from the C training set when C records it."""
+
+    if not student.train_motion_keys:
+        return
+    requested = {str(key) for key in manifest.get("motion_keys", [])}
+    requested |= {str(key) for key in manifest.get("pilot_motion_keys", [])}
+    unseen = sorted(requested - set(student.train_motion_keys))
+    if unseen:
+        raise ValueError(f"DAgger motion keys were not seen in C training: {unseen}")
+
+
 def _create_cvae_env_for_keys(
     config,
     prepared: dict,
@@ -1433,6 +1505,8 @@ def _create_cvae_env_for_keys(
     )
     release_config.manager_env.config.experiment_dir = str(run_dir)
     release_config.manager_env.config.save_rendering_dir = str(run_dir / "renderings")
+    if _motion_augmentation_disabled(config):
+        _disable_motion_augmentation(release_config)
     args_cli.num_envs = len(keys)
     env = create_release_env(
         release_config,
@@ -2028,6 +2102,7 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
             "configured KL beta differs from the KL2 checkpoint: "
             f"{config.student.kl_beta} != {source_beta}"
         )
+    _check_c_motion_coverage(student, manifest)
     if float(config.student.source_mix) > 0:
         student._load_source_dataset()
     round_progress_path = (
@@ -2597,6 +2672,8 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         "beta_schedule": beta_schedule,
         "motion_manifest": manifest,
         "source_identity": student.source_identity,
+        "dataset_path_mapping": json.loads(os.environ.get("CVAE_DATASET_PATH_MAP", "{}")),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "source_dataset_run": str(student.source_dataset_run),
         "normalization_run": str(student.normalization_run),
         "normalization_sha256": student.normalization_sha256,
@@ -2620,7 +2697,8 @@ def _run_cvae_kl2(config, run_dir: Path, device: torch.device, args_cli, prepare
         "motion_coverage": dataset.motion_coverage(),
         "rounds": metrics,
         "quality_note": (
-            "No-reference CVAE; same-motion teacher-Action imitation only. "
+            ("Reference-conditioned CVAE; " if student.future_reference else "No-reference CVAE; ")
+            + "same-motion teacher-Action imitation only. "
             "The 192-step Isaac survival metric is diagnostic."
         ),
     }
@@ -2719,9 +2797,13 @@ def main() -> None:
             map_location="cpu",
             weights_only=False,
         )
-        trained = list(payload.get("motion_keys") or []) or sorted(payload.get("motion_coverage") or {})
+        trained = (
+            list(payload.get("motion_keys") or [])
+            or sorted(payload.get("motion_coverage") or {})
+            or sorted(_cvae_checkpoint_motions(payload))
+        )
         if not trained:
-            raise ValueError("CVAE DAgger checkpoint has no motion_keys; set DAGGER_RENDER_MOTION_KEY")
+            raise ValueError("CVAE checkpoint has no motion_keys; set DAGGER_RENDER_MOTION_KEY")
         config.dagger.motion_key = str(trained[0])
         del payload
     motion_source = str(config.dagger.get("motion_source_checkpoint", "") or "")

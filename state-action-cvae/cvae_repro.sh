@@ -3,14 +3,15 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNS_ROOT="${CVAE_RUNS_ROOT:-$HOME/bly/runs}"
-PYTHON="${CVAE_PYTHON:-$HOME/bly/sonic-repro/.venv-sonic/bin/python}"
+PROJECT_ROOT="${BLY_PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+RUNS_ROOT="${CVAE_RUNS_ROOT:-$PROJECT_ROOT/runs}"
+PYTHON="${CVAE_PYTHON:-$PROJECT_ROOT/sonic-repro/.venv-sonic/bin/python}"
 DEFAULT_CONFIG="$SCRIPT_DIR/configs/default.json"
 SMOKE_CONFIG="$SCRIPT_DIR/configs/smoke.json"
 SEED="${CVAE_SEED:-20260824}"
-SONIC_DIR="${SONIC_DIR:-$HOME/bly/sonic-repro/GR00T-WholeBodyControl}"
-ISAACLAB_DIR="${ISAACLAB_DIR:-$HOME/bly/sonic-repro/IsaacLab}"
-SONIC_KIT_DIR="${SONIC_KIT_DIR:-$HOME/bly/sonic-repro-kit}"
+SONIC_DIR="${SONIC_DIR:-$PROJECT_ROOT/sonic-repro/GR00T-WholeBodyControl}"
+ISAACLAB_DIR="${ISAACLAB_DIR:-$PROJECT_ROOT/sonic-repro/IsaacLab}"
+SONIC_KIT_DIR="${SONIC_KIT_DIR:-$PROJECT_ROOT/sonic-repro-kit}"
 
 timestamp() {
   date +%Y%m%d_%H%M%S
@@ -23,7 +24,7 @@ die() {
 
 resolved_runs_root() {
   local allowed resolved
-  allowed="$(realpath -m -- "$HOME/bly/runs")"
+  allowed="$(realpath -m -- "$PROJECT_ROOT/runs")"
   resolved="$(realpath -m -- "$RUNS_ROOT")"
   [[ "$resolved" == "$allowed" || "$resolved" == "$allowed/"* ]] \
     || die "CVAE_RUNS_ROOT must remain under $allowed; found $resolved"

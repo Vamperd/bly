@@ -1,5 +1,13 @@
 # SONIC Physics State–Action 研究：当前代理交接说明
 
+服务器迁移补充（2026-11-04）：用户确认 `cvae_reference_train_20261103_095438` 已完成，
+尚未回传最终 summary/quality 指标。目标是 `bailinying@10.130.140.103`（leis01），项目资产根目录
+`~/data/FlexSeqWBC/bly`；Git checkout 可放在其 `code/`，数据留在 `runs/`，避免覆盖现有文件。
+Windows 已加入 `dagger/scripts/server_env.sh`、`dagger.server_check` 和读取时
+`CVAE_DATASET_PATH_MAP` 前缀映射；只改变实际 IO 路径，不改 manifest、归一化、episode identity 或哈希。
+先检查环境与迁移数据，再做 Isaac smoke；当前 DAgger 单进程单 GPU，没有 DDP。
+完整迁移命令和验证边界见 `dagger.md` 末节。下文较旧的活动阶段说明保留作历史。
+
 最后更新：2026-10-05。当前活动阶段为 C 的十七组 posterior latent 分布诊断与 KL×2 受控对照。
 
 当前活动模型合同维护在 [model.md](model.md)，整体实验路线与概要结果维护在

@@ -1,5 +1,8 @@
 # SONIC teacher + CVAE DAgger 实施进度
 
+服务器迁移状态：用户已确认 `cvae_reference_train_20261103_095438` 完成；最终指标未回传。
+leis01 的路径、Git、补传和只读环境检查命令见末节。旧的“运行中/Ubuntu 未执行”描述按各段历史理解。
+
 最后更新：2026-10-26。本文件是 DAgger 命令与配置的主副本；Ubuntu 问题→修复链与 8h 结果见 process.md §23–24。
 
 ## 当前架构
@@ -909,7 +912,8 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/d
 ### B 路线：Physics v5 上重训带 reference 未来与左侧 padding 的 65-token C
 
 目标是让 C 在训练阶段就见过 DAgger 的真实输入布局，再用新 C 做 DAgger。分三阶段：
-阶段 0/1（参考表、混合数据集、C 微调）代码已实现，待 Ubuntu 执行；阶段 2（DAgger 接入）未实现。
+阶段 0/1 已在 Ubuntu 执行，200k 正式 C 微调 `cvae_reference_train_20261103_095438` 运行中；阶段 2（DAgger 接入）
+代码已实现（2026-11-03），待 C 完成后在 Ubuntu 执行。
 
 已确认的决策：每个 micro batch 内 16 个物理窗口（原 8 种 fixed mask）+ 16 个 reference 锚点；
 从 KL2 300k `best.pt` 只加载权重微调；锚点历史长度 h = min(t, 32)，另有 25% 按确定性种子截断为 U[0, h]。
@@ -933,7 +937,8 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/d
      10% 概率从随机帧起冻结）会改写参考；采集走 `load_motions_for_evaluation`，不做增强。导出现关闭
      `freeze_frame_aug / cat_upper_body_poses / randomize_wrist_poses / randomize_heading`。该 run 不可使用。
   - 报告新增 `motions_over_tolerance` 和 `worst_motions_pos`（offset 0 下每个 motion 的最大位置误差，前 10）。
-  - 遗留：DAgger 运行时同样走训练加载路径，在线参考也可能被 freeze-frame 增强改写，阶段 2 前需确认。
+  - DAgger 运行时同样走训练加载路径。阶段 2 用配置 `dagger.disable_motion_augmentation` 关闭同样 4 个增强
+    （v5ref mode 默认开启，渲染用 `DAGGER_RENDER_DISABLE_MOTION_AUG=true`），在线参考与参考表一致。
 - v5 长窗口 run 已建成：`cvae_long_horizon_dataset_20261103_083928`（586 group / 1484 window，全部 train，
   normalization sha256 `e498814e3b7cf30d22c3c5f277211a62e38799bfd4970ee3c5cb70420fb4ead5`）。
 - 参数：`CVAE_V5_PHYSICS_DATASET`（默认 `~/bly/runs/cvae_physics_dataset_v5`）、`CVAE_V5_MOTION_FILE`
@@ -956,8 +961,8 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/d
 - checkpoint 新增 `train_motion_keys` 和 `reference_sampler`；full eval 额外输出参考锚点上 standard-normal 的
   `reference_anchor slot32_raw / slot32_35_raw / full_history / short_history` RMSE（最多 512 个均匀抽取的锚点）。
 - 配置 `state-action-cvae/configs/posterior_hierarchical_standard_cvae_v5_reference_fp32.json`：model 段与
-  `..._long_horizon_fp32.json` 完全一致；lr 5e-5、warmup 1000、kl_beta 0.002、beta warmup 1000、KL 段上限 100k 步、
-  validation 5000 / full validation 与 checkpoint 20000。
+  `..._long_horizon_fp32.json` 完全一致；lr 5e-5、warmup 1000、kl_beta 0.002、beta warmup 1000、KL 段上限 200k 步、
+  validation 12500 / full validation 75000 / checkpoint 12500。
 - `cvae_repro.sh` 新命令：`build-reference-mixed-dataset`、`reference-train-smoke`（2000 步）、`reference-train`。
 - 正式训练默认 200k 步：每 12500 步验证（共 16 次），75k/150k/200k 为 full（3 次，其余 13 次 summary）。summary 只写
   jsonl，不存 checkpoint；full 写 `evaluations/step_*/` 诊断并更新 `last.pt`/`best.pt`。配置 `keep_best_reconstruction:
@@ -965,9 +970,39 @@ cd ~/bly/dagger && nohup bash scripts/run_dagger.sh sonic-arch-6h > ~/bly/runs/d
 - 验证：Windows state-action-cvae 255 tests 中 254 通过（新增 `tests/test_reference_anchor_dataset.py` 3 个全过；
   `test_long_horizon_dataset` 在未改动的 HEAD 上同样失败，与本次无关）；dagger 76 tests 通过。Ubuntu 未执行。
 
-**阶段 2：DAgger 接入（未实现）**：v5 motion manifest；checkpoint 带 `train_motion_keys` 时校验本轮 motion 为其子集；
-新 source kind `reference_mixed`（回放 C 自己的训练分布）；student-only 评估增加前 32 步 / 之后的分桶 RMSE 与摔倒步数分布；
-新 mode `cvae-kl2-pilot-v5ref-12h`。完成后 round 0 与 12h 的 round 0（rmse 0.333、term 0.047）对比。
+**阶段 2：DAgger 接入（2026-11-03 实现，Ubuntu 未执行）**
+- 新 mode `cvae-kl2-pilot-v5ref-12h`（`configs/cvae_kl2_pilot_v5ref_12h.yaml`，`run_dagger.sh` 与 `run_dagger_auto.sh` 均已接入）。
+  除下列项外与 `future-ref-chunk-12h` 相同（source_mix 0.5、lr 1e-5、每轮 4000 步、chunk 500、kl_beta 0.002、
+  future_reference、relabel 8 / γ 0.9、execute 4、20 轮、早停 [4,9]）：
+  - checkpoint 默认 `cvae_reference_train_20261103_095438/checkpoints/best.pt`，model_config 为 v5_reference json，
+    normalization / source run 为 `cvae_reference_mixed_dataset_20261103_090945`；
+  - motion file 取 `latest_overfit_reference_motion_subset_run_dir.txt` 下的 `data/robot_filtered`（`CVAE_KL2_MOTION_FILE` 可覆盖）；
+  - `disable_motion_augmentation: true`；termination_tolerance 0.005；`source_causal_fraction: 0.0`。
+- v5 manifest `configs/cvae_kl2_motion_manifest_v5.json`：与 12m manifest 同样 32 个 key（4×8 组）和 12 个 pilot key，
+  normalization sha256 为 v5 值，`source_mix_exact: false`。
+- motion 校验：C checkpoint 带 `train_motion_keys` 时，manifest 的 motion_keys 与 pilot key 必须是其子集，否则启动即报错。
+- source kind `reference_mixed`：每个 source batch 按 `reference_fraction`（默认 0.5）分成物理行与参考锚点行，mask
+  与 C 微调一致（物理行 `make_physical_masks` + 全 valid loss，参考行 `make_reference_masks`），`merge_batches` 后
+  masked_weight 1 / full_weight 0。参考数据集 normalization 与 anchor_windows sha256 均校验；source cache 均匀抽样覆盖全部 motion。
+- student-only 评估新增 `teacher_action_rmse_by_episode_step`（前 32 步 / 之后）、`fall_steps` 与
+  `fall_step_histogram`（[0,32)/[32,64)/[64,128)/[128,192)/[192,inf)）。
+- 渲染：`render_policy=cvae` 现可直接渲染 DAgger 前的 C（按 model_signature + `train_motion_keys` 识别），rollout 参数
+  取渲染配置 `DAGGER_RENDER_C_FUTURE_REFERENCE`（默认 true）、`DAGGER_RENDER_C_EXECUTE_STEPS`（默认 4）；manifest 记
+  `checkpoint_kind`。新脚本 `scripts/render_cvae_ghost4.sh` 每个 motion 渲染 sonic / mlp_best_survival（MLP 训练过该
+  motion 时）/ cvae_before（C best.pt）/ cvae_after（v5ref DAgger best_survival.pt），全部用 v5 motion file、关闭增强，
+  输出 `cvae_ghost4_<ts>/videos/{solo,ghost}`。DAgger run 传 `-` 时只渲染前 3 层，motion 取 v5 manifest。
+- 验证：Windows dagger 83 tests 中新增 `tests/test_cvae_v5ref_stage2.py` 10 个（6 过，4 个依赖 omegaconf 在 Windows 跳过）；
+  `test_reference_table` 因 Windows 无 h5py 无法导入，与本次无关。`bash -n` 通过。Isaac 未执行。
+
+```bash
+cd ~/bly/dagger
+nohup bash scripts/run_dagger_auto.sh cvae-kl2-pilot-v5ref-12h > ~/bly/runs/dagger_v5ref_12h.log 2>&1 &
+C=~/bly/runs/cvae_reference_train_20261103_095438/checkpoints/best.pt
+D=$(ls -dt ~/bly/runs/dagger_cvae_kl2_pilot_v5ref_12h_* | head -n 1)
+M=~/bly/runs/dagger_mlp_causal_6h_20261031_133715
+LIST_ONLY=1 bash scripts/render_cvae_ghost4.sh $C $D $M
+nohup bash scripts/render_cvae_ghost4.sh $C $D $M 0 192 > ~/bly/runs/ghost4.log 2>&1 &
+```
 
 ```bash
 cd ~/bly/state-action-cvae
@@ -980,6 +1015,90 @@ CVAE_REFERENCE_DATASET_RUN=<混合数据集 run> CVAE_INIT_CHECKPOINT=/home/hell
 ### 下一步
 
 1. 等 diag 跑完，看 rmse 是否明显低于 0.31，并核对 `manifests/dagger_cvae_kl2_early_stop.json`。
-2. 在 Ubuntu 执行 B 路线阶段 0/1：长窗口 manifest → 参考表（对齐校验必须通过）→ 混合数据集 → 2k smoke → 正式微调。
-3. C 微调期间在 Windows 实现阶段 2，C 完成后跑新 mode 的 round 0，重点看前 32 步分桶指标。
+2. 等 200k C 微调 `cvae_reference_train_20261103_095438` 完成，看 full eval 的 `reference_anchor` RMSE。
+3. 跑 `cvae-kl2-pilot-v5ref-12h`，round 0 与 12h 的 round 0（rmse 0.333、term 0.047）对比，重点看前 32 步 / 之后分桶
+   RMSE 与 `fall_step_histogram`；同时用 `render_cvae_ghost4.sh` 渲染 sonic / mlp / DAgger 前 C / DAgger 后 C 四层 ghost。
 4. 此前列出的 ghost 视频、`sonic-arch-check`→`sonic-arch-6h`、future-reference 8h 及其 B+C 8h 变体，本次未核对执行状态。
+
+### leis01 服务器迁移与运行
+
+项目资产根目录为 `~/data/FlexSeqWBC/bly`。外层仓库不跟踪 SONIC/IsaacLab 嵌套源码、
+teacher、C checkpoint 或 runs 数据；Git clone 不能代替这些资产同步。新 Git checkout 放入
+`code/`，保留已有 runs/sonic-repro/sonic-repro-kit。原数据迁移结束并校验后再使用。
+
+服务器拉取（首次，code 目录尚不存在时）：
+
+```bash
+ROOT=$HOME/data/FlexSeqWBC/bly
+git clone --branch CVAE-refactor https://github.com/Vamperd/bly.git "$ROOT/code"
+```
+
+后续更新先查看 `git -C "$ROOT/code" status --short --branch`，工作树无改动时使用
+`git -C "$ROOT/code" pull --ff-only origin CVAE-refactor`，不能自动 reset 或覆盖已有代码。
+
+原 Ubuntu 补传（SONIC/IsaacLab 目标尚未配置时完整传输；已有有效环境先核对版本）：
+
+```bash
+TARGET=bailinying@10.130.140.103
+OLD=/home/helloworld/bly
+NEW=data/FlexSeqWBC/bly
+rsync -aR --partial --info=progress2 \
+  "$OLD/./runs/cvae_reference_train_20261103_095438/checkpoints/best.pt" \
+  "$OLD/./runs/cvae_reference_train_20261103_095438/manifests/" "$TARGET:$NEW/"
+rsync -a --partial --info=progress2 \
+  "$OLD/sonic-repro/GR00T-WholeBodyControl" "$OLD/sonic-repro/IsaacLab" "$TARGET:$NEW/sonic-repro/"
+```
+
+后一个命令保留原机真实工作树、Git provenance、teacher 和本地机器人资产；若目标已有改动，
+先用 `rsync -an --itemize-changes` 查看差异，勿无条件覆盖。不传旧 .venv，不自动安装或升级 GPU 依赖。
+
+服务器环境与数据检查（激活服务器已有 Isaac/SONIC 环境后）：
+
+```bash
+ROOT=$HOME/data/FlexSeqWBC/bly
+uname -a
+nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu --format=csv
+nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv
+df -h "$ROOT"
+free -h
+command -v python
+python --version
+# 例：检查分配给自己的物理GPU 2、3；实际编号以授权分配为准。已有调度器mask时沿用。
+export CUDA_VISIBLE_DEVICES=2,3
+export BLY_PROJECT_ROOT="$ROOT"
+export BLY_MIGRATED_RUNS="$ROOT/runs/source_migration_20261105_143911"
+export PYTHON="$(command -v python)"
+source "$ROOT/code/dagger/scripts/server_env.sh"
+"$PYTHON" -m dagger.server_check --cuda --data
+```
+
+preflight 检查依赖可发现性、CUDA张量、源HDF5/schema哈希、参考表/anchor/normalization哈希、
+physical/reference样本读取、C归一化与motion覆盖；不会安装依赖、创建训练run或启动Isaac。
+因此 `preflight_pass=true` 仍不代表 Isaac 场景/teacher rollout 已通过。可在服务器追加执行：
+
+```bash
+cd "$ROOT/code/state-action-cvae"
+PYTHONPATH="$PWD/src:$PWD/tests:$PYTHONPATH" "$PYTHON" -m unittest test_path_mapping test_reference_anchor_dataset -v
+cd "$ROOT/code"
+"$PYTHON" -m unittest discover -s dagger/tests -v
+```
+
+确认上述检查及 Isaac smoke 后，正式使用新C启动：
+
+```bash
+# 当前实现单进程、单GPU，无DDP；选其中一张卡。cuda:0是mask后的逻辑编号。
+export CUDA_VISIBLE_DEVICES=2
+export DAGGER_DEVICE=cuda:0
+cd "$ROOT/code/dagger"
+nohup bash scripts/run_dagger_auto.sh cvae-kl2-pilot-v5ref-12h \
+  > "$ROOT/runs/dagger_v5ref_server_launch.log" 2>&1 &
+```
+
+第二张卡不会自动参与此run。不要用torchrun或复制同一resume run到双进程；新增多卡算法需要另立协议。
+`server_env.sh` 显式设置代码、teacher、C、motion、normalizer、manifest路径；数据通过
+`CVAE_DATASET_PATH_MAP` 在读取时映射，文件内容和稳定身份保持原样。映射和CUDA mask写入DAgger manifest。
+
+Windows 验证：新增路径映射6项、server环境/预检3项通过，Shell语法、Python compile和diff check通过。
+完整DAgger发现86项：81通过、4项因缺omegaconf跳过、1项因缺h5py导入失败。
+reference dataset 4项（含新增迁移后hash/identity/sample不变的集成测试）因缺h5py跳过。
+以上不是服务器HDF5、Isaac/CUDA执行或模型质量证据；尚未在leis01上运行。

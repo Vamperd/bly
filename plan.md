@@ -1,5 +1,12 @@
 # 65-token CVAE：当前 A／B／C 实验计划与结果
 
+服务器迁移状态补充（2026-11-04）：用户确认 v5 reference C 微调
+`cvae_reference_train_20261103_095438` 已完成；200k 是配置预算，实际 completed step、
+execution marker 和 reference_anchor 最终指标仍待日志验收。v5ref DAgger 接入代码已实现，
+服务器运行结果未知。已完成 Windows 路径适配，新增只读 preflight；源数据迁往 leis01 的
+`~/data/FlexSeqWBC/bly/runs/source_migration_20261105_143911`，传输及 checksum 完成状态待确认。
+下一步为服务器环境、源文件哈希、样本读取与 Isaac smoke 验证，不把文件迁移等同于质量通过。
+
 最后更新：2026-10-30
 
 只保留实验路径、概要结果及下一步；历史run、checkpoint、数据和源码均未删除。

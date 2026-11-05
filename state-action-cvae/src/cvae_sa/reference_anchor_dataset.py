@@ -24,6 +24,7 @@ from .cvae_protocol import digest
 from .long_horizon_dataset import VERSION as LONG_HORIZON_VERSION, _jsonl, _write_jsonl
 from .posterior_capacity import _stable_seed
 from .util import atomic_write_json, atomic_write_text, file_sha256, load_json
+from .path_mapping import resolve_dataset_path
 
 
 VERSION = "cvae_v5_reference_mixed_dataset_v1"
@@ -225,7 +226,7 @@ class ReferenceAnchorDataset(Dataset[dict[str, Any]]):
     def __init__(self, dataset_run: Path, split: str = "train") -> None:
         from .dataset import StateActionWindowDataset
 
-        self.dataset_run = Path(dataset_run).expanduser().resolve()
+        self.dataset_run = resolve_dataset_path(dataset_run).resolve()
         if not (self.dataset_run / "markers" / MARKER).is_file():
             raise FileNotFoundError(self.dataset_run / "markers" / MARKER)
         self.manifest = load_json(self.dataset_run / "manifests/reference_mixed_manifest.json")
@@ -242,7 +243,7 @@ class ReferenceAnchorDataset(Dataset[dict[str, Any]]):
             self.motion_offsets = table["motion_offsets"].astype(np.int64)
             self.num_steps = table["num_steps"].astype(np.int64)
         long_manifest = load_json(self.dataset_run / "manifests/dataset_manifest.json")
-        self.source = StateActionWindowDataset(Path(long_manifest["source_dataset_run"]), split, 64, 64,
+        self.source = StateActionWindowDataset(resolve_dataset_path(long_manifest["source_dataset_run"]), split, 64, 64,
                                                max_episodes=None, random_crop=False)
         if file_sha256(self.dataset_run / "data/normalization.npz") != file_sha256(
                 self.source.dataset_run / "data/normalization.npz"):

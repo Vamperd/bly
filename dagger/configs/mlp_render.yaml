@@ -23,6 +23,10 @@ dagger:
   smpl_motion_file: zeros
   render_latent_mode: ${oc.env:DAGGER_RENDER_LATENT_MODE,fixed_standard_normal}
   render_disable_tracking_terminations: ${oc.env:DAGGER_RENDER_KEEP_RUNNING,true}
+  disable_motion_augmentation: ${oc.env:DAGGER_RENDER_DISABLE_MOTION_AUG,false}
+  # Only used when render_policy=cvae gets a pre-DAgger C checkpoint (DAgger checkpoints carry their own).
+  render_c_future_reference: ${oc.env:DAGGER_RENDER_C_FUTURE_REFERENCE,true}
+  render_c_execute_steps: ${oc.env:DAGGER_RENDER_C_EXECUTE_STEPS,4}
 
 student:
   checkpoint: ${oc.env:DAGGER_RENDER_CHECKPOINT,}
