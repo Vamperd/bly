@@ -273,6 +273,7 @@ def main() -> int:
         launcher, args_cli = _launch_app(config)
         env = _create_release_env(prepared, torch.device(str(args.device)), args_cli)
         observation = env.reset()
+        env.reset_motion_to_first_frame()
         env.disable_auto_reset()
         teacher = SonicReleaseTeacher(
             config=prepared["release_config"],
@@ -281,6 +282,7 @@ def main() -> int:
             device=torch.device(str(args.device)),
         )
         baseline = _baseline(env)
+        observation = _restore_baseline(env, baseline)
         previous_states: torch.Tensor | None = None
         converged_records: list[dict[str, Any]] = []
         motion_keys_loaded = env.motion_keys
