@@ -100,8 +100,12 @@ class Action11WindowDataset(Dataset[dict[str, Any]]):
             validation_stride=1,
             random_crop=False,
         )
-        if not all(int(row["steps"]) >= ACTION_STEPS for row in self.base.episodes):
-            raise ValueError("all selected episodes must contain at least 10 transitions")
+        self.base.episodes = [
+            row for row in self.base.episodes
+            if str(row.get("status", "")) == "completed" and int(row.get("steps", 0)) >= ACTION_STEPS
+        ]
+        if not self.base.episodes:
+            raise ValueError("Physics train split has no completed episode with at least 10 transitions")
         self.selected_motion_keys = select_motion_keys(
             self.base.episodes, motion_count, selection_seed, requested_motion_keys
         )
