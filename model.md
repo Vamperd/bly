@@ -348,3 +348,141 @@ Physics State为70维。实验只将State的joint position/velocity映射到goal
 32-motion、10轮、每轮32步的结果没有任何motion达到goal/update双门限；结果只作SONIC输入语义差异诊断，
 不能解释为CVAE质量、DAgger质量或物理控制通过。固定点run、门限和失败证据见plan.md §26、
 process.md §25。
+
+## 14. 11-frame MLP Action completion（2026-11-08，独立试验）
+
+该路线是独立于65-token Transformer/CVAE的新序列补全实验，不迁移旧Transformer权重，也不改变
+65-token数据、checkpoint或部署合同。代码入口为：
+
+```text
+state-action-cvae/src/cvae_sa/mlp_action11.py
+state-action-cvae/configs/mlp_action11.json
+dagger/src/dagger/mlp_action11_recorded_state_replay.py
+dagger/scripts/render_mlp_action11_ghost4.sh
+```
+
+### 14.1 数据与时间合同
+
+- 数据为Physics v5的70维State与29维canonical Action；不读取SONIC goal，不把goal/state差异加入模型。
+- 训练只使用train split中确定性选择的32个motion；不建立test split。v5迁移目录中的`status=failed`
+  且`steps<10`的4个episode被读取层过滤，32个motion仍全部保留，其余252个completed episode可用。
+- 每个样本是连续11帧State与10帧Action：
+
+  ```text
+  State :  S0 ... S10       [11,70]
+  Action:  A0 ... A9        [10,29]
+  ```
+
+  `A10`不在合同中，因为它需要`S11`。主任务是已知`S0..S10`、已知`A0..A8`时补全`A9`。
+- episode起点的`action_before_window`为零，并由`action_before_valid=0`显式标记；非起点使用真实前一Action
+  且`action_before_valid=1`。这不是NaN或伪造Action。
+
+### 14.2 MLP架构与完整维度
+
+输入先按逐特征Mask置零，但Mask本身单独输入，避免零值与缺失混淆：
+
+|输入|形状|含义|
+|---|---:|---|
+|State value|`[B,11,70]`|归一化Physics State|
+|State visible|`[B,11,70]`|`1`为可见，`0`为隐藏|
+|State valid|`[B,11]`|序列槽是否存在；渲染未知前缀为0|
+|Action value|`[B,10,29]`|归一化canonical Action|
+|Action visible|`[B,10,29]`|逐特征可见性|
+|Action valid|`[B,10]`|Action槽是否有可用历史|
+|target Action mask|`[B,10,29]`|只对这些缺口计算loss|
+|Action before|`[B,29]`|窗口前一Action或零|
+|Action before valid|`[B]`|窗口前一Action有效性|
+
+Encoder flatten后的输入维度为：
+
+```text
+11*70       State value       =  770
+11*70       State visible     =  770
+10*29       Action value      =  290
+10*29       Action visible    =  290
+11          State valid       =   11
+10          Action valid      =   10
+10*29       target mask       =  290
+29          Action before     =   29
+1           before valid      =    1
+                              -----
+                               2461
+```
+
+实际配置：
+
+```text
+Encoder: 2461 -> 2048 -> 1024 -> 512 -> latent[256]
+Decoder query:
+  latent[256]
+  + target_action[290]
+  + action_visible[290]
+  + state_visible[770]
+  + state_valid[11]
+  + action_valid[10]
+  = 1627
+Decoder: 1627 -> 1024 -> 2048 -> 512 -> 290
+Output:  [B,10,29]
+```
+
+每个隐藏层使用`Linear -> LayerNorm -> GELU`；latent是确定性向量，不采样、不加KL、不提供
+standard-normal部署路径。该配置实际参数量为`12,773,922`。模型kind为`mlp_action_completion_11`，
+checkpoint只保存`best.pt`与`last.pt`。
+
+### 14.3 训练前向与Mask采样
+
+训练前向步骤：
+
+1. 读取归一化`State[11,70]`、`Action[10,29]`。
+2. 对隐藏的State/Action逐元素置零；把visible、valid、target mask和窗口前Action拼入Encoder。
+3. Encoder输出单个`z[256]`。
+4. Decoder接收`z`和查询Mask，输出所有`A0..A9`的29维预测。
+5. 只在`target_action_mask=True`的Action元素上计算归一化MSE；已知Action不作为目标误差。
+
+Mask比例固定为70%完整时间步/State-Action级任务、30%特征级任务：
+
+- 时间步级任务：目标Action通常为连续1–3个Action槽；55%的样本优先选择末槽`A9`，其余在
+  `A0..A9`中采样；目标之后的未来Action槽标记`valid=0`，不当作零Action。
+- 时间步级任务的30%会再隐藏不触及目标转移端点的完整State间隔，保证目标Action所需的
+  `S_t,S_{t+1}`仍可见。
+- 特征级任务：目标Action随机隐藏4–15个特征；另外在非端点State上隐藏4–19个State特征，
+  并可隐藏一个历史Action槽的少量特征。
+- 所有目标至少包含一个Action特征；State缺口不会覆盖目标转移的两个端点，因此不采样
+  “缺少必要边界却要求补全不可辨识Action”的组合。
+- 训练只使用普通11/10窗口Mask；渲染时的递推输入不是训练样本伪造，而是独立的render-only
+  right-aligned query，属于分布外闭环诊断并在manifest中单独标记。
+
+### 14.4 逐Action递推渲染
+
+渲染目标永远放在相对窗口的Action slot 9。对绝对时间`t`：
+
+```text
+State slots : S[t-9] ... S[t]  S[t+1(expected)]
+Action slots: A[t-9] ... A[t-1] A[t(target)]
+```
+
+实际可用范围不足时，左侧槽填零并设`valid=0`。每一步：
+
+1. 用当前Isaac真实State填充当前槽；用记录回放的期望`S[t+1]`填充最后一个State槽。
+2. 用此前已经执行的canonical Action填充历史Action槽；未知历史使用`valid=0`。
+3. MLP只调用一次，取输出的最后一行`A9`。
+4. canonical Action经SONIC runtime mapping转为raw Action并执行。
+5. 读取Isaac真实State，加入历史，进入`t+1`。
+
+首步使用真实初始化后的`S0`与期望`S1`，更早的State槽是unknown；第十步开始窗口才逐渐
+包含完整历史。192步输出193帧，允许摔倒但不因摔倒截断视频。
+
+四动作对比入口：
+
+```bash
+DAGGER_MOTION_FILE=/path/to/robot_filtered \
+bash dagger/scripts/render_mlp_action11_ghost4.sh \
+  /data1/users/bailinying/FlexSeqWBC/bly/runs/<mlp_run>/checkpoints/best.pt \
+  /data1/users/bailinying/FlexSeqWBC/bly/runs/<stepwise_prepare>/manifests/cases.json \
+  /path/to/stepwise_recursive_causal.yaml \
+  192
+```
+
+该入口为每个motion独立运行MLP Isaac递推；SONIC使用同motion的release teacher，随后由
+`render_policy_ghost.py`输出MLP/SONIC两层193帧ghost。Isaac执行、轨迹、ghost和manifest都写入
+新run；视频完整性与物理质量分开。

@@ -500,3 +500,43 @@ MuJoCo ghost renderer，将终止 trajectory 的最后姿态保持到193帧。�
 
 四个 MP4 均由 renderer 报告 `frames=193`，本机与服务器 SHA256 一致。该视频是
 kinematic ghost，摔倒后的末姿态保持只为满足可视化帧数，不代表物理质量通过。
+
+## 27. 11-frame deterministic MLP Action completion（2026-11-08，进行中）
+
+该实验独立于65-token Transformer/CVAE，使用Physics v5的70维State与29维canonical Action；
+只使用确定性选择的32个motion，不建立test split。训练窗口是11帧State与10帧Action，`A10`不在
+合同中；主任务为`S0..S10 + A0..A8 -> A9`。模型为纯MLP encoder/decoder、latent=256、
+实际12,773,922参数；逐特征Mask、invalid `action_before`标识和render-only右对齐递推合同见
+model.md §14。
+
+当前代码提交：
+
+```text
+29c1b006a53d9b02fc3cbef1d09707fbcbd72db5
+```
+
+服务器因GitHub:443不可达，外层代码通过只含Git跟踪内容的bundle fast-forward同步；服务器
+SONIC/IsaacLab工作树的未跟踪内容未修改。
+
+GPU smoke 已通过：
+
+```text
+Job: 2611-0162
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_smoke_20261108_005102
+```
+
+`execution_pass=true`、2 optimizer steps、252个有效completed episode、32个motion、
+`best.pt`/`last.pt`读回合同完整。Smoke的terminal A9 RMSE为1.058729、mixed masked RMSE为
+1.066947，只是链路/形状/CUDA证据，不是质量结论。
+
+正式单卡训练已提交：
+
+```text
+Job: 2611-0164
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_20261108_005619
+GPU: RTX 4090，1卡，48 GiB RAM，12h lease
+```
+
+正式训练完成前不得生成质量结论或启动四动作ghost；完成后使用best checkpoint运行
+`dagger/scripts/render_mlp_action11_ghost4.sh`，为MLP逐Action真实State反馈递推与SONIC
+release teacher分别生成4个motion、每条193帧的ghost。
