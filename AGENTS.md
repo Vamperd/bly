@@ -1235,3 +1235,42 @@ g1plus_replay65_prepare_20261019_124743_1247522
 证据，应先复制到归档目录；不能删除 `g1plus_asset_audit_20261019_024703` 或
 `g1plus_unlocked31_diag_20261019_160509_3309439`。`latent_distribution_kl2_kl4_recovered_*`
 与 G1+ 迁移无关，不能按本节清理规则处理。
+
+## 15. v5 reference DAgger 与 SONIC goal/state fixed-point 收尾（2026-11-07）
+
+v5 reference DAgger run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/dagger_cvae_kl2_pilot_v5ref_12h_20261106_221020/
+```
+
+Job `2611-0098` 正常退出并按 early-stop 合同结束，`rounds_completed=[0..8]`，
+`execution_pass=true`、`quality_pass=null`。round 9 的 teacher Action RMSE 从
+baseline `0.2844040390` 变为 `0.2960043685`，ratio `1.0407882022`，未达到所需
+`<=0.98`；termination rate `0.0407986111 -> 0.0403645833` 在容差内。最后完成的
+DAgger-after checkpoint 为 `checkpoints/round_09.pt`，不是 `best.pt`。
+
+新增 `dagger/src/dagger/sonic_goal_state_fixed_point.py` 只作SONIC语义诊断，不改变
+65-token CVAE输入合同。32 motion、最多10轮、每轮32步；State投影为SONIC goal的
+joint position/velocity加identity relative orientation。run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/sonic_goal_state_fixed_point_20261107_194056_v5/
+```
+
+结果 `converged_count=0/32`、`fixed_point_pass=false`；末轮平均 joint-pos/vel RMSE
+`4.785081`、goal relative RMSE `0.947131`、最大 update relative RMSE `1.574666`。
+没有 converged database；只写 manifest 与 execution/failed marker。
+
+四条三路 ghost 已回传到 5060 主机：
+
+```text
+/home/vamper/Desktop/replay/ghost_193_three_way_20261107_200505/videos/
+```
+
+每条均为193帧，层为 SONIC original / DAgger before / DAgger after；terminated motion
+用末姿态补齐到193帧。视频是kinematic ghost，不是物理质量通过。
+
+Git同步边界：本地 fixed-point commits 已生成；服务器 `git pull --ff-only` 因 GitHub
+443连接失败未更新 outer HEAD。服务器实验入口通过rsync同步且SHA256与本地一致；不得因
+服务器存在未跟踪嵌套 SONIC/IsaacLab 工作树而 reset/clean/覆盖。

@@ -1012,13 +1012,31 @@ CVAE_LONG_HORIZON_DATASET_RUN=<v5 长窗口 run> CVAE_REFERENCE_TABLE_RUN=<参�
 CVAE_REFERENCE_DATASET_RUN=<混合数据集 run> CVAE_INIT_CHECKPOINT=/home/helloworld/bly/runs/cvae_long_horizon_train_kl2_fp32_300k_20261016_005837_3380803/checkpoints/best.pt bash cvae_repro.sh reference-train-smoke
 ```
 
-### 下一步
+### 已执行闭环检查（2026-11-07）
 
-1. 等 diag 跑完，看 rmse 是否明显低于 0.31，并核对 `manifests/dagger_cvae_kl2_early_stop.json`。
-2. 等 200k C 微调 `cvae_reference_train_20261103_095438` 完成，看 full eval 的 `reference_anchor` RMSE。
-3. 跑 `cvae-kl2-pilot-v5ref-12h`，round 0 与 12h 的 round 0（rmse 0.333、term 0.047）对比，重点看前 32 步 / 之后分桶
-   RMSE 与 `fall_step_histogram`；同时用 `render_cvae_ghost4.sh` 渲染 sonic / mlp / DAgger 前 C / DAgger 后 C 四层 ghost。
-4. 此前列出的 ghost 视频、`sonic-arch-check`→`sonic-arch-6h`、future-reference 8h 及其 B+C 8h 变体，本次未核对执行状态。
+1. v5 reference DAgger `dagger_cvae_kl2_pilot_v5ref_12h_20261106_221020` 已结束：
+   `rounds_completed=[0..8]`，round 9 的 early-stop 检查失败于 teacher Action RMSE；
+   baseline/current 为 `0.284404/0.296004`，ratio `1.040788 > 0.98`，termination
+   `0.040799/0.040365` 在容差内。`execution_pass=true`、`quality_pass=null`，不能称为
+   质量通过；最终可复用的 DAgger-after checkpoint 是 `checkpoints/round_09.pt`。
+2. 新增 `dagger.sonic_goal_state_fixed_point`（本地提交 `dcc0f6b` 及后续修复提交）；
+   用 32 个 v5 motion、每次32步、最多10次迭代，把原生 SONIC reference goal 与真实
+   Physics State 的 `[joint_pos_canonical, joint_vel, identity relative orientation]`
+   投影对齐。run：
+   `/data1/users/bailinying/FlexSeqWBC/bly/runs/sonic_goal_state_fixed_point_20261107_194056_v5/`。
+   32/32 motion 未达到 `relative_tolerance=0.05` 与 `absolute_tolerance=0.05`；
+   末轮平均 joint-pos/vel RMSE `4.785081`、平均 goal relative RMSE `0.947131`、
+   最大 update relative RMSE `1.574666`。没有生成 converged database，只写
+   `goal_state_fixed_point.json` 与 execution/failed marker；结论是本合同下不动点失败。
+3. ghost 改用 `.venv_sim` 的 MuJoCo 直接渲染；每条 trajectory 终止后保持最后姿态至
+   193帧，不因 fall 或 motion quality fail 丢弃。四个三路 ghost（SONIC original /
+   DAgger before / DAgger after）已回传到：
+   `/home/vamper/Desktop/replay/ghost_193_three_way_20261107_200505/videos/`。
+   每条渲染日志均报告 `frames=193`，本地与服务器 SHA256 一致；这是运动学 ghost，不是
+   torque replay 或质量通过证据。
+4. GitHub 推送曾在代码阶段因网络失败；服务器 `git pull --ff-only origin CVAE-refactor`
+   最终仍因 GitHub 443 连接失败而未更新 outer HEAD。服务器实验入口通过一次性 rsync
+   同步，SHA256 与本地一致；没有 reset/clean，也没有覆盖嵌套 SONIC/IsaacLab 工作树。
 
 ### leis01 服务器迁移与运行
 

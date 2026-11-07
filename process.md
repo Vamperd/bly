@@ -318,3 +318,77 @@ CVAE DAgger v2 `episode_mix`：4 env中1 teacher、3 student；student先执行3
 `cvae_kl2_pilot_dagger_v2_2m.yaml` + `cvae_kl2_motion_manifest_2m.json`（2 env、12×2000）。旧v1配置和run只读。
 问题→修复：round0后同进程再次 `create_manager_env` 挂起且auto只处理进程退出 → CVAE KL2在CLI层强制一轮一进程，
 `run_dagger_auto.sh` 默认每shard 2400s超时、shard间等待5s，超时后自动重试/resume。
+
+## 25. SONIC goal/state fixed-point probe 与 DAgger ghost 渲染边界（2026-11-07）
+
+### 25.1 goal/state 维度差异的实验处理
+
+SONIC policy goal 的实际 actor 输入为 `[joint_pos(29), joint_vel(29), relative_orientation_6d(6)]`
+的10帧 future tokenizer；Physics State 为70维。不能直接把70维 State 当作63/64维 goal。
+本次 probe 明确使用投影合同：取 State 的 canonical joint position/velocity，relative
+orientation 设为相对自身的 identity 6D；base velocity、gravity、height、contact 不伪装成
+SONIC goal。该边界必须保留，否则“state≈goal”会把不可对应字段混入误差。
+
+### 25.2 32-motion 结果
+
+run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/sonic_goal_state_fixed_point_20261107_194056_v5/
+```
+
+32 个 motion、最多10轮、每轮32步。每轮把上一轮真实 State 轨迹作为下一轮 goal trajectory；
+实验没有保存 Action，只在满足 goal/update 双重门限时保存
+`goal/current_state/previous_state`。实际没有任何 motion 通过：
+
+```text
+converged_count = 0
+failed_count    = 32
+fixed_point_pass = false
+```
+
+末轮平均 joint-pos/vel RMSE `4.785081`、平均 goal relative RMSE `0.947131`，
+最大 update relative RMSE `1.574666`；门限是 absolute `0.05` 与 relative `0.05`。
+因此不能把“10次后误差下降”写成收敛；最终结论为**该投影合同下 State→SONIC-goal
+闭环不动点失败**。失败不是 NaN/环境崩溃：execution marker 存在，failed marker
+明确表达质量/收敛失败；没有 converged npz 数据库是合同预期。
+
+实验入口经历并修复了三个工程问题：未切换 SONIC 工作目录导致 URDF 相对路径失败；
+保留 `time_out` 导致32步前结束；motion cursor 到达短片段末尾触发 SONIC dtype 冲突。
+最终版本从 motion first frame 开始、移除 terminations、每步冻结 motion cursor，完整
+执行10轮。
+
+### 25.3 DAgger 与视频边界
+
+当前 v5 reference DAgger run 正常结束但 early-stop，round 9 teacher RMSE 未达到
+`<=0.98` baseline 改善，不能称为质量 PASS。视频使用最后完成的 `round_09.pt` 作为
+DAgger-after，C `best.pt` 作为 DAgger-before，SONIC `last.pt` 作为 original。
+
+原 ghost wrapper 的两个工程失败不能混写为模型结果：
+
+1. `render_cvae_ghost4.sh` 通过 Isaac `.venv-sonic` 调用 MuJoCo，而 MuJoCo 在
+   `.venv_sim`，solo render 报 `ModuleNotFoundError: mujoco`；
+2. 原脚本将 terminated motion 直接判失败。
+
+改用 `.venv_sim` 的 `render_policy_ghost.py`，trajectory 终止后重复最后姿态至193帧；
+四条三路视频全部报告 `frames=193`，并回传到本机：
+
+```text
+/home/vamper/Desktop/replay/ghost_193_three_way_20261107_200505/videos/
+```
+
+视频仅是同相机运动学 ghost，末姿态 padding 只保证可比较帧数；摔倒、termination 和
+DAgger quality null 仍须在报告中保留，不能从视频反推闭环物理成功。
+
+### 25.4 代码同步证据
+
+fixed-point 入口在本机当前分支已连续提交；GitHub push 在本轮网络策略调整前后均曾因
+GitHub SSH/HTTPS连接失败。服务器 outer `git pull --ff-only origin CVAE-refactor` 最终
+因 GitHub 443 连接失败保持在原 HEAD `b19227f`，没有 reset/clean。服务器实验入口通过
+一次性 rsync 同步，和本机 SHA256 均为：
+
+```text
+1370d8f0e93cf4ff6defe4c877cae34567d4af954a300d8436d4164bea30498c
+```
+
+嵌套 SONIC/IsaacLab 的用户修改未被覆盖。

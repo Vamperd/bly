@@ -429,3 +429,74 @@ train_motion_keys；评估为每轮 student-only 192 步、8 env，survival 粒�
   跨数据集微调 C；参考行只监督 Action 32..63 与 contact 33..64。参考表导出、混合数据集、训练入口与配置
   `posterior_hierarchical_standard_cvae_v5_reference_fp32.json` 已实现，Windows 测试通过（唯一失败项
   `test_long_horizon_dataset` 在 HEAD 上同样失败），Ubuntu 未执行。DAgger 接入（阶段 2）未实现。
+
+## 26. SONIC goal→State fixed-point probe、DAgger收尾与ghost归档（2026-11-07）
+
+### 26.1 goal/state 迭代实验
+
+新增入口 `dagger.sonic_goal_state_fixed_point`，只替换 SONIC G1 tokenizer 中的
+`command_multi_future_nonflat` 与 `motion_anchor_ori_b_mf_nonflat`；原生 SONIC
+teacher、Isaac dynamics、Action contract 不改。每次迭代执行32 steps，下一轮把上一轮
+真实 Physics State 的 joint position/velocity 投影为 goal，并把相对 orientation 设为
+identity 6D。只在收敛时保存 `goal/current_state/previous_state`，不保存 Action。
+
+服务器 run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/sonic_goal_state_fixed_point_20261107_194056_v5/
+```
+
+合同：32 motion、最多10轮、每轮32 steps、`relative_tolerance=0.05`、
+`absolute_tolerance=0.05`。结果：
+
+|指标|结果|
+|---|---:|
+|converged motions|0 / 32|
+|fixed_point_pass|false|
+|末轮平均 joint-pos/vel RMSE|4.785081|
+|末轮平均 goal relative RMSE|0.947131|
+|末轮最大 goal relative RMSE|1.5002107|
+|末轮最大 update relative RMSE|1.574666|
+
+10轮后仍无 motion 同时满足 goal/update 门限；因此没有写出 converged database，
+只生成 `goal_state_fixed_point.json`、`sonic_goal_state_fixed_point.execution.ok` 和
+`sonic_goal_state_fixed_point.failed.ok`。结论：在该 goal 投影与真实 Isaac State 合同下，
+没有观察到不动点或“小差异”收敛。
+
+### 26.2 v5 reference DAgger
+
+run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/dagger_cvae_kl2_pilot_v5ref_12h_20261106_221020/
+```
+
+Job `2611-0098` 正常退出并触发合同内 early-stop，完成 `rounds_completed=[0..8]`；
+`complete=false`、`execution_pass=true`、`quality_pass=null`。round 9 检查：
+
+```text
+baseline teacher_action_rmse = 0.2844040390
+current  teacher_action_rmse = 0.2960043685
+teacher_ratio                 = 1.0407882022  # required <= 0.98
+baseline termination_rate     = 0.0407986111
+current  termination_rate     = 0.0403645833
+```
+
+最终 DAgger-after 使用最后完成的 `checkpoints/round_09.pt`，不是 `best.pt` 或
+`best_survival.pt`；该结果不能写成 DAgger 质量通过。
+
+### 26.3 四动作 ghost
+
+原始 `render_cvae_ghost4.sh` 因 MuJoCo 安装在 `.venv_sim` 而不是 Isaac `.venv-sonic`
+无法完成 solo video，并且原脚本把摔倒 motion 当失败。后续直接使用 `.venv_sim` 的
+MuJoCo ghost renderer，将终止 trajectory 的最后姿态保持到193帧。四条视频每条均由
+三层组成：SONIC original、DAgger before（C `best.pt`）、DAgger after（`round_09.pt`）。
+
+本机归档：
+
+```text
+/home/vamper/Desktop/replay/ghost_193_three_way_20261107_200505/videos/
+```
+
+四个 MP4 均由 renderer 报告 `frames=193`，本机与服务器 SHA256 一致。该视频是
+kinematic ghost，摔倒后的末姿态保持只为满足可视化帧数，不代表物理质量通过。

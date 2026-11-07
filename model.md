@@ -337,3 +337,14 @@ fixed6是31-DoF G1+ runtime model；29-DoF C checkpoint仍只负责body joints�
 `windows/w000000/simulations/recursive_state_feedback_b/data/replay/000000.trajectory.pkl`。
 `simulate_g1_plus_action_compare.py` 的static-zero body control会让机器人在重力下蹲下，只说明无身体控制会失稳；
 C canonical Action是关节目标，不能直接当作fixed6 MJCF的torque ctrl。
+
+## 13. SONIC goal/state fixed-point 诊断边界（2026-11-07）
+
+该诊断不改变65-token CVAE输入合同，也不把 SONIC goal、motion ID或reference输入加入序列模型。
+SONIC actor实际使用的G1 goal tokenizer为10帧 `[joint_pos(29), joint_vel(29), relative_orientation_6d(6)]`；
+Physics State为70维。实验只将State的joint position/velocity映射到goal，relative orientation设为identity
+6D，并保留base velocity、gravity、height、contact为State侧不可映射字段。
+
+32-motion、10轮、每轮32步的结果没有任何motion达到goal/update双门限；结果只作SONIC输入语义差异诊断，
+不能解释为CVAE质量、DAgger质量或物理控制通过。固定点run、门限和失败证据见plan.md §26、
+process.md §25。
