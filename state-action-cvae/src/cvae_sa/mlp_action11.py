@@ -455,7 +455,7 @@ def build_recursive_query(
     state_start = max(0, target_step - 9)
     actual = [np.asarray(value, dtype=np.float32) for value in actual_states]
     for frame in range(state_start, target_step + 1):
-        slot = frame - state_start
+        slot = frame - target_step + (STATE_STEPS - 2)
         value = actual[frame] if frame < len(actual) else expected[frame]
         if value.shape != (STATE_DIM,) or not np.isfinite(value).all():
             raise ValueError("actual/expected State contains invalid values")
@@ -475,7 +475,7 @@ def build_recursive_query(
     for action_index in range(action_start, target_step):
         if action_index >= len(generated):
             continue
-        slot = action_index - action_start
+        slot = action_index - target_step + (ACTION_STEPS - 1)
         value = generated[action_index]
         if value.shape != (ACTION_DIM,) or not np.isfinite(value).all():
             raise ValueError("executed Action contains invalid values")

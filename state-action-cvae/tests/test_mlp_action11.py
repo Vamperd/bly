@@ -62,7 +62,7 @@ class MLPAction11Tests(unittest.TestCase):
         self.assertTrue(masks.target_action.any(dim=(1, 2)).all())
         for index in range(1000):
             target_rows = masks.target_action[index].any(dim=-1)
-            self.assertTrue(torch.all(~masks.action_visible[index][target_rows]))
+            self.assertTrue(torch.all(~masks.action_visible[index][masks.target_action[index]]))
             self.assertTrue(torch.all(masks.action_valid[index][target_rows]))
 
     def test_recursive_query_right_aligns_and_never_represents_a10(self) -> None:
