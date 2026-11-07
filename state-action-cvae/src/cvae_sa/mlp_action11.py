@@ -660,6 +660,7 @@ def run_training(
     max_steps_override: int | None = None,
     smoke: bool = False,
 ) -> dict[str, Any]:
+    output = output_run.expanduser().resolve()
     allowed_run_dirs = {"data", "manifests", "markers", "plots", "videos", "logs", "checkpoints"}
     if output.exists():
         unexpected = [item.name for item in output.iterdir() if item.name not in allowed_run_dirs]
