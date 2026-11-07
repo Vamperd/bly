@@ -268,7 +268,7 @@ def main() -> int:
         prepared = _prepare_release_env(config, output)
         terminations = prepared["release_config"].manager_env.terminations
         for name in list(terminations.keys()):
-            if name not in {"_target_", "time_out"}:
+            if name not in {"_target_"}:
                 del terminations[name]
         launcher, args_cli = _launch_app(config)
         env = _create_release_env(prepared, torch.device(str(args.device)), args_cli)
