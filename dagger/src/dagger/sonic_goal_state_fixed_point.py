@@ -147,6 +147,15 @@ def _restore_baseline(
     return env._augment(observation)
 
 
+def _freeze_motion_cursor(env: Any) -> None:
+    motion = env.motion_term
+    motion.set_motion_state(
+        motion.motion_ids,
+        torch.zeros_like(motion.time_steps),
+        torch.zeros_like(motion.motion_start_time_steps),
+    )
+
+
 def _baseline(env: Any) -> dict[str, torch.Tensor]:
     raw = _raw_env(env)
     robot = raw.scene["robot"]
@@ -313,6 +322,7 @@ def main() -> int:
                 goal_steps.append(goal64.detach().cpu())
                 action = teacher.act(policy_observation, done)
                 observation, _reward, next_done, _info = env.step({"actions": action})
+                _freeze_motion_cursor(env)
                 done = next_done.to(device=env.device).bool()
                 state_steps.append(env.physics_state().detach().cpu())
                 if bool(done.any()):
