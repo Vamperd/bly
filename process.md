@@ -392,3 +392,42 @@ GitHub SSH/HTTPS连接失败。服务器 outer `git pull --ff-only origin CVAE-r
 ```
 
 嵌套 SONIC/IsaacLab 的用户修改未被覆盖。
+
+## 26. 11-frame MLP Action completion：工程诊断与当前边界（2026-11-08）
+
+该实验使用Physics v5的32-motion train-only子集，11个State帧、10个Action帧，确定性MLP
+encoder/decoder，`A10`不在合同内；完整模型维度和Mask规则见model.md §14。
+
+### 26.1 已解决的工程问题
+
+1. 服务器登录shell没有GPU device。直接SSH运行BF16 smoke得到
+   `BF16 MLP training requires CUDA`，并非PyTorch安装失败。服务器使用`gpu`命令分配GPU；
+   Job `2611-0162`随后真实CUDA smoke通过。
+2. v5索引含4个`status=failed`、`steps<10`的episode；读取层过滤后仍保留全部32个motion、
+   252个completed episode，未修改HDF5或manifest。
+3. Shell预创建标准run子目录时，Python入口最初把这些空目录误判为非空；已修复为允许标准
+   `data/logs/checkpoints/manifests/markers/plots/videos`目录，同时拒绝未知既有内容。
+4. 递推render query首版没有在episode前缀右对齐；已修复为`t=0`的当前State放slot 9、
+   期望下一State放slot 10，历史Action同样右对齐。服务器3项MLP单测全部通过。
+
+### 26.2 Smoke证据与未完成项
+
+GPU smoke：
+
+```text
+Job: 2611-0162
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_smoke_20261108_005102
+```
+
+`execution_pass=true`、2步训练、checkpoint和summary完整；terminal A9 RMSE
+`1.0587294629`、mixed masked RMSE `1.0669467669`只作工程基线，不作质量结论。
+
+正式单卡训练：
+
+```text
+Job: 2611-0164
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_20261108_005619
+```
+
+该run在当前记录时仍为`RUNNING`，因此没有最终loss、best checkpoint质量、192步闭环State
+误差或ghost结果。正式run完成前不启动四动作视频，也不把低早期loss解释为收敛。
