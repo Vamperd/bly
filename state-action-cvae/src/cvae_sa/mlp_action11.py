@@ -660,9 +660,11 @@ def run_training(
     max_steps_override: int | None = None,
     smoke: bool = False,
 ) -> dict[str, Any]:
-    output = output_run.expanduser().resolve()
-    if output.exists() and any(output.iterdir()):
-        raise FileExistsError(f"output run must be new and empty: {output}")
+    allowed_run_dirs = {"data", "manifests", "markers", "plots", "videos", "logs", "checkpoints"}
+    if output.exists():
+        unexpected = [item.name for item in output.iterdir() if item.name not in allowed_run_dirs]
+        if unexpected:
+            raise FileExistsError(f"output run contains unexpected existing entries: {unexpected}")
     for folder in ("data", "manifests", "markers", "plots", "videos", "logs", "checkpoints"):
         (output / folder).mkdir(parents=True, exist_ok=True)
     seed = int(config.get("seed", 20261110))
