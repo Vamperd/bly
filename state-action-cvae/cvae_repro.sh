@@ -1277,6 +1277,42 @@ reference_train() {
   printf '%s\n' "$run_dir"
 }
 
+mlp_action11_train() {
+  local smoke="$1"
+  local dataset_run="${CVAE_MLP_ACTION11_DATASET_RUN:-${CVAE_DATASET_RUN:-}}"
+  local config="${CVAE_MLP_ACTION11_CONFIG:-$SCRIPT_DIR/configs/mlp_action11.json}"
+  local kind=mlp_action11 run_dir
+  local budget_args=()
+  [[ -n "$dataset_run" ]] || die "CVAE_MLP_ACTION11_DATASET_RUN or CVAE_DATASET_RUN is required"
+  [[ -f "$dataset_run/markers/cvae_dataset.ok" ]] || die "Physics dataset marker is missing: $dataset_run"
+  [[ -f "$config" ]] || die "MLP Action11 config is missing: $config"
+  if [[ "$smoke" == "true" ]]; then
+    kind=mlp_action11_smoke
+    budget_args=(--max-steps 2 --smoke)
+  elif [[ -n "${CVAE_MLP_ACTION11_MAX_STEPS:-}" ]]; then
+    budget_args=(--max-steps "$CVAE_MLP_ACTION11_MAX_STEPS")
+  fi
+  run_dir="$(new_run_dir "$kind")"
+  capture_environment "$run_dir"
+  run_logged "$run_dir" mlp_action11_train.log \
+    "$PYTHON" -m cvae_sa.mlp_action11 \
+      --dataset-run "$dataset_run" \
+      --output-run "$run_dir" \
+      --config "$config" \
+      "${budget_args[@]}"
+  if [[ "$smoke" == "true" ]]; then
+    [[ -f "$run_dir/markers/cvae_mlp_action11_smoke.ok" ]] \
+      || die "MLP Action11 smoke marker is missing"
+  else
+    [[ -f "$run_dir/markers/cvae_mlp_action11_execution.ok" ]] \
+      || die "MLP Action11 execution marker is missing"
+  fi
+  update_latest "$kind" "$run_dir"
+  printf '%s\n' "$run_dir"
+}
+
+
+
 posterior_h50_action_replay() {
   local dataset_run="${CVAE_DATASET_RUN:-}"
   local source_run="${CVAE_POSTERIOR_H50_REPLAY_SOURCE_RUN:-}"
@@ -1625,6 +1661,8 @@ case "${1:-}" in
   build-reference-mixed-dataset) reference_mixed_dataset ;;
   reference-train-smoke) reference_train true ;;
   reference-train) reference_train false ;;
+  mlp-action11-smoke) mlp_action11_train true ;;
+  mlp-action11) mlp_action11_train false ;;
   validate-action-mask-replay) validate_action_mask_replay ;;
   validate-state-mask-video) validate_state_mask_video ;;
   *) die "usage: bash ./cvae_repro.sh {build-index|build-physics-index|build-overfit-subset|build-long-horizon-dataset|long-horizon-dataset-smoke|long-horizon-train-smoke|long-horizon-train|long-horizon-eval|long-horizon-render|build-reference-mixed-dataset|reference-train-smoke|reference-train|smoke-train|train|overfit-capacity|overfit-full|overfit-single-task|posterior-capacity-smoke|posterior-capacity|posterior-capacity-25m-smoke|posterior-capacity-25m|posterior-capacity-plot|posterior-capacity-tail-diagnostic|posterior-capacity-ab-smoke|posterior-capacity-ab|posterior-capacity-ab-compare|posterior-capacity-autodecoder-smoke|posterior-capacity-autodecoder|posterior-capacity-latent-topology-smoke|posterior-capacity-latent-topology|posterior-capacity-latent-topology-compare|posterior-direct-output-smoke|posterior-direct-output|posterior-direct-output-oracle|posterior-hierarchical-t64-smoke|posterior-hierarchical-t64-autoencode|posterior-hierarchical-t64-continue|posterior-hierarchical-t64-fixed|posterior-hierarchical-t64-random|posterior-hierarchical-prior-smoke|posterior-hierarchical-prior-train|posterior-hierarchical-prior-decoder-adapt|posterior-hierarchical-standard-cvae-smoke|posterior-hierarchical-standard-cvae-fixed|posterior-hierarchical-standard-cvae-condition|posterior-hierarchical-standard-cvae-condition-fixed|posterior-hierarchical-standard-cvae-condition-dynamic|posterior-hierarchical-standard-cvae-condition-smoke|posterior-hierarchical-standard-cvae-random-physical|posterior-hierarchical-standard-cvae-kl|posterior-h50-action-replay|posterior-h50-action-replay-exact-init|analyze-overfit|diagnose-overfit-fixture|summarize-overfit|smoke-action-finetune|action-finetune|evaluate|sample|validate-action-mask-replay|validate-state-mask-video}" ;;

@@ -3597,6 +3597,9 @@ def build_model(config: dict[str, Any]) -> nn.Module:
         return HierarchicalConditionalPriorTransformer(config)
     if kind == "physics_hierarchical_standard_cvae_transformer":
         return HierarchicalStandardCVAETransformer(config)
+    if kind == "mlp_action_completion_11":
+        from .mlp_action11 import MLPActionCompletion11
+        return MLPActionCompletion11(config)
     if kind == "tcn":
         return TCNCVAE(config)
     raise ValueError(f"unsupported model kind {kind!r}")

@@ -1,0 +1,54 @@
+{
+  "format_version": "sonic_11_frame_mlp_action_completion_config_v1",
+  "architecture_version": "11-frame-mlp-action-completion-v1",
+  "seed": 20261110,
+  "data": {
+    "motion_count": 32,
+    "selection_seed": 20261110,
+    "motion_keys": null,
+    "train_samples_per_epoch": 16384,
+    "monitor_stride": 10,
+    "episode_start_probability": 0.10,
+    "num_workers": 0,
+    "pin_memory": true
+  },
+  "model": {
+    "kind": "mlp_action_completion_11",
+    "state_steps": 11,
+    "action_steps": 10,
+    "state_dim": 70,
+    "action_dim": 29,
+    "latent_dim": 256,
+    "encoder_widths": [2048, 1024, 512],
+    "decoder_widths": [1024, 2048, 512],
+    "dropout": 0.0,
+    "latent_mode": "deterministic"
+  },
+  "training": {
+    "precision": "BF16",
+    "micro_batch": 256,
+    "monitor_batch": 512,
+    "monitor_batches": 64,
+    "max_steps": 250000,
+    "max_wall_hours": 12.0,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.0001,
+    "warmup_steps": 2000,
+    "min_lr_ratio": 0.05,
+    "gradient_clip": 1.0,
+    "monitor_interval": 2000,
+    "checkpoint_interval": 10000
+  },
+  "masking": {
+    "step_fraction": 0.70,
+    "feature_fraction": 0.30,
+    "last_action_probability": 0.55,
+    "a10_policy": "absent"
+  },
+  "rendering": {
+    "horizon_actions": 192,
+    "motion_count": 4,
+    "unknown_prefix_policy": "valid_zero",
+    "target_action_slot": 9
+  }
+}
