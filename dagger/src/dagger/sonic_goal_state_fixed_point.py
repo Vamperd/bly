@@ -264,6 +264,7 @@ def main() -> int:
         "converged": [],
     }
     try:
+        os.chdir(config.sonic_repo_root)
         prepared = _prepare_release_env(config, output)
         terminations = prepared["release_config"].manager_env.terminations
         for name in list(terminations.keys()):
@@ -392,7 +393,9 @@ def main() -> int:
         if env is not None:
             env.close()
         if launcher is not None:
-            launcher.close()
+            close = getattr(launcher, "close", None)
+            if callable(close):
+                close()
 
 
 def _write_json(path: Path, payload: object) -> None:
