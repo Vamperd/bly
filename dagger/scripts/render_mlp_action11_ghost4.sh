@@ -33,7 +33,7 @@ OUT_ROOT="${SONIC_RUNS_ROOT:-$PROJECT_ROOT/runs}/mlp_action11_ghost4_$(date +%Y%
 
 export CVAE_KL2_MOTION_FILE="$MOTION_FILE"
 export PYTHONPATH="$DAGGER_ROOT/src:$STATE_ACTION_CVAE_ROOT/src:$SONIC_REPO_ROOT:$SONIC_KIT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-export TMPDIR="$OUT_ROOT/tmp"
+export TMPDIR="${GHOST_TMPDIR:-${TMPDIR:-/tmp}}"
 mkdir -p "$TMPDIR"
 mkdir -p "$OUT_ROOT/cases"
 
