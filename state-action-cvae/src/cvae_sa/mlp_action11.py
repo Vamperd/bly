@@ -722,6 +722,7 @@ def run_training(
     *,
     max_steps_override: int | None = None,
     smoke: bool = False,
+    resume_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     output = output_run.expanduser().resolve()
     allowed_run_dirs = {"data", "manifests", "markers", "plots", "videos", "logs", "checkpoints"}
@@ -792,6 +793,28 @@ def run_training(
         return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
+    resume_payload: dict[str, Any] | None = None
+    start_step = 0
+    if resume_checkpoint is not None:
+        resume_path = resume_checkpoint.expanduser().resolve()
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"resume checkpoint is missing: {resume_path}")
+        resume_payload = torch.load(resume_path, map_location=device, weights_only=False)
+        if resume_payload.get("format_version") != CHECKPOINT_FORMAT:
+            raise ValueError("resume checkpoint format does not match MLP Action11")
+        if resume_payload.get("architecture_version") != ARCHITECTURE_VERSION:
+            raise ValueError("resume checkpoint architecture does not match MLP Action11")
+        if resume_payload.get("model_signature") != model.architecture_signature():
+            raise ValueError("resume checkpoint model signature does not match current config")
+        source_selection = resume_payload.get("selection", {})
+        if source_selection.get("selected_motion_keys") != selection.get("selected_motion_keys"):
+            raise ValueError("resume checkpoint motion selection does not match current dataset")
+        model.load_state_dict(resume_payload["model"], strict=True)
+        optimizer.load_state_dict(resume_payload["optimizer"])
+        scheduler.load_state_dict(resume_payload["scheduler"])
+        start_step = int(resume_payload.get("optimizer_step", 0))
+        if start_step < 0 or start_step >= max_steps:
+            raise ValueError("resume checkpoint optimizer_step must be within current max_steps")
     train_loader = DataLoader(
         train, batch_size=micro_batch, shuffle=False, num_workers=int(data_cfg.get("num_workers", 0)),
         pin_memory=bool(data_cfg.get("pin_memory", False)),
@@ -806,6 +829,15 @@ def run_training(
     best_score = float("inf")
     best_metrics: dict[str, Any] | None = None
     last_metrics: dict[str, Any] | None = None
+    if resume_payload is not None:
+        resume_metrics = resume_payload.get("metrics")
+        if not isinstance(resume_metrics, dict):
+            raise ValueError("resume checkpoint does not contain monitor metrics")
+        best_metrics = dict(resume_metrics)
+        last_metrics = dict(resume_metrics)
+        best_score = float(
+            best_metrics["terminal_a9_action_rmse"] + best_metrics["mixed_masked_action_rmse"]
+        )
     started = time.monotonic()
     stop_reason = "max_steps"
     interrupted = False
@@ -817,6 +849,8 @@ def run_training(
              "action_mean": train.action_mean, "action_std": train.action_std}, metrics,
         )
         atomic_torch_save(output / "checkpoints" / name, payload)
+    if resume_payload is not None and best_metrics is not None:
+        save("best.pt", best_metrics, start_step)
 
     def handle_signal(_signum: int, _frame: Any) -> None:
         nonlocal interrupted, stop_reason
@@ -826,7 +860,7 @@ def run_training(
     previous_handlers = {signal.SIGTERM: signal.signal(signal.SIGTERM, handle_signal),
                          signal.SIGINT: signal.signal(signal.SIGINT, handle_signal)}
     try:
-        for step in range(1, max_steps + 1):
+        for step in range(start_step + 1, max_steps + 1):
             if interrupted or time.monotonic() - started >= wall_seconds:
                 stop_reason = "wall_clock" if not interrupted else stop_reason
                 break
@@ -888,12 +922,12 @@ def run_training(
         "wall_clock_limit_hours": float(wall_seconds / 3600.0),
         "parameter_count": model.architecture_signature()["parameter_count"],
         "model_contract": model.architecture_signature(),
-        "train_only": True,
+        "initial_optimizer_step": start_step,
         "motion_selection": selection,
         "best_score": None if best_metrics is None else best_score,
         "best_metrics": best_metrics,
         "last_metrics": last_metrics,
-        "checkpoint_policy": "best.pt and last.pt only",
+        "resume_checkpoint": None if resume_checkpoint is None else str(resume_checkpoint.expanduser().resolve()),
         "a10_policy": "not represented; S11 is unavailable",
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -912,6 +946,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=root / "configs/mlp_action11.json")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--resume-checkpoint", type=Path)
     return parser.parse_args(argv)
 
 
@@ -920,7 +955,9 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     summary = run_training(
         args.dataset_run, args.output_run, config,
-        max_steps_override=args.max_steps, smoke=args.smoke,
+        max_steps_override=args.max_steps,
+        smoke=args.smoke,
+        resume_checkpoint=args.resume_checkpoint,
     )
     print(json.dumps({
         "output_run": str(args.output_run.expanduser().resolve()),

@@ -9,7 +9,7 @@
     "train_samples_per_epoch": 16384,
     "monitor_stride": 10,
     "episode_start_probability": 0.10,
-    "num_workers": 0,
+    "num_workers": 2,
     "pin_memory": true,
     "cache_in_memory": true
   },
@@ -30,15 +30,15 @@
     "micro_batch": 256,
     "monitor_batch": 512,
     "monitor_batches": 64,
-    "max_steps": 250000,
+    "max_steps": 300000,
     "max_wall_hours": 12.0,
     "learning_rate": 0.0002,
     "weight_decay": 0.0001,
     "warmup_steps": 2000,
     "min_lr_ratio": 0.05,
     "gradient_clip": 1.0,
-    "monitor_interval": 10000,
-    "checkpoint_interval": 10000
+    "monitor_interval": 50000,
+    "checkpoint_interval": 50000
   },
   "masking": {
     "step_fraction": 0.70,
