@@ -501,7 +501,7 @@ MuJoCo ghost renderer，将终止 trajectory 的最后姿态保持到193帧。�
 四个 MP4 均由 renderer 报告 `frames=193`，本机与服务器 SHA256 一致。该视频是
 kinematic ghost，摔倒后的末姿态保持只为满足可视化帧数，不代表物理质量通过。
 
-## 27. 11-frame deterministic MLP Action completion（2026-11-08，训练完成；ghost待调度）
+## 27. 11-frame deterministic MLP Action completion（2026-11-08，训练与ghost完成）
 
 该实验独立于65-token Transformer/CVAE，使用Physics v5的70维State与29维canonical Action；
 只使用确定性选择的32个motion，不建立test split。训练窗口是11帧State与10帧Action，`A10`不在
@@ -512,7 +512,7 @@ model.md §14。
 当前代码最新提交：
 
 ```text
-d6250a2d7c7c18eef485f4bdd204e7c004abf445
+7c313ec4a9e6616453e99dbae677216206196c06
 ```
 
 服务器因GitHub:443不可达，外层代码通过只含Git跟踪内容的bundle fast-forward同步；服务器
@@ -565,13 +565,15 @@ unknown-prefix闭环物理质量。正式run有`cvae_mlp_action11_execution.ok`�
 `exercise_2_001__A036`因只有140步被排除。回放工具已补齐迁移目录的HDF5/schema、
 collection manifest和motion PKL路径映射。
 
-Ghost任务`2611-0326`已提交，但服务器GPU分配器当前因
-`OSError: [Errno 19] No such device`暂停新分配，任务处于QUEUED；因此当前没有可回传的
-MLP/SONIC视频，不能写成ghost完成。恢复GPU分配后继续运行：
+Ghost任务最终为`2611-0355`，在管理员维护结束后成功运行：
 
-```bash
-dagger/scripts/render_mlp_action11_ghost4.sh \
-  /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_20261108_005619/checkpoints/best.pt \
-  /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_stepwise_prepare_20261108_v4/manifests/cases.json \
-  dagger/configs/stepwise_recursive_causal.yaml 192
+```text
+server run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_ghost4_20261108_154306/
+local archive: /home/vamper/Desktop/replay/mlp_action11_ghost4_20261108_154306/
 ```
+
+四个motion均完成MLP recorded-state递推、SONIC teacher rollout和MuJoCo ghost渲染。每条视频
+均为193帧、50 Hz、3.86 s，marker为`mlp_action11_ghost4.ok`及四个
+`policy_ghost.ok`；视频层为`mlp_action11`与`sonic`，不因摔倒截断。该结果证明工程链路和
+可视化完整，不代表MLP闭环物理质量或泛化通过。服务器 `.venv-sonic` 为补齐渲染依赖安装
+MuJoCo 3.3.7、GLFW和PyOpenGL。

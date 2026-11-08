@@ -457,6 +457,19 @@ quality_pass             = null
 映射：`replay65.load_source`及`action_mask_eval._resolve_motion_file`现在对schema、HDF5、
 collection manifest和motion PKL统一调用`resolve_dataset_path()`。
 
-Ghost Job `2611-0326`已提交但处于QUEUED，原因是服务器GPU分配器暂停新分配并报告
-`OSError: [Errno 19] No such device`。因此尚无MLP/SONIC视频、193帧校验或本机回传文件；
-这属于基础设施调度阻塞，不应写成模型/渲染失败。
+Ghost最终Job为`2611-0355`，管理员维护结束后从QUEUED进入RUNNING并以exit code 0完成。服务器
+run为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_ghost4_20261108_154306/
+```
+
+四个motion均完成192 Action/193 State的MLP递推、SONIC rollout和MuJoCo ghost渲染；四个
+`policy_ghost.json`均记录`frames=193`、`fps=50`、`seconds=3.86`，`policy_ghost.ok`和
+根`mlp_action11_ghost4.ok`均存在。视频已回传：
+
+```text
+/home/vamper/Desktop/replay/mlp_action11_ghost4_20261108_154306/
+```
+
+该结果仅证明递推、渲染和文件回传链路完整；不构成MLP闭环物理质量、泛化或摔倒避免通过。
