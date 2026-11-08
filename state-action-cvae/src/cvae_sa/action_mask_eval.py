@@ -68,7 +68,8 @@ def _dataset_representation(dataset_run: Path) -> tuple[dict[str, Any], bool]:
 
 
 def _resolve_motion_file(record: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
-    source_run = Path(record["source_run"])
+    from .path_mapping import resolve_dataset_path
+    source_run = resolve_dataset_path(record["source_run"])
     manifest = source_run / "manifests/motion_manifest.jsonl"
     if not manifest.is_file():
         raise FileNotFoundError(f"collection motion manifest is missing: {manifest}")
@@ -79,7 +80,14 @@ def _resolve_motion_file(record: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
         )
     row = matches[0]
     candidates = [row.get("final_pkl"), row.get("converted_pkl")]
-    path = next((Path(value) for value in candidates if value and Path(value).is_file()), None)
+    path = next(
+        (
+            resolve_dataset_path(value)
+            for value in candidates
+            if value and resolve_dataset_path(value).is_file()
+        ),
+        None,
+    )
     if path is None:
         raise FileNotFoundError(
             f"motion PKL for {record['motion_key']} is unavailable; checked {candidates}"
