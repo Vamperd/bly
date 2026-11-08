@@ -58,6 +58,28 @@ class MLPCVAE11Tests(unittest.TestCase):
             self.assertTrue(torch.equal(masks["action_before"][row], batch["action_before_window"][row]))
             self.assertEqual(bool(masks["action_before_valid"][row]), bool(batch["action_before_valid"][row]))
 
+    def test_posterior_sees_masked_truth_while_prior_sees_condition(self) -> None:
+        batch = self.batch(128)
+        masks = CausalBlockMaskSampler(31).sample(batch)
+        row = next(index for index, family in enumerate(masks["family"]) if family == "action_only")
+        model = MLPConditionalVAE11(self.config())
+        condition = model._condition_vector(
+            masks["condition_state"][row : row + 1], masks["condition_action"][row : row + 1],
+            masks["state_visible"][row : row + 1], masks["action_visible"][row : row + 1],
+            masks["state_valid"][row : row + 1], masks["action_valid"][row : row + 1],
+            masks["target_state"][row : row + 1], masks["target_action"][row : row + 1],
+            masks["action_before"][row : row + 1], masks["action_before_valid"][row : row + 1],
+        )
+        posterior = model._condition_vector(
+            masks["posterior_state"][row : row + 1], masks["posterior_action"][row : row + 1],
+            masks["state_visible"][row : row + 1], masks["action_visible"][row : row + 1],
+            masks["state_valid"][row : row + 1], masks["action_valid"][row : row + 1],
+            masks["target_state"][row : row + 1], masks["target_action"][row : row + 1],
+            masks["action_before"][row : row + 1], masks["action_before_valid"][row : row + 1],
+            use_visibility=False,
+        )
+        self.assertFalse(torch.allclose(condition, posterior))
+
     def test_initial_action_has_invalid_history_marker(self) -> None:
         batch = self.batch(100)
         masks = CausalBlockMaskSampler(9).sample(batch)

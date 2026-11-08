@@ -106,11 +106,17 @@ class MLPConditionalVAE11(nn.Module):
         target_action: torch.Tensor,
         action_before: torch.Tensor,
         action_before_valid: torch.Tensor,
+        *,
+        use_visibility: bool = True,
     ) -> torch.Tensor:
-        state_mask = (state_visible & state_valid).to(state.dtype)
-        action_mask = (action_visible & action_valid).to(action.dtype)
-        state_value = state * state_mask.unsqueeze(-1)
-        action_value = action * action_mask.unsqueeze(-1)
+        visible_state = state_visible & state_valid
+        visible_action = action_visible & action_valid
+        state_value_mask = visible_state if use_visibility else state_valid
+        action_value_mask = visible_action if use_visibility else action_valid
+        state_mask = visible_state.to(state.dtype)
+        action_mask = visible_action.to(action.dtype)
+        state_value = state * state_value_mask.to(state.dtype).unsqueeze(-1)
+        action_value = action * action_value_mask.to(action.dtype).unsqueeze(-1)
         before_valid = action_before_valid.to(action.dtype).unsqueeze(-1)
         before_value = action_before * before_valid
         return torch.cat(
@@ -156,7 +162,7 @@ class MLPConditionalVAE11(nn.Module):
         posterior_condition = self._condition_vector(
             posterior_state, posterior_action, state_visible, action_visible,
             state_valid, action_valid, target_state, target_action,
-            action_before, action_before_valid,
+            action_before, action_before_valid, use_visibility=False,
         )
         posterior_hidden = self.posterior_encoder(posterior_condition)
         prior_hidden = self.prior_encoder(condition)
