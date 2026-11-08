@@ -534,3 +534,29 @@ Job成功完成，四个manifest均为`frames=193`、`fps=50`、`seconds=3.86`�
 四个MP4、根`mlp_action11_ghost4.ok`、四个`policy_ghost.ok`、MLP replay marker和SONIC
 render marker均存在。优化后Action RMSE下降，但render-only递推仍报告约45 m root RMSE；
 因此不能把ghost完整性解释为闭环物理通过。
+
+## 29. 11-frame MLP conditional CVAE：实现审查与正式训练（2026-11-08）
+
+本阶段模型不接收SONIC goal，保持Physics State/Action原始70/29维合同。首次实现审查发现
+三个会改变训练语义的问题，均在正式训练形成有效进度前修复：
+
+1. mask与valid广播维度错误，batch forward失败；
+2. causal目标Action虽然右对齐到slot 9，但target valid/visible设置不一致；
+3. posterior q复用condition visibility，masked truth被清零，q会退化为p。
+
+另外，causal `action_before_window`曾误写成`A[t-1]`，而不是保留窗口前历史及其valid标识。
+这些问题分别由服务器4项单测覆盖；修复后q可见完整truth、p只见visible condition，
+causal首动作使用显式invalid标识。
+
+第一次正式任务`2611-0436`和第二次`2611-0438`均由代理主动停止，不是GPU、HDF5、CUDA
+或NaN故障。最终任务：
+
+```text
+Job: 2611-0439
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_20261108_223113/
+Source: b474de3716b2e60d95b8a89cb8bfdba198029ac3
+```
+
+在约20k step时，`best.pt`的prior State/Action RMSE为`0.198775/0.107051`，
+causal prior Action RMSE为`0.091294`，KL beta已达到`0.002`。当前仍需等待10h任务结束，
+再使用best checkpoint执行四个193帧CVAE/SONIC ghost；中间checkpoint不构成最终质量结论。
