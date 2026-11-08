@@ -486,3 +486,108 @@ bash dagger/scripts/render_mlp_action11_ghost4.sh \
 该入口为每个motion独立运行MLP Isaac递推；SONIC使用同motion的release teacher，随后由
 `render_policy_ghost.py`输出MLP/SONIC两层193帧ghost。Isaac执行、轨迹、ghost和manifest都写入
 新run；视频完整性与物理质量分开。
+
+## 15. 11-frame MLP conditional CVAE（2026-11-08，当前训练）
+
+该实验仍独立于65-token层级CVAE。它回归最小序列生成合同：`S0..S10`共11帧State、
+`A0..A9`共10帧Action；不接收SONIC goal，不修正goal与Physics State的差异，也不使用
+motion ID、reference或dynamics context。`A10`不在输入或输出中。训练只使用Physics v5
+train split中确定性选择的32个motion，不建立test split。
+
+代码入口：
+
+```text
+state-action-cvae/src/cvae_sa/mlp_cvae11.py
+state-action-cvae/configs/mlp_cvae11.json
+dagger/src/dagger/mlp_cvae11_recorded_state_replay.py
+dagger/scripts/render_mlp_cvae11_ghost4.sh
+```
+
+### 15.1 输入与显式辅助编码
+
+每个训练样本的原始张量为：
+
+```text
+State       [B,11,70]
+Action      [B,10,29]
+Action_before_window       [B,29]
+Action_before_window_valid [B]
+```
+
+State/Action均使用行级`visible`、`valid`和`target`编码；不使用feature-level mask。MLP
+condition向量的完整宽度为：
+
+```text
+11*70 + 11              # State value + State visible
++ 10*29 + 10            # Action value + Action visible
++ 11 + 10               # State/Action valid
++ 11 + 10               # State/Action target
++ 29 + 1                # action_before + valid
+= 1153
+```
+
+### 15.2 q/p、latent与decoder
+
+q posterior和p prior各自使用独立的：
+
+```text
+1153 -> 2816 -> 1792 -> 896 -> 512
+```
+
+每条路径输出`mean[384]`和`logvar[384]`。训练时：
+
+```text
+zq ~ q(z | complete sequence, mask)
+zp ~ p(z | visible sequence, mask)
+```
+
+q接收完整target值，但仍接收visibility/valid/target标识；p只接收visibility置零后的
+可见条件。q/p不把完整truth传给decoder。两条路径共享一个decoder：
+
+```text
+condition[1153] + z[384] = 1537
+1537 -> 2048 -> 1536 -> 768 -> 1060
+1060 = State[11,70] + Action[10,29]
+```
+
+实际参数量为`30,365,732`。每层为`Linear -> LayerNorm -> GELU`，latent为全局Gaussian。
+
+### 15.3 mask与训练前向
+
+任务族按样本采样：
+
+```text
+causal      40%
+State-only  20%
+Action-only 20%
+Both        20%
+```
+
+causal任务随机选择`t∈[0,9]`，将目标`A_t`右对齐到Action slot 9，State slot 9为当前
+`S_t`，State slot 10为`S[t+1]`。已知历史Action右对齐到slot 0..8；缺失左前缀为
+`value=0, valid=0`。目标slot满足`valid=1, visible=0, target=1`。episode起点的
+`action_before_window`由`valid=0`显式表示。
+
+State-only、Action-only和Both只隐藏长度1–2的时间块；没有feature-level mask。训练不做
+递推，使用teacher-forced窗口。masked State/Action只在对应target上计入loss：
+
+```text
+0.25*(q_State + q_Action + p_State + p_Action)
++ kl_beta * KL(q || p)
+```
+
+`kl_beta`从0线性升至`0.002`，前10000 step完成warmup。部署只允许p路径。
+
+### 15.4 prior递推与ghost
+
+`mlp_cvae11_recorded_state_replay.py`只用于render：
+
+1. 以Isaac真实当前State、记录的期望下一State和已执行Action构造右对齐11/10 query；
+2. 调用p encoder，采样`zp`；
+3. decoder输出完整State/Action，取Action slot 9；
+4. canonical Action转runtime/raw Action并执行一个Isaac step；
+5. 读取真实State，重复192次。
+
+该过程输出192个Action和193帧，再与SONIC release teacher渲染成两层193帧ghost。物理
+摔倒不截断视频；视频完整性和物理质量分开记录。正式10小时训练Job为`2611-0439`，
+启动时使用源码`b474de3716b2e60d95b8a89cb8bfdba198029ac3`。
