@@ -501,7 +501,7 @@ MuJoCo ghost renderer，将终止 trajectory 的最后姿态保持到193帧。�
 四个 MP4 均由 renderer 报告 `frames=193`，本机与服务器 SHA256 一致。该视频是
 kinematic ghost，摔倒后的末姿态保持只为满足可视化帧数，不代表物理质量通过。
 
-## 27. 11-frame deterministic MLP Action completion（2026-11-08，进行中）
+## 27. 11-frame deterministic MLP Action completion（2026-11-08，训练完成；ghost待调度）
 
 该实验独立于65-token Transformer/CVAE，使用Physics v5的70维State与29维canonical Action；
 只使用确定性选择的32个motion，不建立test split。训练窗口是11帧State与10帧Action，`A10`不在
@@ -509,16 +509,16 @@ kinematic ghost，摔倒后的末姿态保持只为满足可视化帧数，不�
 实际12,773,922参数；逐特征Mask、invalid `action_before`标识和render-only右对齐递推合同见
 model.md §14。
 
-当前代码提交：
+当前代码最新提交：
 
 ```text
-29c1b006a53d9b02fc3cbef1d09707fbcbd72db5
+d6250a2d7c7c18eef485f4bdd204e7c004abf445
 ```
 
 服务器因GitHub:443不可达，外层代码通过只含Git跟踪内容的bundle fast-forward同步；服务器
 SONIC/IsaacLab工作树的未跟踪内容未修改。
 
-GPU smoke 已通过：
+GPU smoke：
 
 ```text
 Job: 2611-0162
@@ -526,17 +526,52 @@ Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_smoke_20261108_005
 ```
 
 `execution_pass=true`、2 optimizer steps、252个有效completed episode、32个motion、
-`best.pt`/`last.pt`读回合同完整。Smoke的terminal A9 RMSE为1.058729、mixed masked RMSE为
+`best.pt`/`last.pt`读回合同完整。Smoke terminal A9 RMSE为1.058729、mixed masked RMSE为
 1.066947，只是链路/形状/CUDA证据，不是质量结论。
 
-正式单卡训练已提交：
+正式单卡12小时训练已结束：
 
 ```text
 Job: 2611-0164
 Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_20261108_005619
-GPU: RTX 4090，1卡，48 GiB RAM，12h lease
+GPU: RTX 4090，1卡，48 GiB RAM
+optimizer steps: 17630
+stop: scheduler TIME_LIMIT / SIGTERM
 ```
 
-正式训练完成前不得生成质量结论或启动四动作ghost；完成后使用best checkpoint运行
-`dagger/scripts/render_mlp_action11_ghost4.sh`，为MLP逐Action真实State反馈递推与SONIC
-release teacher分别生成4个motion、每条193帧的ghost。
+正式 summary：
+
+```text
+execution_pass = true
+quality_pass = null
+best mixed masked Action RMSE = 0.1116170069
+best terminal A9 Action RMSE  = 0.0901557451
+best score                   = 0.2017727520
+checkpoint policy            = best.pt and last.pt only
+```
+
+该结果是32-motion train-only completion 质量结果，不是test泛化结果，也不代表render-only
+unknown-prefix闭环物理质量。正式run有`cvae_mlp_action11_execution.ok`和`cvae.interrupted`；
+后者是调度器时间到期后的安全停止标记，不是训练异常。
+
+四个192-step exact-init/source case已准备：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_stepwise_prepare_20261108_v4/
+```
+
+选择的motion为`body_stretch_4_002__A054`、`body_stretch_v003_001__A362`、
+`dance_vouge_butterfly_step_270_R_003__A324`、`forward_lunge_R_001__A362`。
+`exercise_2_001__A036`因只有140步被排除。回放工具已补齐迁移目录的HDF5/schema、
+collection manifest和motion PKL路径映射。
+
+Ghost任务`2611-0326`已提交，但服务器GPU分配器当前因
+`OSError: [Errno 19] No such device`暂停新分配，任务处于QUEUED；因此当前没有可回传的
+MLP/SONIC视频，不能写成ghost完成。恢复GPU分配后继续运行：
+
+```bash
+dagger/scripts/render_mlp_action11_ghost4.sh \
+  /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_20261108_005619/checkpoints/best.pt \
+  /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_stepwise_prepare_20261108_v4/manifests/cases.json \
+  dagger/configs/stepwise_recursive_causal.yaml 192
+```

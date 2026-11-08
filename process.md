@@ -422,6 +422,8 @@ Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_smoke_20261108_005
 `execution_pass=true`、2步训练、checkpoint和summary完整；terminal A9 RMSE
 `1.0587294629`、mixed masked RMSE `1.0669467669`只作工程基线，不作质量结论。
 
+### 26.3 正式训练结果与ghost边界
+
 正式单卡训练：
 
 ```text
@@ -429,5 +431,32 @@ Job: 2611-0164
 Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_20261108_005619
 ```
 
-该run在当前记录时仍为`RUNNING`，因此没有最终loss、best checkpoint质量、192步闭环State
-误差或ghost结果。正式run完成前不启动四动作视频，也不把低早期loss解释为收敛。
+Job因`TIME_LIMIT`收到SIGTERM，完成17630 optimizer steps；run写出
+`cvae_mlp_action11_execution.ok`、`best.pt`和`last.pt`。这不是训练异常，但没有达到配置中
+250000 steps上限。
+
+正式最佳指标：
+
+```text
+mixed masked Action RMSE = 0.1116170069
+terminal A9 Action RMSE  = 0.0901557451
+best score               = 0.2017727520
+quality_pass             = null
+```
+
+指标只针对32-motion train-only completion Mask，不是test泛化、render unknown-prefix闭环或
+物理质量门禁。`cvae.interrupted`表达调度器安全停止。
+
+四动作case准备run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_stepwise_prepare_20261108_v4/
+```
+
+四个motion均有192-step source replay和exact initialization。初次准备暴露并修复了迁移路径
+映射：`replay65.load_source`及`action_mask_eval._resolve_motion_file`现在对schema、HDF5、
+collection manifest和motion PKL统一调用`resolve_dataset_path()`。
+
+Ghost Job `2611-0326`已提交但处于QUEUED，原因是服务器GPU分配器暂停新分配并报告
+`OSError: [Errno 19] No such device`。因此尚无MLP/SONIC视频、193帧校验或本机回传文件；
+这属于基础设施调度阻塞，不应写成模型/渲染失败。
