@@ -61,8 +61,8 @@ class MLPConditionalVAE11(nn.Module):
         self.state_steps = STATE_STEPS
         self.action_steps = ACTION_STEPS
         self.condition_dim = (
-            STATE_STEPS * STATE_DIM * 2
-            + ACTION_STEPS * ACTION_DIM * 2
+            STATE_STEPS * STATE_DIM + STATE_STEPS
+            + ACTION_STEPS * ACTION_DIM + ACTION_STEPS
             + STATE_STEPS + ACTION_STEPS
             + STATE_STEPS + ACTION_STEPS
             + ACTION_DIM + 1
@@ -289,6 +289,7 @@ class CausalBlockMaskSampler:
             action_valid[row] = row_action_valid[0]
             state_visible[row] = row_state_valid[0]
             action_visible[row] = row_action_valid[0]
+            action_visible[row, -1] = False
             target_state[row] = row_target_state[0]
             target_action[row] = row_target_action[0]
             before[row] = row_before[0]
