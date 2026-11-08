@@ -10,7 +10,8 @@
     "monitor_stride": 10,
     "episode_start_probability": 0.10,
     "num_workers": 0,
-    "pin_memory": true
+    "pin_memory": true,
+    "cache_in_memory": true
   },
   "model": {
     "kind": "mlp_action_completion_11",
@@ -36,7 +37,7 @@
     "warmup_steps": 2000,
     "min_lr_ratio": 0.05,
     "gradient_clip": 1.0,
-    "monitor_interval": 2000,
+    "monitor_interval": 10000,
     "checkpoint_interval": 10000
   },
   "masking": {

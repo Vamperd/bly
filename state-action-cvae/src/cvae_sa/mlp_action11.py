@@ -30,6 +30,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from .dataset import StateActionWindowDataset
+from .physics_schema import read_physics_states
 from .util import atomic_torch_save, atomic_write_json, atomic_write_text, load_config, seed_everything
 
 STATE_STEPS = 11
@@ -78,7 +79,12 @@ def select_motion_keys(
 
 
 class Action11WindowDataset(Dataset[dict[str, Any]]):
-    """Physics-v5 train-only windows with deterministic 32-motion selection."""
+    """Physics-v5 train-only windows with deterministic 32-motion selection.
+
+    ``cache_in_memory`` materializes the selected episodes once and removes
+    HDF5 reads from the optimizer loop.  The cache contains only normalized
+    State/Action arrays required by this model; source HDF5 remains read-only.
+    """
 
     def __init__(
         self,
@@ -91,8 +97,10 @@ class Action11WindowDataset(Dataset[dict[str, Any]]):
         samples_per_epoch: int = 8192,
         validation_stride: int = 10,
         start_probability: float = 0.10,
+        cache_in_memory: bool = False,
     ) -> None:
         self.training = bool(training)
+        self.cache_in_memory = bool(cache_in_memory)
         self.base = StateActionWindowDataset(
             dataset_run.expanduser().resolve(),
             "train",
@@ -132,6 +140,53 @@ class Action11WindowDataset(Dataset[dict[str, Any]]):
         self.samples_per_epoch = int(samples_per_epoch)
         if self.training and self.samples_per_epoch <= 0:
             raise ValueError("samples_per_epoch must be positive")
+        self._episode_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        if self.cache_in_memory:
+            self._materialize_cache()
+
+    def _materialize_cache(self) -> None:
+        """Read selected episodes once, preserving the dataset normalization contract."""
+        for episode_index in self.episode_indices:
+            metadata = self.base.episodes[episode_index]
+            steps = int(metadata["steps"])
+            stream = self.base._handle(metadata["hdf5_path"])
+            episode = stream[f"data/{metadata['episode']}"]
+            physical = read_physics_states(episode["states"], 0, steps + 1)
+            actions = np.asarray(
+                episode["actions/action_target_canonical"][:steps], dtype=np.float32
+            )
+            if physical.shape != (steps + 1, STATE_DIM) or actions.shape != (steps, ACTION_DIM):
+                raise ValueError(f"{episode.name}: unexpected cached State/Action shape")
+            state = ((physical - self.base.state_mean) / self.base.state_std).astype(np.float32)
+            action = ((actions - self.base.action_mean) / self.base.action_std).astype(np.float32)
+            if self.base.physics_v4:
+                initial = np.asarray(
+                    episode["actions/initial_processed_target_canonical"], dtype=np.float32
+                )
+            else:
+                initial = np.zeros(ACTION_DIM, dtype=np.float32)
+            if initial.shape != (ACTION_DIM,) or not np.isfinite(initial).all():
+                raise ValueError(f"{episode.name}: invalid initial processed target")
+            initial = ((initial - self.base.action_mean) / self.base.action_std).astype(np.float32)
+            self._episode_cache[int(episode_index)] = (
+                np.ascontiguousarray(state),
+                np.ascontiguousarray(action),
+                np.ascontiguousarray(initial),
+            )
+        self.base.close()
+
+    def _cached_item(self, episode_index: int, start: int) -> dict[str, Any]:
+        state_all, action_all, initial_action = self._episode_cache[int(episode_index)]
+        state = np.ascontiguousarray(state_all[start : start + STATE_STEPS])
+        action = np.ascontiguousarray(action_all[start : start + ACTION_STEPS])
+        before = initial_action if int(start) == 0 else action_all[int(start) - 1]
+        return {
+            "physical_state": torch.from_numpy(state),
+            "action": torch.from_numpy(action),
+            "action_before_window": torch.from_numpy(np.ascontiguousarray(before)),
+            "action_before_valid": torch.tensor(int(start) > 0, dtype=torch.bool),
+            "sample_start": int(start),
+        }
 
     def __len__(self) -> int:
         return self.samples_per_epoch if self.training else len(self._fixed_refs)
@@ -145,6 +200,8 @@ class Action11WindowDataset(Dataset[dict[str, Any]]):
             start = 0 if float(rng.random()) < self.start_probability else int(rng.integers(max_start + 1))
         else:
             episode_index, start = self._fixed_refs[int(index)]
+        if self.cache_in_memory:
+            return self._cached_item(episode_index, start)
         item = dict(self.base.get_window(episode_index, start))
         if int(start) == 0:
             item["action_before_window"] = torch.zeros(ACTION_DIM, dtype=torch.float32)
@@ -181,6 +238,8 @@ class Action11WindowDataset(Dataset[dict[str, Any]]):
             "selected_motion_keys": self.selected_motion_keys,
             "episode_count": len(rows),
             "variants_by_motion": variants,
+            "cache_in_memory": self.cache_in_memory,
+            "cache_episode_count": len(self._episode_cache),
             "train_only": True,
             "window_contract": {"state_steps": STATE_STEPS, "action_steps": ACTION_STEPS},
         }
@@ -675,6 +734,7 @@ def run_training(
     seed = int(config.get("seed", 20261110))
     seed_everything(seed)
     data_cfg = config.get("data", {})
+    cache_in_memory = bool(data_cfg.get("cache_in_memory", False))
     train = Action11WindowDataset(
         dataset_run,
         motion_count=int(data_cfg.get("motion_count", 32)),
@@ -683,6 +743,7 @@ def run_training(
         training=True,
         samples_per_epoch=int(data_cfg.get("train_samples_per_epoch", 8192)),
         start_probability=float(data_cfg.get("episode_start_probability", 0.10)),
+        cache_in_memory=cache_in_memory,
     )
     monitor = Action11WindowDataset(
         dataset_run,
@@ -691,6 +752,7 @@ def run_training(
         requested_motion_keys=train.selected_motion_keys,
         training=False,
         validation_stride=int(data_cfg.get("monitor_stride", 10)),
+        cache_in_memory=cache_in_memory,
     )
     selection = train.selection_manifest()
     atomic_write_json(output / "manifests/motion_selection.json", selection)
