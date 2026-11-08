@@ -55,6 +55,8 @@ class MLPCVAE11Tests(unittest.TestCase):
             self.assertTrue(masks["action_valid"][row, -1])
             self.assertTrue(torch.equal(masks["truth_action"][row, -1], masks["posterior_action"][row, -1]))
             self.assertTrue(torch.equal(masks["condition_action"][row, -1], torch.zeros(ACTION_DIM)))
+            self.assertTrue(torch.equal(masks["action_before"][row], batch["action_before_window"][row]))
+            self.assertEqual(bool(masks["action_before_valid"][row]), bool(batch["action_before_valid"][row]))
 
     def test_initial_action_has_invalid_history_marker(self) -> None:
         batch = self.batch(100)

@@ -196,8 +196,8 @@ def _right_align_causal(
     action_valid = torch.zeros(batch, ACTION_STEPS, dtype=torch.bool, device=device)
     target_state = torch.zeros(batch, STATE_STEPS, dtype=torch.bool, device=device)
     target_action = torch.zeros(batch, ACTION_STEPS, dtype=torch.bool, device=device)
-    out_before = torch.zeros_like(before)
-    out_before_valid = torch.zeros(batch, dtype=torch.bool, device=device)
+    out_before = before.clone()
+    out_before_valid = before_valid.clone()
     target_action[:, -1] = True
     action_valid[:, -1] = True
     start = max(0, int(target_time) - 9)
@@ -209,9 +209,6 @@ def _right_align_causal(
         slot = frame - int(target_time) + 9
         out_action[:, slot] = action[:, frame]
         action_valid[:, slot] = True
-    if int(target_time) > 0:
-        out_before = action[:, int(target_time) - 1]
-        out_before_valid[:] = True
     return out_state, out_action, state_valid, action_valid, target_state, target_action, out_before, out_before_valid
 
 
