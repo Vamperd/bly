@@ -107,10 +107,10 @@ class MLPConditionalVAE11(nn.Module):
         action_before: torch.Tensor,
         action_before_valid: torch.Tensor,
     ) -> torch.Tensor:
-        state_mask = (state_visible & state_valid[..., None]).to(state.dtype)
-        action_mask = (action_visible & action_valid[..., None]).to(action.dtype)
-        state_value = state * state_mask
-        action_value = action * action_mask
+        state_mask = (state_visible & state_valid).to(state.dtype)
+        action_mask = (action_visible & action_valid).to(action.dtype)
+        state_value = state * state_mask.unsqueeze(-1)
+        action_value = action * action_mask.unsqueeze(-1)
         before_valid = action_before_valid.to(action.dtype).unsqueeze(-1)
         before_value = action_before * before_valid
         return torch.cat(
@@ -199,6 +199,7 @@ def _right_align_causal(
     out_before = torch.zeros_like(before)
     out_before_valid = torch.zeros(batch, dtype=torch.bool, device=device)
     target_action[:, -1] = True
+    action_valid[:, -1] = True
     start = max(0, int(target_time) - 9)
     for frame in range(start, int(target_time) + 2):
         slot = frame - int(target_time) + 9
