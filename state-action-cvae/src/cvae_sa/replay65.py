@@ -208,6 +208,7 @@ def chunk_indices(dataset, index, start, chunks):
 def load_source(dataset, index, horizon=CHUNK, start=None):
     """Only the requested slice plus its preceding Action; never copy an entire HDF5."""
     import h5py
+    from .path_mapping import resolve_dataset_path
     from .physics_schema import load_physics_schema, read_physics_states, resolve_parameter
     from .action_mask_eval import _resolve_motion_file
     ref = dataset.refs[index]
@@ -217,7 +218,7 @@ def load_source(dataset, index, horizon=CHUNK, start=None):
     if start < 0 or horizon < 1 or start + horizon > int(record["steps"]):
         raise ValueError(f"replay requires {horizon} complete transitions from frame {start}")
     stop = start + horizon
-    schema = load_physics_schema(Path(record["schema_path"]))
+    schema = load_physics_schema(resolve_dataset_path(record["schema_path"]))
     sim = schema["simulation"]
     terrain = schema.get("terrain") or {}
     missing_terrain_contract = [
@@ -239,7 +240,7 @@ def load_source(dataset, index, horizon=CHUNK, start=None):
     scale = resolve_parameter(schema["action_scale"], env_id).reshape(29)
     clip = None if schema.get("action_clip") is None else resolve_parameter(schema["action_clip"], env_id).reshape(29, 2)
     wrapper = schema.get("wrapper_action_clip")
-    with h5py.File(record["hdf5_path"], "r") as stream:
+    with h5py.File(resolve_dataset_path(record["hdf5_path"]), "r") as stream:
         ep = stream[f"data/{record['episode']}"]
         context = stream[f"contexts/{record['context_id']}"]
         ctx = {name: np.asarray(context[name], dtype=np.float32) for name in CONTEXT_FIELDS}
