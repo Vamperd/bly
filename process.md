@@ -557,6 +557,23 @@ Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_20261108_223113/
 Source: b474de3716b2e60d95b8a89cb8bfdba198029ac3
 ```
 
-在约20k step时，`best.pt`的prior State/Action RMSE为`0.198775/0.107051`，
-causal prior Action RMSE为`0.091294`，KL beta已达到`0.002`。当前仍需等待10h任务结束，
-再使用best checkpoint执行四个193帧CVAE/SONIC ghost；中间checkpoint不构成最终质量结论。
+正式训练以`completed_optimizer_steps=300000`、`stop_reason=max_steps`、`execution_pass=true`
+完成。`best.pt`为step270000，`last.pt`为step300000；best prior State/Action/causal Action
+RMSE为`0.171252/0.074650/0.053960`，KL beta=`0.002`、KL=`2.86383295`。
+
+使用best checkpoint的四动作ghost最终成功，服务器run为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_ghost4_20261109_065919/
+```
+
+四条视频均记录`frames=193`、`fps=50`、`seconds=3.86`，SHA256已在5060本地回传后逐条
+核对通过。回传目录：
+
+```text
+/home/vamper/Desktop/replay/mlp_cvae11_ghost4_20261109_065919/
+```
+
+两次ghost失败均为环境/配置问题而非模型问题：第一次是新模块未注入服务器
+`SONIC_KIT_ROOT`，第二次是旧`/tmp/isaaclab/logs`不可写；最终使用run-local `TMPDIR`
+完成。最终ghost只证明Isaac replay、SONIC对照和193帧可视化完整，不代表物理质量通过。

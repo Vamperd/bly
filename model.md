@@ -487,7 +487,7 @@ bash dagger/scripts/render_mlp_action11_ghost4.sh \
 `render_policy_ghost.py`输出MLP/SONIC两层193帧ghost。Isaac执行、轨迹、ghost和manifest都写入
 新run；视频完整性与物理质量分开。
 
-## 15. 11-frame MLP conditional CVAE（2026-11-08，当前训练）
+## 15. 11-frame MLP conditional CVAE（2026-11-08，训练与ghost完成）
 
 该实验仍独立于65-token层级CVAE。它回归最小序列生成合同：`S0..S10`共11帧State、
 `A0..A9`共10帧Action；不接收SONIC goal，不修正goal与Physics State的差异，也不使用
@@ -589,5 +589,15 @@ State-only、Action-only和Both只隐藏长度1–2的时间块；没有feature-
 5. 读取真实State，重复192次。
 
 该过程输出192个Action和193帧，再与SONIC release teacher渲染成两层193帧ghost。物理
-摔倒不截断视频；视频完整性和物理质量分开记录。正式10小时训练Job为`2611-0439`，
-启动时使用源码`b474de3716b2e60d95b8a89cb8bfdba198029ac3`。
+摔倒不截断视频；视频完整性和物理质量分开记录。正式训练`2611-0439`完成300000 step，
+`best.pt`选择step270000；四动作ghost run为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_ghost4_20261109_065919/
+```
+
+四条视频已回传到：
+
+```text
+/home/vamper/Desktop/replay/mlp_cvae11_ghost4_20261109_065919/
+```
