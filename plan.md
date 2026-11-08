@@ -604,3 +604,42 @@ throughput: approximately 6.77 optimizer steps/s
 服务器Priority 1当前允许最多2张GPU；但MLP入口仍是单进程、非DDP，直接申请2张卡不会自动
 并行。当前推荐先用1 GPU加内存缓存；若需要2 GPU，必须另行实现并验证DDP、rank0 checkpoint
 和数据采样身份。
+## 29. 优化数据路径后的300k续训与ghost（2026-11-08）
+
+Job `2611-0378` 从正式旧run的`best.pt`（optimizer step 16000）恢复，使用单卡RTX 4090、
+16个逻辑CPU、48 GiB RAM、12 h上限；内存缓存、2个DataLoader worker，monitor/checkpoint间隔
+均为50000。任务以`SUCCEEDED`、exit code 0和`stop_reason=max_steps`结束：
+
+```text
+completed_optimizer_steps = 300000
+requested_max_steps       = 300000
+resume initial step       = 16000
+best mixed Action RMSE    = 0.0845214503
+best terminal A9 RMSE     = 0.0743029763
+last mixed Action RMSE    = 0.0840431547
+last terminal A9 RMSE     = 0.0755909291
+```
+
+优化run为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_optimized_resume300k_20261108_164852/
+```
+
+Ghost使用的是该run的`best.pt`，其manifest记录checkpoint step为150000；`last.pt`仍保留，
+但没有用于视频。四个motion均完成192 Action/193 State和193帧、50 Hz、3.86 s的MLP/SONIC
+ghost，服务器run为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_ghost4_20261108_212200/
+```
+
+四条视频和manifest已回传：
+
+```text
+/home/vamper/Desktop/replay/mlp_action11_ghost4_20261108_212200/
+```
+
+根`mlp_action11_ghost4.ok`、四个`policy_ghost.ok`、四个MLP replay marker和四个SONIC
+render marker均存在。训练集Action RMSE改善明显，但四条递推轨迹仍有约45 m root RMSE；
+因此视频工程完整，不等价于闭环物理质量或泛化通过。

@@ -494,3 +494,43 @@ throughput: approximately 6.77 optimizer steps/s
 旧正式run约2.39 s/step；缓存版约0.148 s/step。该benchmark只证明数据路径吞吐，不代表质量
 改善或递推质量通过。服务器Priority 1可持有2张GPU，但当前入口没有DDP；直接申请第二张卡不会
 提升单进程训练，优先使用单卡缓存版。
+## 28. 300k优化续训与ghost收尾（2026-11-08）
+
+训练Job `2611-0378`从旧`best.pt` step16000恢复，最终：
+
+```text
+state=SUCCEEDED
+exit_code=0
+completed_optimizer_steps=300000
+stop_reason=max_steps
+```
+
+优化run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_optimized_resume300k_20261108_164852/
+```
+
+训练summary中的最佳/最后指标为：
+
+```text
+best mixed/terminal = 0.0845214503 / 0.0743029763
+last mixed/terminal = 0.0840431547 / 0.0755909291
+```
+
+重新ghost使用`best.pt`（manifest中的checkpoint step为150000），四个motion的服务器ghost
+Job成功完成，四个manifest均为`frames=193`、`fps=50`、`seconds=3.86`。服务器run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_ghost4_20261108_212200/
+```
+
+视频回传并验证：
+
+```text
+/home/vamper/Desktop/replay/mlp_action11_ghost4_20261108_212200/
+```
+
+四个MP4、根`mlp_action11_ghost4.ok`、四个`policy_ghost.ok`、MLP replay marker和SONIC
+render marker均存在。优化后Action RMSE下降，但render-only递推仍报告约45 m root RMSE；
+因此不能把ghost完整性解释为闭环物理通过。
