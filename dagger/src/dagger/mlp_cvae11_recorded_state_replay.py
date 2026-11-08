@@ -128,9 +128,12 @@ def _run_lane(args: argparse.Namespace) -> dict[str, Any]:
     model, checkpoint = _load_checkpoint(args.checkpoint, device)
     normalization = _load_normalization(args.dataset_run)
     config = OmegaConf.load(args.config.expanduser().resolve())
+    import os
+    configured_kit = os.environ.get("SONIC_KIT_ROOT")
+    if configured_kit:
+        config.sonic_kit_root = configured_kit
     _ensure_kit_path(config)
     sonic_root = Path(str(config.sonic_repo_root)).expanduser().resolve()
-    import os
     os.chdir(sonic_root)
     prepared = _prepare_release_env(config, output)
     _launcher, args_cli = _launch_app(config)
