@@ -1,0 +1,61 @@
+{
+  "format_version": "sonic_11_frame_mlp_cvae_config_v1",
+  "architecture_version": "11-frame-mlp-cvae-v1",
+  "seed": 20261112,
+  "data": {
+    "motion_count": 32,
+    "selection_seed": 20261110,
+    "motion_keys": null,
+    "train_samples_per_epoch": 16384,
+    "monitor_stride": 10,
+    "episode_start_probability": 0.10,
+    "num_workers": 2,
+    "pin_memory": true,
+    "cache_in_memory": true
+  },
+  "model": {
+    "kind": "mlp_conditional_vae_11",
+    "state_steps": 11,
+    "action_steps": 10,
+    "state_dim": 70,
+    "action_dim": 29,
+    "latent_dim": 384,
+    "encoder_widths": [2816, 1792, 896, 512],
+    "decoder_widths": [2048, 1536, 768],
+    "posterior_prior": "independent_mlp_encoders",
+    "latent_mode": "global_gaussian_sampled"
+  },
+  "training": {
+    "precision": "BF16",
+    "micro_batch": 256,
+    "monitor_batch": 512,
+    "monitor_batches": 32,
+    "max_steps": 300000,
+    "max_wall_hours": 10.0,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.0001,
+    "warmup_steps": 2000,
+    "min_lr_ratio": 0.05,
+    "gradient_clip": 1.0,
+    "monitor_interval": 5000,
+    "checkpoint_interval": 50000,
+    "kl_beta": 0.002,
+    "kl_warmup_steps": 10000
+  },
+  "masking": {
+    "causal_fraction": 0.40,
+    "state_only_fraction": 0.20,
+    "action_only_fraction": 0.20,
+    "both_fraction": 0.20,
+    "feature_level_masks": false,
+    "causal_target": "right_aligned_action_slot_9",
+    "initial_action_prefix": "invalid_zero_with_valid_mask"
+  },
+  "rendering": {
+    "horizon_actions": 192,
+    "motion_count": 4,
+    "unknown_prefix_policy": "valid_zero",
+    "target_action_slot": 9,
+    "route": "prior_sample"
+  }
+}
