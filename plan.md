@@ -643,3 +643,39 @@ ghost，服务器run为：
 根`mlp_action11_ghost4.ok`、四个`policy_ghost.ok`、四个MLP replay marker和四个SONIC
 render marker均存在。训练集Action RMSE改善明显，但四条递推轨迹仍有约45 m root RMSE；
 因此视频工程完整，不等价于闭环物理质量或泛化通过。
+
+## 30. 11-frame MLP conditional CVAE（2026-11-08，正式训练进行中）
+
+本阶段回归最小序列生成合同，不处理SONIC goal与Physics State的语义差异。模型使用
+`S0..S10`、`A0..A9`，只训练Physics v5 train split中确定性选择的32个motion，不建立
+test split。架构、维度、q/p信息隔离、Mask和render-only递推合同见`model.md` §15。
+
+代码已在当前分支提交并同步服务器；GitHub短暂不可达时使用bundle fast-forward同步。最终
+运行源码为：
+
+```text
+b474de3716b2e60d95b8a89cb8bfdba198029ac3
+```
+
+真实服务器门禁已通过：
+
+```text
+Job 2611-0435  2-step CUDA/HDF5 smoke
+Run /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_smoke_20261108_220637/
+parameter_count = 30,365,732
+```
+
+首个正式任务因causal `action_before`错误主动取消；第二个正式任务因posterior错误复用
+condition visibility主动取消。二者均不是GPU、显存、HDF5或NaN故障。修复后4项CVAE单测
+通过，最终训练重新从随机初始化启动：
+
+```text
+Job 2611-0439
+Name mlp-cvae11-10h-final
+GPU 1 × RTX 4090, CPU 16, RAM 48G, limit 10h
+Run /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_20261108_223113/
+```
+
+训练结束后，必须只读检查`best.pt`/`last.pt`、KL、causal prior Action RMSE和执行marker，
+再使用`best.pt`运行`render_mlp_cvae11_ghost4.sh`生成四个192-step/193-frame的CVAE/SONIC
+ghost；不得把训练中间指标写成质量通过。
