@@ -31,6 +31,7 @@ OUT_ROOT="${SONIC_RUNS_ROOT:-$PROJECT_ROOT/runs}/mlp_action11_ghost4_$(date +%Y%
 [[ -f "$SONIC_KIT_ROOT/render_policy_ghost.py" ]] || { echo "Missing ghost renderer" >&2; exit 2; }
 [[ "$STEPS" == 192 ]] || { echo "This contract requires exactly 192 transitions" >&2; exit 2; }
 
+export CVAE_KL2_MOTION_FILE="$MOTION_FILE"
 export PYTHONPATH="$DAGGER_ROOT/src:$STATE_ACTION_CVAE_ROOT/src:$SONIC_REPO_ROOT:$SONIC_KIT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$OUT_ROOT/cases"
 
