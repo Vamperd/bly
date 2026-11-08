@@ -473,3 +473,24 @@ run为：
 ```
 
 该结果仅证明递推、渲染和文件回传链路完整；不构成MLP闭环物理质量、泛化或摔倒避免通过。
+## 27. MLP throughput diagnosis and data-path optimization（2026-11-08）
+
+正式run的`logs/metrics.jsonl`显示step 1 monitor耗时77.47 s，随后每2000 step的elapsed增量
+约4,850–4,940 s。评估频率确实高于此前65-token路线，但按日志估算只占小部分时间；真正的
+主瓶颈是`Action11WindowDataset`在`num_workers=0`下对每个窗口调用HDF5读取。
+
+本地提交`df91b930c07d8557af158c918de50f3d00c5567c`新增`cache_in_memory`：选定32 motion的
+完整归一化State/Action只读物化一次，训练和monitor不再逐sample读取HDF5；`monitor_interval`
+改为10000。服务器单元测试3项、Python compile和JSON检查通过。
+
+Job `2611-0371`的2000-step真实GPU benchmark：
+
+```text
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_cache_bench_2000_20261108/
+elapsed: 295.804866 s
+throughput: approximately 6.77 optimizer steps/s
+```
+
+旧正式run约2.39 s/step；缓存版约0.148 s/step。该benchmark只证明数据路径吞吐，不代表质量
+改善或递推质量通过。服务器Priority 1可持有2张GPU，但当前入口没有DDP；直接申请第二张卡不会
+提升单进程训练，优先使用单卡缓存版。

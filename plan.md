@@ -577,3 +577,30 @@ local archive: /home/vamper/Desktop/replay/mlp_action11_ghost4_20261108_154306/
 `policy_ghost.ok`；视频层为`mlp_action11`与`sonic`，不因摔倒截断。该结果证明工程链路和
 可视化完整，不代表MLP闭环物理质量或泛化通过。服务器 `.venv-sonic` 为补齐渲染依赖安装
 MuJoCo 3.3.7、GLFW和PyOpenGL。
+## 28. MLP throughput diagnosis and data-path optimization（2026-11-08）
+
+正式Mlp run的monitor日志显示：step 1一次评估耗时约77.47 s；随后每2000 step的elapsed增量约
+4,850–4,940 s。评估本身不是12小时低吞吐的主因，但当前每2000 step评估一次明显比此前
+65-token路线的5000/50000级summary/full评估更频繁。
+
+提交`df91b930c07d8557af158c918de50f3d00c5567c`新增32-motion State/Action内存缓存，
+保持HDF5、归一化、Mask和模型合同不变；配置将`monitor_interval`从2000改为10000，
+`cache_in_memory=true`。缓存只读源HDF5一次，训练循环只对归一化数组做窗口slice。
+
+服务器真实GPU benchmark：
+
+```text
+Job: 2611-0371
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_action11_cache_bench_2000_20261108/
+steps: 2000
+elapsed: 295.804866 s
+throughput: approximately 6.77 optimizer steps/s
+```
+
+相同模型和数据合同的旧正式run约为2.39 s/step；缓存版约0.148 s/step，训练吞吐提升约16倍。
+一次cache版monitor约6.61 s，step 2000末次monitor约15.91 s。按当前实测速率估算，
+250k step约10.3 h，300k step约12.3 h；这只是吞吐估算，不是质量结论。
+
+服务器Priority 1当前允许最多2张GPU；但MLP入口仍是单进程、非DDP，直接申请2张卡不会自动
+并行。当前推荐先用1 GPU加内存缓存；若需要2 GPU，必须另行实现并验证DDP、rank0 checkpoint
+和数据采样身份。
