@@ -92,16 +92,33 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
     model = SonicReferenceMLPCVAE(dict(config["model"])).to(torch.device(str(config.get("device", "cuda:0"))))
     device = next(model.parameters()).device
     training = dict(config.get("training", {}))
-    max_steps = min(int(training.get("max_optimizer_steps", 245000)), 2) if smoke else int(training.get("max_optimizer_steps", 245000))
-    max_seconds = 120.0 if smoke else float(training.get("max_train_seconds", 30600))
+    resume_path = os.environ.get("CVAE_RESUME_CHECKPOINT")
+    start_step = 0
+    if resume_path:
+        payload = torch.load(Path(resume_path).expanduser().resolve(), map_location="cpu", weights_only=False)
+        if payload.get("format_version") != CHECKPOINT_FORMAT:
+            raise ValueError(f"unsupported resume checkpoint format: {payload.get('format_version')!r}")
+        if payload.get("architecture_version") != model.ARCHITECTURE_VERSION:
+            raise ValueError("resume checkpoint architecture does not match the reference MLP-CVAE")
+        model.load_state_dict(payload["model_state_dict"], strict=True)
+        start_step = int(payload.get("optimizer_step", 0))
+    configured_max_steps = int(training.get("max_optimizer_steps", 245000))
+    max_steps = min(configured_max_steps, 2) if smoke else int(os.environ.get("CVAE_MAX_STEPS_TOTAL", configured_max_steps))
+    if max_steps <= start_step:
+        raise ValueError(f"CVAE_MAX_STEPS_TOTAL={max_steps} must be greater than resume step {start_step}")
+    max_seconds = 120.0 if smoke else float(os.environ.get("CVAE_MAX_TRAIN_SECONDS", training.get("max_train_seconds", 30600)))
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(training.get("learning_rate", 2.0e-4)), weight_decay=float(training.get("weight_decay", 0.0)))
+    if resume_path:
+        optimizer.load_state_dict(payload["optimizer_state_dict"])
     warmup = int(training.get("warmup_steps", 4000))
     min_lr = float(training.get("min_learning_rate", 1.0e-5))
     peak_lr = float(training.get("learning_rate", 2.0e-4))
     iterator = iter(loader)
-    best_metric = float("inf")
-    best_metrics: dict[str, float] | None = None
-    last_metrics: dict[str, float] | None = None
+    best_metric = float(payload.get("best_metric", float("inf"))) if resume_path else float("inf")
+    previous_summary = output / "manifests" / "sonic_reference_mlp_cvae_summary.json"
+    previous = json.loads(previous_summary.read_text()) if resume_path and previous_summary.is_file() else {}
+    best_metrics: dict[str, float] | None = previous.get("best_metrics") or None
+    last_metrics: dict[str, float] | None = previous.get("last_metrics") or None
     started = time.monotonic()
     interrupted = False
     stop_reason = "max_steps"
@@ -113,7 +130,7 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
 
     old_handlers = {signal.SIGTERM: signal.signal(signal.SIGTERM, handler), signal.SIGINT: signal.signal(signal.SIGINT, handler)}
     try:
-        for step in range(1, max_steps + 1):
+        for step in range(start_step + 1, max_steps + 1):
             if interrupted or time.monotonic() - started >= max_seconds:
                 stop_reason = "wall_clock" if not interrupted else stop_reason
                 break
@@ -148,7 +165,7 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(training.get("gradient_clip", 1.0)), error_if_nonfinite=True)
             optimizer.step()
             interval = 1 if smoke else int(training.get("checkpoint_interval", 5000))
-            if step == 1 or step % interval == 0 or step == max_steps:
+            if step == start_step + 1 or step % interval == 0 or step == max_steps:
                 metrics = _evaluate(model, eval_loader, device, int(training.get("max_val_batches", 128)), int(config.get("seed", 20261102)) + step)
                 metrics.update({"loss": float(loss.detach().cpu()), "posterior_action_loss": float(terms["posterior_action"].detach().cpu()), "standard_normal_action_loss": float(terms["standard_normal_action"].detach().cpu()), "kl": float(terms["kl"].detach().cpu()), "kl_beta": kl_beta, "learning_rate": lr})
                 last_metrics = metrics
