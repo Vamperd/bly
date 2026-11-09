@@ -1281,7 +1281,7 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
                         flush=True,
                     )
                     stopped_by_time_limit = True
-                    break
+            beta = beta_schedule[round_index]
             dynamic = loop.collect_round(round_index, beta)
             data_path = run_dir / "data" / "dagger" / f"round_{round_index:02d}.pt"
             data_path.parent.mkdir(parents=True, exist_ok=True)
