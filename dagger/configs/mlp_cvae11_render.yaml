@@ -1,4 +1,4 @@
-mode: mlp_cvae11_render
+mode: mlp_render
 device: cuda:0
 seed: 20261118
 run_root: ${oc.env:SONIC_RUNS_ROOT,/home/helloworld/bly/runs}
