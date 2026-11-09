@@ -1155,7 +1155,7 @@ def _select_sonic_causal_motions(config, checkpoint=None) -> list[str]:
 
     checkpoint = Path(str(checkpoint or config.student.checkpoint)).expanduser().resolve()
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    seen = sorted(str(key) for key in payload.get("train_motion_keys") or [])
+    seen = sorted(str(key) for key in (payload.get("train_motion_keys") or (payload.get("selection") or {}).get("selected_motion_keys") or []))
     if not seen:
         raise ValueError(
             f"{checkpoint} has no train_motion_keys; retrain C with the current sonic_causal_train"

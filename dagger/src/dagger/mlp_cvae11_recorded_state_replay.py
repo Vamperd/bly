@@ -50,14 +50,18 @@ def _load_source(case: dict[str, Any]) -> dict[str, np.ndarray]:
 
 def _load_checkpoint(path: Path, device: torch.device):
     checkpoint = torch.load(path.expanduser().resolve(), map_location="cpu", weights_only=False)
-    if checkpoint.get("format_version") != "sonic_11_frame_mlp_cvae_checkpoint_v1":
+    if checkpoint.get("format_version") not in {
+        "sonic_11_frame_mlp_cvae_checkpoint_v1",
+        "sonic_11_frame_mlp_cvae_dagger_checkpoint_v1",
+    }:
         raise ValueError("checkpoint is not an 11-frame MLP CVAE checkpoint")
     config = checkpoint.get("config")
-    model_config = config.get("model") if isinstance(config, dict) else None
+    model_config = config.get("model") if isinstance(config, dict) else checkpoint.get("model_config")
     if not isinstance(model_config, dict):
         raise ValueError("CVAE checkpoint has no model config")
     model = MLPConditionalVAE11(model_config).to(device)
-    model.load_state_dict(checkpoint["model"], strict=True)
+    state_dict = checkpoint.get("model") or checkpoint.get("model_state_dict")
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
     return model, checkpoint
 

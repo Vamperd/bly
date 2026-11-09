@@ -23,6 +23,7 @@ case "$MODE" in
   sonic-causal-smoke) CONFIG_MODE="sonic_causal_smoke" ;;
   sonic-causal-pilot) CONFIG_MODE="sonic_causal_pilot" ;;
   sonic-causal-8h) CONFIG_MODE="sonic_causal_8h" ;;
+  sonic-causal-reference-mlp-4h) CONFIG_MODE="sonic_causal_reference_mlp_4h" ;;
   sonic-causal-mlp-cvae11-4h) CONFIG_MODE="sonic_causal_mlp_cvae11_4h" ;;
   mlp-pilot) CONFIG_MODE="mlp_pilot" ;;
   mlp-debug) CONFIG_MODE="mlp_debug" ;;
