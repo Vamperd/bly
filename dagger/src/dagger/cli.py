@@ -1253,13 +1253,20 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
         contract = SonicActionContract(env)
         resume_path = Path(os.environ.get("DAGGER_RESUME_RUN", "")).expanduser().resolve() if os.environ.get("DAGGER_RESUME_RUN") else None
         checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+        dataset_run = (
+            config.student.get("dataset_run")
+            or config.student.get("source_dataset_run")
+            or config.student.get("normalization_run")
+        )
+        if not dataset_run:
+            raise ValueError("causal DAgger student requires dataset_run, source_dataset_run or normalization_run")
         if resume_path is not None:
             prior_checkpoints = sorted(resume_path.glob("checkpoints/round_*.pt"))
             if prior_checkpoints:
                 checkpoint = prior_checkpoints[-1]
             student = StudentAdapter(
                 checkpoint=checkpoint, device=device, action_contract=contract,
-                dataset_run=config.student.dataset_run, seed=int(config.seed),
+                dataset_run=dataset_run, seed=int(config.seed),
                 learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
                 weight_decay=float(config.student.get("weight_decay", 1.0e-4)),
                 kl_beta=float(config.student.get("kl_beta", 0.002)),
