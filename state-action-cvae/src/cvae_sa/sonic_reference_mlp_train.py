@@ -86,6 +86,7 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
     if not dataset_run:
         raise ValueError("data.dataset_run or CVAE_DATASET_RUN is required")
     dataset = SonicCausalDataset(dataset_run, split="train", max_samples=data_cfg.get("max_samples"))
+    train_motion_keys = list(dataset.motion_keys)
     batch_size = int(config.get("training", {}).get("micro_batch", 32))
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=causal_collate)
     eval_loader = DataLoader(dataset, batch_size=min(batch_size, 128), shuffle=False, num_workers=0, collate_fn=causal_collate)
@@ -194,7 +195,7 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
         "stop_reason": stop_reason,
         "parameter_count": sum(p.numel() for p in model.parameters()),
         "model_signature": model.architecture_instance_signature(),
-        "train_motion_keys": dataset.motion_keys if dataset._handles else [],
+        "train_motion_keys": train_motion_keys,
         "best_metric": None if best_metrics is None else best_metric,
         "best_metrics": best_metrics,
         "last_metrics": last_metrics,
