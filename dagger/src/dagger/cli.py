@@ -730,8 +730,8 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
     elif clip_value is None:
         clip_value = 20.0
     policy_kind = str(config.dagger.get("render_policy", "mlp")).lower()
-    if policy_kind not in {"mlp", "sonic", "sonic_causal", "sonic_arch", "cvae"}:
-        raise ValueError("render_policy must be mlp, sonic, sonic_causal, sonic_arch or cvae")
+    if policy_kind not in {"mlp", "mlp_cvae11", "sonic", "sonic_causal", "sonic_arch", "cvae"}:
+        raise ValueError("render_policy must be mlp, mlp_cvae11, sonic, sonic_causal, sonic_arch or cvae")
     video_name = f"{policy_kind}_policy.mp4"
     extra_manifest: dict = {}
 
@@ -781,6 +781,57 @@ def _run_mlp_render(config, run_dir: Path, device: torch.device, args_cli, prepa
             "c_train_motion_keys": list(causal.train_motion_keys),
             "architecture_version": causal.model.ARCHITECTURE_VERSION,
             "initial_action_from_env": initial_action is not None,
+        }
+    elif policy_kind == "mlp_cvae11":
+        from .adapters.mlp_cvae11_student import MlpCvae11StudentAdapter
+
+        checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"render checkpoint is missing: {checkpoint}")
+        dataset_run = Path(str(config.student.dataset_run)).expanduser().resolve()
+        if not dataset_run.is_dir():
+            raise FileNotFoundError(f"MLP-CVAE11 dataset run is missing: {dataset_run}")
+        contract = SonicActionContract(env)
+        cvae11 = MlpCvae11StudentAdapter(
+            checkpoint=checkpoint,
+            device=device,
+            action_contract=contract,
+            dataset_run=dataset_run,
+            seed=int(config.seed),
+        )
+        unseen = sorted(set(prepared["motion"]["loaded_keys"]) - set(cvae11.train_motion_keys))
+        if unseen:
+            raise ValueError(f"render motion is not among the MLP-CVAE11 training motions: {unseen}")
+        actual = getattr(env.env, "env", env.env)
+        previous = getattr(getattr(actual, "action_manager", None), "prev_action", None)
+        initial_action = (
+            contract.raw_to_canonical(previous.detach())
+            if isinstance(previous, torch.Tensor) and tuple(previous.shape) == (env.num_envs, action_dim)
+            else None
+        )
+        cvae11.reset(env.num_envs, env.physics_state(), initial_action=initial_action)
+
+        def motion_ids() -> torch.Tensor:
+            motion = env.command_manager.get_term("motion")
+            value = getattr(motion, "motion_ids", None)
+            if value is None:
+                return torch.full((env.num_envs,), -1, device=env.device, dtype=torch.long)
+            return value.detach().clone().to(device=env.device, dtype=torch.long)
+
+        def policy_action(observation_value, done_value):
+            cvae11.set_motion_context(motion_ids(), list(getattr(env, "motion_keys", None) or []))
+            return cvae11.observe(torch.zeros(env.num_envs, 10, 64, device=env.device)).action_raw
+
+        def after_step(executed_action, done_value):
+            cvae11.after_step(contract.raw_to_canonical(executed_action), env.physics_state(), done_value)
+
+        checkpoint_sha256 = cvae11.checkpoint_sha256
+        policy_source = "mlp_cvae11_prior_policy_rollout"
+        extra_manifest = {
+            "architecture_version": cvae11.model.ARCHITECTURE_VERSION,
+            "train_motion_keys": list(cvae11.train_motion_keys),
+            "initial_action_from_env": initial_action is not None,
+            "inference_route": "prior_gaussian_sample_then_shared_decoder",
         }
     elif policy_kind == "cvae":
         from .adapters.cvae_student import CvaeStudentAdapter
