@@ -121,7 +121,8 @@ class SonicCausalStudentAdapter:
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay)
         )
-        self.learning_rate = float(learning_rate)
+        if checkpoint_format == CHECKPOINT_FORMAT and payload.get("optimizer_state_dict"):
+            self.optimizer.load_state_dict(payload["optimizer_state_dict"])
         self._buffer: SonicCausalWindowBuffer | None = None
         self._epsilon: torch.Tensor | None = None
         self._episode_counter = 0
