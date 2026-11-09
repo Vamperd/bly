@@ -46,10 +46,12 @@ class MlpCvae11StudentAdapter:
         self.checkpoint_path = checkpoint_path
         self.checkpoint_sha256 = _sha256(checkpoint_path)
         selection = payload.get("selection") or {}
+        self.train_motion_keys = [str(v) for v in selection.get("selected_motion_keys", payload.get("train_motion_keys", []))]
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
         if payload.get("format_version") == CHECKPOINT_FORMAT and payload.get("optimizer"):
             optimizer.load_state_dict(payload["optimizer"])
         self.optimizer = optimizer
+        self.action_mean, self.action_std, self.state_mean, self.state_std = self._load_normalization(dataset_run)
         self.expected_states = self._load_expected_states(dataset_run, self.train_motion_keys)
         self._buffer: SonicCausalWindowBuffer | None = None
         self._motion_keys: list[str] = []
