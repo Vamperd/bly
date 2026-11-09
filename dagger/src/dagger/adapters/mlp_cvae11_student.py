@@ -96,6 +96,8 @@ class MlpCvae11StudentAdapter:
         self._motion_keys = [str(v) for v in motion_keys]
 
     def set_latent_mode(self, mode: str) -> None:
+        if mode == "fixed_standard_normal":
+            mode = "sampled_prior"
         if mode not in {"sampled_prior", "deterministic_prior"}:
             raise ValueError(f"unsupported MLP CVAE latent mode: {mode}")
         self.latent_mode = mode
@@ -110,7 +112,6 @@ class MlpCvae11StudentAdapter:
             step = min(int(self._target_steps[index].item()) + 1, states.shape[0] - 1)
             values.append(states[step])
         return torch.stack(values, dim=0)
-
     @torch.no_grad()
     def observe(self, _reference_future: torch.Tensor) -> SonicCausalRollout:
         if self._buffer is None:
