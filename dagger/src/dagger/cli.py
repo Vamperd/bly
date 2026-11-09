@@ -1264,9 +1264,15 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
             prior_checkpoints = sorted(resume_path.glob("checkpoints/round_*.pt"))
             if prior_checkpoints:
                 checkpoint = prior_checkpoints[-1]
+            resume_data_kwargs = (
+                {"dataset_run": dataset_run}
+                if adapter_kind == "mlp_cvae11"
+                else {"normalization_run": config.student.get("normalization_run") or dataset_run}
+            )
             student = StudentAdapter(
                 checkpoint=checkpoint, device=device, action_contract=contract,
-                dataset_run=dataset_run, seed=int(config.seed),
+                seed=int(config.seed),
+                **resume_data_kwargs,
                 learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
                 weight_decay=float(config.student.get("weight_decay", 1.0e-4)),
                 kl_beta=float(config.student.get("kl_beta", 0.002)),
