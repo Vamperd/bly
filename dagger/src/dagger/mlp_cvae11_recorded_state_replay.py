@@ -89,10 +89,8 @@ def _predict_prior_action(model: MLPConditionalVAE11, query: dict[str, torch.Ten
     target_action = query["target_action"].to(device).any(dim=-1)
     before = query["action_before"].to(device)
     before_valid = query["action_before_valid"].to(device)
-    # The posterior input is unused by the prior decoder, but it must preserve
-    # the same tensor contract for one shared forward call.
     with torch.inference_mode():
-        output = model(
+        output = model.prior_forward(
             condition_state=state,
             condition_action=action,
             state_visible=state_visible,
@@ -103,8 +101,6 @@ def _predict_prior_action(model: MLPConditionalVAE11, query: dict[str, torch.Ten
             target_action=target_action,
             action_before=before,
             action_before_valid=before_valid,
-            posterior_state=state,
-            posterior_action=action,
             sample=True,
         )
     return output["p_action"][:, -1]

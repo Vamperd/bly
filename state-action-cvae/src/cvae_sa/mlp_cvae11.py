@@ -137,6 +137,39 @@ class MLPConditionalVAE11(nn.Module):
         epsilon = torch.randn_like(mean)
         return mean + torch.exp(0.5 * logvar.clamp(-8.0, 4.0)) * epsilon
 
+    def prior_forward(
+        self,
+        condition_state: torch.Tensor,
+        condition_action: torch.Tensor,
+        state_visible: torch.Tensor,
+        action_visible: torch.Tensor,
+        state_valid: torch.Tensor,
+        action_valid: torch.Tensor,
+        target_state: torch.Tensor,
+        target_action: torch.Tensor,
+        action_before: torch.Tensor,
+        action_before_valid: torch.Tensor,
+        *,
+        sample: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        """Run only p(z|condition) and the deployment decoder path."""
+        condition = self._condition_vector(
+            condition_state, condition_action, state_visible, action_visible,
+            state_valid, action_valid, target_state, target_action,
+            action_before, action_before_valid,
+        )
+        prior_hidden = self.prior_encoder(condition)
+        p_mean = self.prior_mean(prior_hidden)
+        p_logvar = self.prior_logvar(prior_hidden).clamp(-8.0, 4.0)
+        z_p = self.sample_gaussian(p_mean, p_logvar, sample)
+        p_output = self.decoder(torch.cat((condition, z_p), dim=1))
+        return {
+            "p_output": p_output[..., : STATE_STEPS * STATE_DIM].reshape(-1, STATE_STEPS, STATE_DIM),
+            "p_action": p_output[..., STATE_STEPS * STATE_DIM :].reshape(-1, ACTION_STEPS, ACTION_DIM),
+            "p_mean": p_mean,
+            "p_logvar": p_logvar,
+        }
+
     def forward(
         self,
         condition_state: torch.Tensor,

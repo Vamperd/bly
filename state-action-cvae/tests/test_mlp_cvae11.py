@@ -29,6 +29,21 @@ class MLPCVAE11Tests(unittest.TestCase):
         raw = CausalBlockMaskSampler(17).sample(self.batch())
         values = {key: value for key, value in raw.items() if isinstance(value, torch.Tensor)}
         output = model(**{key: values[key] for key in MODEL_INPUT_KEYS}, sample=True)
+        prior = model.prior_forward(
+            condition_state=values["condition_state"],
+            condition_action=values["condition_action"],
+            state_visible=values["state_visible"],
+            action_visible=values["action_visible"],
+            state_valid=values["state_valid"],
+            action_valid=values["action_valid"],
+            target_state=values["target_state"],
+            target_action=values["target_action"],
+            action_before=values["action_before"],
+            action_before_valid=values["action_before_valid"],
+            sample=False,
+        )
+        self.assertEqual(tuple(prior["p_action"].shape), (4, ACTION_STEPS, ACTION_DIM))
+        self.assertTrue(torch.isfinite(prior["p_action"]).all())
         self.assertEqual(tuple(output["q_output"].shape), (4, STATE_STEPS, STATE_DIM))
         self.assertEqual(tuple(output["p_action"].shape), (4, ACTION_STEPS, ACTION_DIM))
         for value in output.values():
