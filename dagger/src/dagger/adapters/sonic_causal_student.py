@@ -20,7 +20,7 @@ from dagger.runtime.sonic_causal_window import SonicCausalWindowBuffer
 
 CHECKPOINT_FORMAT = "sonic_causal_dagger_student_checkpoint_v1"
 C_CHECKPOINT_FORMAT = "sonic_causal_cvae_checkpoint_v1"
-
+REFERENCE_MLP_C_CHECKPOINT_FORMAT = "sonic_reference_mlp_cvae_checkpoint_v1"
 
 @dataclass
 class SonicCausalRollout:
@@ -56,21 +56,28 @@ class SonicCausalStudentAdapter:
         self.action_clip_value = action_clip_value
         checkpoint_path = Path(checkpoint).expanduser().resolve()
         payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        if payload.get("format_version") not in {
-            C_CHECKPOINT_FORMAT,
-            CHECKPOINT_FORMAT,
-        }:
-            raise ValueError("checkpoint is not a SONIC causal CVAE checkpoint")
+        checkpoint_format = str(payload.get("format_version", ""))
         model_config = dict(payload.get("model_config") or {})
-        self.model = SonicCausalCVAE(model_config).to(device)
-        expected = self.model.architecture_signature(
-            self.model.config,
-            sum(parameter.numel() for parameter in self.model.parameters()),
-        )
+        is_reference_mlp = checkpoint_format == REFERENCE_MLP_C_CHECKPOINT_FORMAT or str(
+            payload.get("architecture_version", model_config.get("architecture_version", ""))
+        ) == "sonic-10history-reference-mlp-cvae-v1"
+        if checkpoint_format not in {C_CHECKPOINT_FORMAT, CHECKPOINT_FORMAT, REFERENCE_MLP_C_CHECKPOINT_FORMAT}:
+            raise ValueError("checkpoint is not a supported SONIC causal CVAE checkpoint")
+        if is_reference_mlp:
+            from cvae_sa.sonic_reference_mlp_model import SonicReferenceMLPCVAE
+            self.model = SonicReferenceMLPCVAE(model_config).to(device)
+            expected = self.model.architecture_instance_signature()
+        else:
+            self.model = SonicCausalCVAE(model_config).to(device)
+            expected = self.model.architecture_signature(
+                self.model.config,
+                sum(parameter.numel() for parameter in self.model.parameters()),
+            )
         if payload.get("model_signature") != expected:
             raise ValueError("SONIC causal checkpoint architecture signature mismatch")
         self.model.load_state_dict(payload["model_state_dict"], strict=True)
         self.model.eval()
+        self.model_checkpoint_format = REFERENCE_MLP_C_CHECKPOINT_FORMAT if is_reference_mlp else C_CHECKPOINT_FORMAT
         self.train_motion_keys = [str(key) for key in payload.get("train_motion_keys") or []]
         self.checkpoint_path = checkpoint_path
         self.checkpoint_sha256 = _sha256(checkpoint_path)
@@ -278,6 +285,7 @@ class SonicCausalStudentAdapter:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "student_model_format": self.model_checkpoint_format,
             "format_version": CHECKPOINT_FORMAT,
             "architecture_version": self.model.ARCHITECTURE_VERSION,
             "model_config": self.model.config,

@@ -82,9 +82,12 @@ class SonicCausalDaggerLoop:
         done = torch.zeros(self.num_envs, device=self.env.device, dtype=torch.bool)
         collected: list[dict[str, torch.Tensor]] = []
         for step_index in range(self.rollout_steps):
+            set_context = getattr(self.student, "set_motion_context", None)
+            if set_context is not None:
+                set_context(self._motion_ids(), list(getattr(self.env, "motion_keys", None) or []))
             reference_future = observation.get("student_reference_future")
             if reference_future is None:
-                raise RuntimeError("SONIC environment did not expose student_reference_future")
+                raise RuntimeError("SONIC release observation has no student_reference_future")
             rollout = self.student.observe(reference_future)
             teacher_raw = self.action_contract.clip_raw(
                 self.teacher.act(self._teacher_observation(observation), done).detach()
@@ -167,6 +170,9 @@ class SonicCausalDaggerLoop:
         episode_steps = torch.zeros(self.num_envs, device=self.env.device)
         per_motion: dict[str, dict[str, float]] = {}
         for _ in range(int(steps)):
+            set_context = getattr(self.student, "set_motion_context", None)
+            if set_context is not None:
+                set_context(self._motion_ids(), list(getattr(self.env, "motion_keys", None) or []))
             reference_future = observation.get("student_reference_future")
             if reference_future is None:
                 raise RuntimeError("SONIC environment did not expose student_reference_future")

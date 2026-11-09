@@ -1185,7 +1185,11 @@ def _select_sonic_causal_motions(config, checkpoint=None) -> list[str]:
 def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, prepared: dict):
     """Run the independent 10-history/10-reference single-step DAgger path."""
 
-    from .adapters.sonic_causal_student import SonicCausalStudentAdapter
+    adapter_kind = str(config.student.get("adapter", "sonic_causal"))
+    if adapter_kind == "mlp_cvae11":
+        from .adapters.mlp_cvae11_student import MlpCvae11StudentAdapter as StudentAdapter
+    else:
+        from .adapters.sonic_causal_student import SonicCausalStudentAdapter as StudentAdapter
     from .core.sonic_causal_loop import SonicCausalDaggerLoop
     from cvae_sa.sonic_causal_dataset import SonicCausalDataset
 
@@ -1197,17 +1201,24 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
             raise RuntimeError("SONIC release observation has no [10,64] reference future")
         contract = SonicActionContract(env)
         checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
-        student = SonicCausalStudentAdapter(
-            checkpoint=checkpoint,
-            device=device,
-            action_contract=contract,
-            normalization_run=config.student.get("normalization_run"),
-            seed=int(config.seed),
-            learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
-            weight_decay=float(config.student.get("weight_decay", 0.0)),
-            action_clip_value=config.student.get("action_clip_value", 20.0),
-            kl_beta=float(config.student.get("kl_beta", 0.002)),
-        )
+        if adapter_kind == "mlp_cvae11":
+            student = StudentAdapter(
+                checkpoint=checkpoint, device=device, action_contract=contract,
+                dataset_run=config.student.dataset_run, seed=int(config.seed),
+                learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
+                weight_decay=float(config.student.get("weight_decay", 1.0e-4)),
+                kl_beta=float(config.student.get("kl_beta", 0.002)),
+            )
+        else:
+            student = StudentAdapter(
+                checkpoint=checkpoint, device=device, action_contract=contract,
+                normalization_run=config.student.get("normalization_run"),
+                seed=int(config.seed),
+                learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
+                weight_decay=float(config.student.get("weight_decay", 0.0)),
+                action_clip_value=config.student.get("action_clip_value", 20.0),
+                kl_beta=float(config.student.get("kl_beta", 0.002)),
+            )
         loaded_motions = [str(key) for key in (getattr(env, "motion_keys", None) or [])]
         unseen = sorted(set(loaded_motions) - set(student.train_motion_keys))
         if not loaded_motions or unseen:
@@ -1220,7 +1231,7 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
             checkpoint=str(config.teacher_checkpoint),
             device=device,
         )
-        source_dataset = SonicCausalDataset(
+        source_dataset = None if adapter_kind == "mlp_cvae11" else SonicCausalDataset(
             config.student.source_dataset_run,
             split="train",
             max_samples=config.student.get("source_max_samples"),

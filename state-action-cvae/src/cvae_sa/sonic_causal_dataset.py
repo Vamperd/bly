@@ -27,8 +27,8 @@ from .physics_schema import (
     load_physics_schema,
     read_physics_states,
     read_reference_future,
-    resolve_parameter,
 )
+from .path_mapping import resolve_dataset_path
 from .util import file_sha256, load_json
 
 
@@ -63,7 +63,7 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
         *,
         max_samples: int | None = None,
     ) -> None:
-        self.dataset_run = Path(dataset_run).expanduser().resolve()
+        self.dataset_run = resolve_dataset_path(Path(dataset_run).expanduser()).resolve()
         marker = self.dataset_run / "markers" / "cvae_dataset.ok"
         if not marker.is_file():
             raise FileNotFoundError(f"dataset marker is missing: {marker}")
@@ -147,14 +147,14 @@ class SonicCausalDataset(Dataset[dict[str, Any]]):
     def _handle(self, path: str) -> h5py.File:
         handle = self._handles.get(path)
         if handle is None:
-            handle = h5py.File(path, "r")
+            handle = h5py.File(resolve_dataset_path(path), "r")
             self._handles[path] = handle
         return handle
 
     def _schema(self, path: str) -> dict[str, Any]:
         schema = self._schema_cache.get(path)
         if schema is None:
-            schema = load_physics_schema(Path(path))
+            schema = load_physics_schema(resolve_dataset_path(path))
             self._schema_cache[path] = schema
         return schema
 

@@ -1,0 +1,31 @@
+{
+  "format_version": "sonic_reference_mlp_cvae_config_v1",
+  "seed": 20261114,
+  "device": "cuda:0",
+  "data": {
+    "dataset_run": "/home/helloworld/bly/runs/cvae_physics_dataset_v5",
+    "max_samples": null,
+    "use_validation": false
+  },
+  "model": {
+    "architecture_version": "sonic-10history-reference-mlp-cvae-v1",
+    "global_latent_dim": 256,
+    "encoder_widths": [2560, 1792, 896, 512],
+    "decoder_widths": [2048, 1536, 768]
+  },
+  "training": {
+    "micro_batch": 256,
+    "learning_rate": 0.0002,
+    "warmup_steps": 4000,
+    "min_learning_rate": 0.00001,
+    "weight_decay": 0.0,
+    "max_optimizer_steps": 245000,
+    "max_train_seconds": 30600,
+    "checkpoint_interval": 5000,
+    "max_val_batches": 128,
+    "gradient_clip": 1.0,
+    "kl_beta": 0.002,
+    "kl_beta_start": 0.0,
+    "kl_warmup_steps": 20000
+  }
+}
