@@ -1200,8 +1200,12 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
         if observation.get("student_reference_future") is None:
             raise RuntimeError("SONIC release observation has no [10,64] reference future")
         contract = SonicActionContract(env)
+        resume_path = Path(os.environ.get("DAGGER_RESUME_RUN", "")).expanduser().resolve() if os.environ.get("DAGGER_RESUME_RUN") else None
         checkpoint = Path(str(config.student.checkpoint)).expanduser().resolve()
-        if adapter_kind == "mlp_cvae11":
+        if resume_path is not None:
+            prior_checkpoints = sorted(resume_path.glob("checkpoints/round_*.pt"))
+            if prior_checkpoints:
+                checkpoint = prior_checkpoints[-1]
             student = StudentAdapter(
                 checkpoint=checkpoint, device=device, action_contract=contract,
                 dataset_run=config.student.dataset_run, seed=int(config.seed),
@@ -1256,7 +1260,18 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
         started = time.monotonic()
         stopped_by_time_limit = False
         metrics = []
-        for round_index, beta in enumerate(beta_schedule):
+        start_round = 0
+        if resume_path is not None:
+            partial = resume_path / "manifests/sonic_causal_metrics.partial.json"
+            if partial.is_file():
+                metrics = json.loads(partial.read_text(encoding="utf-8"))
+                start_round = len(metrics)
+                for old_path in sorted(resume_path.glob("data/dagger/round_*.pt")):
+                    payload = torch.load(old_path, map_location="cpu", weights_only=False)
+                    loop.samples.extend(payload.get("samples") or [])
+        process_rounds = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", rounds - start_round))
+        end_round = min(rounds, start_round + max(1, process_rounds))
+        for round_index in range(start_round, end_round):
             if max_seconds is not None and round_index > 0:
                 elapsed = time.monotonic() - started
                 if elapsed + elapsed / round_index > max_seconds:
@@ -1360,8 +1375,9 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
         manifest = {
             "format_version": "sonic_causal_dagger_manifest_v1",
             "mode": str(config.mode),
+            "complete": len(metrics) >= rounds,
             "execution_pass": True,
-            "quality_pass": gate["pass"],
+            "quality_pass": gate["pass"] if len(metrics) >= rounds else None,
             "quality_scope": "same_motion_teacher_action_imitation",
             "architecture_version": student.model.ARCHITECTURE_VERSION,
             "history_state_shape": [10, 70],
@@ -1376,8 +1392,8 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
             "dagger_motion_keys": loaded_motions,
             "student_checkpoint": str(checkpoint),
             "student_checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
-            "source_dataset_run": str(source_dataset.dataset_run),
-            "source_dataset_manifest_sha256": hashlib.sha256(
+            "source_dataset_run": None if source_dataset is None else str(source_dataset.dataset_run),
+            "source_dataset_manifest_sha256": None if source_dataset is None else hashlib.sha256(
                 (source_dataset.dataset_run / "manifests" / "dataset_manifest.json").read_bytes()
             ).hexdigest(),
             "data_root": str(run_dir / "data" / "dagger"),
