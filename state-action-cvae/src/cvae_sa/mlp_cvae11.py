@@ -49,6 +49,7 @@ def _mlp(in_dim: int, widths: list[int], out_dim: int) -> nn.Sequential:
 
 class MLPConditionalVAE11(nn.Module):
     """Pure MLP posterior/prior CVAE for the fixed 11/10 contract."""
+    ARCHITECTURE_VERSION = ARCHITECTURE_VERSION
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
