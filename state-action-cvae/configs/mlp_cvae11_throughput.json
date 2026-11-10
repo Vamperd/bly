@@ -1,0 +1,18 @@
+{
+  "extends": "mlp_cvae11.json",
+  "data": {
+    "num_workers": 4,
+    "pin_memory": true,
+    "non_blocking_transfer": true,
+    "persistent_workers": true,
+    "prefetch_factor": 4
+  },
+  "training": {
+    "micro_batch": 512,
+    "monitor_batch": 1024,
+    "monitor_interval": 50000,
+    "checkpoint_interval": 50000,
+    "monitor_batches": 32,
+    "matmul_precision": "high"
+  }
+}

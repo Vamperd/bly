@@ -1,0 +1,17 @@
+{
+  "extends": "sonic_reference_mlp_cvae_c_8h.json",
+  "training": {
+    "micro_batch": 512,
+    "num_workers": 4,
+    "eval_num_workers": 2,
+    "pin_memory": true,
+    "non_blocking_transfer": true,
+    "persistent_workers": true,
+    "eval_persistent_workers": true,
+    "prefetch_factor": 4,
+    "evaluation_interval": 50000,
+    "checkpoint_interval": 50000,
+    "max_val_batches": 64,
+    "matmul_precision": "high"
+  }
+}

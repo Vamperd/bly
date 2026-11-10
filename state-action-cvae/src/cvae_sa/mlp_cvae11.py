@@ -380,9 +380,19 @@ MODEL_INPUT_KEYS = (
 )
 
 
-def _prepare_batch(batch: dict[str, Any], masks: dict[str, Any], device: torch.device) -> dict[str, torch.Tensor]:
+def _prepare_batch(
+    batch: dict[str, Any],
+    masks: dict[str, Any],
+    device: torch.device,
+    *,
+    non_blocking: bool = False,
+) -> dict[str, torch.Tensor]:
     del batch
-    return {key: value.to(device) for key, value in masks.items() if key != "family" and isinstance(value, torch.Tensor)}
+    return {
+        key: value.to(device, non_blocking=non_blocking)
+        for key, value in masks.items()
+        if key != "family" and isinstance(value, torch.Tensor)
+    }
 
 
 def _checkpoint_payload(model: MLPConditionalVAE11, optimizer: torch.optim.Optimizer, scheduler: torch.optim.lr_scheduler.LRScheduler, step: int, config: dict[str, Any], selection: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
@@ -401,7 +411,17 @@ def _checkpoint_payload(model: MLPConditionalVAE11, optimizer: torch.optim.Optim
     }
 
 
-def _evaluate(model: MLPConditionalVAE11, loader: DataLoader, device: torch.device, sampler: CausalBlockMaskSampler, max_batches: int, precision: str, seed: int) -> dict[str, Any]:
+def _evaluate(
+    model: MLPConditionalVAE11,
+    loader: DataLoader,
+    device: torch.device,
+    sampler: CausalBlockMaskSampler,
+    max_batches: int,
+    precision: str,
+    seed: int,
+    *,
+    non_blocking: bool = False,
+) -> dict[str, Any]:
     model.eval()
     sampler = CausalBlockMaskSampler(seed)
     total_prior_action = 0.0
@@ -417,7 +437,7 @@ def _evaluate(model: MLPConditionalVAE11, loader: DataLoader, device: torch.devi
             if index >= int(max_batches):
                 break
             raw_masks = sampler.sample(batch)
-            masks = _prepare_batch(batch, raw_masks, device)
+            masks = _prepare_batch(batch, raw_masks, device, non_blocking=non_blocking)
             model_kwargs = {key: masks[key] for key in MODEL_INPUT_KEYS}
             with _autocast(device, precision):
                 output = model(**model_kwargs, sample=True)
@@ -476,6 +496,8 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
     training_cfg = config.get("training", {})
     precision = str(training_cfg.get("precision", "BF16")).upper()
     micro_batch = int(training_cfg.get("micro_batch", 256))
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision(str(training_cfg.get("matmul_precision", "high")))
     max_steps = int(max_steps_override if max_steps_override is not None else training_cfg.get("max_steps", 300000))
     if smoke:
         max_steps = min(max_steps, 2)
@@ -486,15 +508,24 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(training_cfg.get("learning_rate", 2.0e-4)), weight_decay=float(training_cfg.get("weight_decay", 1.0e-4)))
     warmup = int(training_cfg.get("warmup_steps", 2000))
     min_ratio = float(training_cfg.get("min_lr_ratio", 0.05))
-    def schedule(step: int) -> float:
-        if step < warmup:
-            return max(1.0e-8, (step + 1) / max(warmup, 1))
-        progress = min(1.0, (step - warmup) / max(max_steps - warmup, 1))
-        return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
-    loader_kwargs = {"batch_size": micro_batch, "shuffle": False, "num_workers": int(data_cfg.get("num_workers", 2)), "pin_memory": True, "persistent_workers": int(data_cfg.get("num_workers", 2)) > 0}
+    workers = int(data_cfg.get("num_workers", 2))
+    pin_memory = bool(data_cfg.get("pin_memory", True))
+    persistent_workers = bool(data_cfg.get("persistent_workers", workers > 0))
+    prefetch_factor = int(data_cfg.get("prefetch_factor", 2))
+    non_blocking = bool(data_cfg.get("non_blocking_transfer", pin_memory and device.type == "cuda"))
+    loader_kwargs = {
+        "batch_size": micro_batch,
+        "shuffle": False,
+        "num_workers": workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": persistent_workers if workers > 0 else False,
+    }
+    if workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
     train_loader = DataLoader(train, **loader_kwargs)
-    monitor_loader = DataLoader(monitor, batch_size=int(training_cfg.get("monitor_batch", micro_batch)), shuffle=False, num_workers=int(data_cfg.get("num_workers", 2)), pin_memory=True, persistent_workers=int(data_cfg.get("num_workers", 2)) > 0)
+    monitor_kwargs = dict(loader_kwargs)
+    monitor_kwargs["batch_size"] = int(training_cfg.get("monitor_batch", micro_batch))
+    monitor_loader = DataLoader(monitor, **monitor_kwargs)
     iterator = iter(train_loader)
     sampler = CausalBlockMaskSampler(seed + 101)
     best_score = float("inf")
@@ -521,7 +552,7 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
                 iterator = iter(train_loader)
                 batch = next(iterator)
             masks = sampler.sample(batch)
-            values = _prepare_batch(batch, masks, device)
+            values = _prepare_batch(batch, masks, device, non_blocking=non_blocking)
             model_kwargs = {key: values[key] for key in MODEL_INPUT_KEYS}
             with _autocast(device, precision):
                 output_values = model(**model_kwargs, sample=True)
@@ -540,7 +571,17 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
             optimizer.step()
             scheduler.step()
             if step == 1 or step % validation_interval == 0 or step == max_steps:
-                metrics = _evaluate(model, monitor_loader, device, sampler, eval_batches, precision, seed + step)
+                metrics = _evaluate(
+                    model,
+                    monitor_loader,
+                    device,
+                    sampler,
+                    eval_batches,
+                    precision,
+                    seed + step,
+                    non_blocking=non_blocking,
+                )
+                model.train()
                 metrics["kl_beta"] = kl_beta
                 metrics["kl"] = float(kl.detach().cpu())
                 last_metrics = metrics
@@ -571,6 +612,16 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
         "parameter_count": model.architecture_signature()["parameter_count"],
         "model_contract": model.architecture_signature(),
         "motion_selection": selection,
+        "performance": {
+            "micro_batch": micro_batch,
+            "num_workers": workers,
+            "pin_memory": pin_memory,
+            "non_blocking_transfer": non_blocking,
+            "prefetch_factor": prefetch_factor,
+            "monitor_interval": validation_interval,
+            "checkpoint_interval": checkpoint_interval,
+            "monitor_batches": eval_batches,
+        },
         "best_score": None if best_metrics is None else best_score,
         "best_metrics": best_metrics,
         "last_metrics": last_metrics,

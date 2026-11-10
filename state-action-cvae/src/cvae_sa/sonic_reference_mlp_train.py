@@ -23,8 +23,38 @@ CHECKPOINT_FORMAT = "sonic_reference_mlp_cvae_checkpoint_v1"
 SUMMARY_FORMAT = "sonic_reference_mlp_cvae_summary_v1"
 
 
-def _device_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
-    return {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
+def _device_batch(
+    batch: dict[str, Any],
+    device: torch.device,
+    *,
+    non_blocking: bool = False,
+) -> dict[str, Any]:
+    return {
+        key: value.to(device, non_blocking=non_blocking) if isinstance(value, torch.Tensor) else value
+        for key, value in batch.items()
+    }
+
+
+def _loader_kwargs(
+    *,
+    batch_size: int,
+    shuffle: bool,
+    workers: int,
+    pin_memory: bool,
+    persistent_workers: bool,
+    prefetch_factor: int,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "batch_size": int(batch_size),
+        "shuffle": bool(shuffle),
+        "num_workers": int(workers),
+        "pin_memory": bool(pin_memory),
+        "collate_fn": causal_collate,
+    }
+    if workers > 0:
+        kwargs["persistent_workers"] = bool(persistent_workers)
+        kwargs["prefetch_factor"] = int(prefetch_factor)
+    return kwargs
 
 
 def _save_checkpoint(path: Path, model: SonicReferenceMLPCVAE, optimizer: torch.optim.Optimizer, *, config: dict[str, Any], step: int, best_metric: float, dataset: SonicCausalDataset) -> None:
@@ -55,20 +85,39 @@ def _save_checkpoint(path: Path, model: SonicReferenceMLPCVAE, optimizer: torch.
     atomic_torch_save(path, payload)
 
 
-def _evaluate(model: SonicReferenceMLPCVAE, loader: DataLoader, device: torch.device, max_batches: int, seed: int) -> dict[str, float]:
+def _evaluate(
+    model: SonicReferenceMLPCVAE,
+    loader: DataLoader,
+    device: torch.device,
+    max_batches: int,
+    seed: int,
+    *,
+    non_blocking: bool = False,
+) -> dict[str, float]:
     model.eval()
-    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    generator = torch.Generator(device=device).manual_seed(int(seed))
     sums = {name: 0.0 for name in ("posterior_mean", "posterior_sample", "fixed_standard_normal")}
     count = 0
     with torch.inference_mode():
         for index, cpu_batch in enumerate(loader):
             if index >= int(max_batches):
                 break
-            batch = _device_batch(cpu_batch, device)
+            batch = _device_batch(cpu_batch, device, non_blocking=non_blocking)
             target = batch["target_action"].float()
             mean = model(batch, stage="A").action
-            posterior = model(batch, stage="C", epsilon=torch.randn(target.shape[0], model.global_latent_dim, generator=generator).to(device)).action
-            standard = model.infer_from_condition(batch, epsilon=torch.randn(target.shape[0], model.global_latent_dim, generator=generator).to(device)).action
+            posterior = model(
+                batch,
+                stage="C",
+                epsilon=torch.randn(
+                    target.shape[0], model.global_latent_dim, device=device, generator=generator
+                ),
+            ).action
+            standard = model.infer_from_condition(
+                batch,
+                epsilon=torch.randn(
+                    target.shape[0], model.global_latent_dim, device=device, generator=generator
+                ),
+            ).action
             sums["posterior_mean"] += float((mean.float() - target).square().sum())
             sums["posterior_sample"] += float((posterior.float() - target).square().sum())
             sums["fixed_standard_normal"] += float((standard.float() - target).square().sum())
@@ -87,12 +136,42 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
         raise ValueError("data.dataset_run or CVAE_DATASET_RUN is required")
     dataset = SonicCausalDataset(dataset_run, split="train", max_samples=data_cfg.get("max_samples"))
     train_motion_keys = list(dataset.motion_keys)
-    batch_size = int(config.get("training", {}).get("micro_batch", 32))
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=causal_collate)
-    eval_loader = DataLoader(dataset, batch_size=min(batch_size, 128), shuffle=False, num_workers=0, collate_fn=causal_collate)
+    training = dict(config.get("training", {}))
+    batch_size = int(training.get("micro_batch", 32))
+    workers = int(training.get("num_workers", data_cfg.get("num_workers", 0)))
+    pin_memory = bool(training.get("pin_memory", data_cfg.get("pin_memory", True)))
+    persistent_workers = bool(training.get("persistent_workers", workers > 0))
+    prefetch_factor = int(training.get("prefetch_factor", 2))
+    eval_workers = int(training.get("eval_num_workers", max(0, workers // 2)))
+    eval_persistent_workers = bool(training.get("eval_persistent_workers", eval_workers > 0))
+    eval_batch_size = int(training.get("eval_batch", min(batch_size, 128)))
+    loader = DataLoader(
+        dataset,
+        **_loader_kwargs(
+            batch_size=batch_size,
+            shuffle=True,
+            workers=workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
+        ),
+    )
+    eval_loader = DataLoader(
+        dataset,
+        **_loader_kwargs(
+            batch_size=eval_batch_size,
+            shuffle=False,
+            workers=eval_workers,
+            pin_memory=pin_memory,
+            persistent_workers=eval_persistent_workers,
+            prefetch_factor=prefetch_factor,
+        ),
+    )
     model = SonicReferenceMLPCVAE(dict(config["model"])).to(torch.device(str(config.get("device", "cuda:0"))))
     device = next(model.parameters()).device
-    training = dict(config.get("training", {}))
+    non_blocking = bool(training.get("non_blocking_transfer", pin_memory and device.type == "cuda"))
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision(str(training.get("matmul_precision", "high")))
     resume_path = os.environ.get("CVAE_RESUME_CHECKPOINT")
     start_step = 0
     if resume_path:
@@ -140,7 +219,7 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
             except StopIteration:
                 iterator = iter(loader)
                 cpu_batch = next(iterator)
-            batch = _device_batch(cpu_batch, device)
+            batch = _device_batch(cpu_batch, device, non_blocking=non_blocking)
             kl_beta_target = float(training.get("kl_beta", 0.002))
             kl_start = float(training.get("kl_beta_start", 0.0))
             kl_warmup = int(training.get("kl_warmup_steps", 20000))
@@ -148,8 +227,7 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
             lr = peak_lr * (step + 1) / max(1, warmup) if step < warmup else min_lr + 0.5 * (peak_lr - min_lr) * (1 + math.cos(math.pi * min(1.0, (step - warmup) / max(1, max_steps - warmup))))
             for group in optimizer.param_groups:
                 group["lr"] = lr
-            posterior = model(batch, stage="C")
-            standard = model.infer_from_condition(batch, epsilon=torch.randn_like(posterior.global_latent))
+            posterior, standard = model.forward_c_with_standard(batch)
             loss, terms = compose_causal_c_loss(
                 posterior_action=posterior.action,
                 standard_normal_action=standard.action,
@@ -165,9 +243,18 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(training.get("gradient_clip", 1.0)), error_if_nonfinite=True)
             optimizer.step()
-            interval = 1 if smoke else int(training.get("checkpoint_interval", 5000))
-            if step == start_step + 1 or step % interval == 0 or step == max_steps:
-                metrics = _evaluate(model, eval_loader, device, int(training.get("max_val_batches", 128)), int(config.get("seed", 20261102)) + step)
+            evaluation_interval = 1 if smoke else int(training.get("evaluation_interval", training.get("checkpoint_interval", 5000)))
+            checkpoint_interval = 1 if smoke else int(training.get("checkpoint_interval", 5000))
+            if step == start_step + 1 or step % evaluation_interval == 0 or step == max_steps:
+                metrics = _evaluate(
+                    model,
+                    eval_loader,
+                    device,
+                    int(training.get("max_val_batches", 128)),
+                    int(config.get("seed", 20261102)) + step,
+                    non_blocking=non_blocking,
+                )
+                model.train()
                 metrics.update({"loss": float(loss.detach().cpu()), "posterior_action_loss": float(terms["posterior_action"].detach().cpu()), "standard_normal_action_loss": float(terms["standard_normal_action"].detach().cpu()), "kl": float(terms["kl"].detach().cpu()), "kl_beta": kl_beta, "learning_rate": lr})
                 last_metrics = metrics
                 score = float(metrics["fixed_standard_normal"])
@@ -175,7 +262,7 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
                     best_metric = score
                     best_metrics = dict(metrics)
                     _save_checkpoint(output / "checkpoints/best.pt", model, optimizer, config=config, step=step, best_metric=best_metric, dataset=dataset)
-                if step % int(training.get("checkpoint_interval", 5000)) == 0 or step == max_steps or smoke:
+                if step % checkpoint_interval == 0 or step == max_steps or smoke:
                     _save_checkpoint(output / "checkpoints/last.pt", model, optimizer, config=config, step=step, best_metric=best_metric, dataset=dataset)
                 print(f"[reference-mlp-cvae] step={step} fixed_normal={metrics['fixed_standard_normal']:.6g} posterior={metrics['posterior_mean']:.6g} kl={metrics['kl']:.6g}", flush=True)
             if interrupted:
@@ -196,6 +283,17 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
         "parameter_count": sum(p.numel() for p in model.parameters()),
         "model_signature": model.architecture_instance_signature(),
         "train_motion_keys": train_motion_keys,
+        "performance": {
+            "micro_batch": batch_size,
+            "num_workers": workers,
+            "eval_num_workers": eval_workers,
+            "pin_memory": pin_memory,
+            "non_blocking_transfer": non_blocking,
+            "prefetch_factor": prefetch_factor,
+            "evaluation_interval": evaluation_interval,
+            "checkpoint_interval": checkpoint_interval,
+            "max_val_batches": int(training.get("max_val_batches", 128)),
+        },
         "best_metric": None if best_metrics is None else best_metric,
         "best_metrics": best_metrics,
         "last_metrics": last_metrics,

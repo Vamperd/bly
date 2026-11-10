@@ -173,6 +173,40 @@ class SonicReferenceMLPCVAE(nn.Module):
         action = self._decode(condition, latent)
         return SonicReferenceMlpOutput(action=action, posterior=posterior, global_latent=latent, latent_source=source)
 
+    def forward_c_with_standard(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        posterior_epsilon: torch.Tensor | None = None,
+        standard_epsilon: torch.Tensor | None = None,
+    ) -> tuple[SonicReferenceMlpOutput, SonicReferenceMlpOutput]:
+        """Run the C-stage posterior and standard-normal paths with one condition pass."""
+        condition = self._condition_vector(batch, include_target=False)
+        posterior_input = torch.cat((condition, batch["target_action"].float()), dim=1)
+        hidden = self.posterior_encoder(posterior_input)
+        posterior = SonicGaussianLatent(
+            mean=self.posterior_mean(hidden),
+            logvar=self.posterior_logvar(hidden).clamp(-8.0, 4.0),
+        )
+        z_q = self.reparameterize(posterior, posterior_epsilon)
+        if standard_epsilon is None:
+            standard_epsilon = torch.randn_like(z_q)
+        z_p = standard_epsilon.float()
+        return (
+            SonicReferenceMlpOutput(
+                action=self._decode(condition, z_q),
+                posterior=posterior,
+                global_latent=z_q,
+                latent_source="posterior_sample",
+            ),
+            SonicReferenceMlpOutput(
+                action=self._decode(condition, z_p),
+                posterior=None,
+                global_latent=z_p,
+                latent_source="standard_normal",
+            ),
+        )
+
     def infer_from_condition(self, batch: dict[str, torch.Tensor], *, epsilon: torch.Tensor | None = None, sample: bool = True) -> SonicReferenceMlpOutput:
         if not sample:
             epsilon = torch.zeros(batch["state_history"].shape[0], self.global_latent_dim, device=batch["state_history"].device)
