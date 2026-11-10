@@ -61,7 +61,7 @@ import json,pathlib,sys
 run=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2]); fixed=json.loads((run/'manifests/goal_state_fixed_point.json').read_text())
 checks=[]
 for p in sorted((out/'final_ghost').glob('*/ghost/manifests/policy_ghost.json')):
- m=json.loads(p.read_text()); checks.append({'motion_key':p.parent.parent.name,'frames':m.get('frames'),'video':m.get('video'),'layers':[x['name'] for x in m.get('layers',[])]})
+ m=json.loads(p.read_text()); checks.append({'motion_key':p.parents[2].name,'frames':m.get('frames'),'video':m.get('video'),'layers':[x['name'] for x in m.get('layers',[])]})
 if len(checks)!=8 or any(x['frames']!=193 for x in checks): raise SystemExit(f'final ghost validation failed: {checks}')
 json.dump({'format_version':'sonic_goal_state_iteration_videos_v1','source_run':str(run.resolve()),'motion_keys':fixed['motion_keys_loaded'],'iterations_saved':21,'horizon_actions':192,'horizon_states':193,'final_ghost_layers':['goal','state_goal_10','state_goal_20'],'final_ghosts':checks},(out/'manifest.json').open('w'),indent=2)
 (out/'markers').mkdir(exist_ok=True); (out/'markers/sonic_goal_state_iteration_videos.ok').write_text('PASS\n')
