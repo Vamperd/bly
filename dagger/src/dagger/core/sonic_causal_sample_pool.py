@@ -49,3 +49,20 @@ class SonicCausalSamplePool:
         shard = bisect_right(self.ends, index)
         offset = index - (self.ends[shard - 1] if shard else 0)
         return {key: value[offset] for key, value in self.columns[shard].items()}
+
+    def gather(self, indices: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Preserve the sampled order while gathering whole columns per shard."""
+        indices = indices.to(device="cpu", dtype=torch.long)
+        result = {
+            key: torch.empty((indices.numel(), *value.shape[1:]), dtype=value.dtype)
+            for key, value in self.columns[0].items()
+        }
+        start = 0
+        for columns, end in zip(self.columns, self.ends):
+            positions = ((indices >= start) & (indices < end)).nonzero().flatten()
+            if positions.numel():
+                local_indices = indices.index_select(0, positions) - start
+                for key, values in columns.items():
+                    result[key].index_copy_(0, positions, values.index_select(0, local_indices))
+            start = end
+        return result

@@ -189,7 +189,10 @@ class MlpCvae11StudentAdapter:
             indices = torch.randint(
                 sample_count, (sample_batch,), generator=generator, device="cpu",
             )
-            batch = default_collate([dynamic_samples[index] for index in indices.tolist()])
+            gather = getattr(dynamic_samples, "gather", None)
+            batch = gather(indices) if gather is not None else default_collate(
+                [dynamic_samples[index] for index in indices.tolist()]
+            )
             batch = {key: value.to(self.device) for key, value in batch.items()}
             teacher = batch["teacher_action"]
             posterior_action = batch["condition_action"].clone()

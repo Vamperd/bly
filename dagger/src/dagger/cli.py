@@ -165,6 +165,12 @@ def _prepare_release_env(config, run_dir: Path) -> dict:
         events=motion["events"],
         terminations=motion["terminations"],
     )
+    if bool(config.dagger.get("require_full_motion_coverage", False)):
+        if int(config.dagger.num_envs) != len(motion["requested_keys"]):
+            raise ValueError("full-motion coverage requires one environment per requested motion")
+        # SONIC's unique initialization is re-randomized by reset. Its existing
+        # paired assignment keeps env i on motion i across every reset.
+        release_config.manager_env.commands.motion.use_paired_motions = True
     print("[dagger] SONIC release config composed", flush=True)
     if _render_disables_tracking_terminations(config):
         # Isaac auto-resets terminated envs, so ignoring done would jump the robot back to the start.
