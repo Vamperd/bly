@@ -836,3 +836,65 @@ batch=1024: Job 2611-0515, 500 step / 65.0013 s = 7.69 optimizer step/s
 
 batch1024每秒处理样本约增加19%，但optimizer step速度下降约40%，且会改变有效batch
 和优化噪声；因此当前六小时续训继续保持`batch=512`，不因单次GPU利用率低而中途重启。
+## 34. 三个GPU低利用率原因与128-motion串行训练（2026-11-10）
+
+六小时32-motion续训已按调度器时限结束，不是代码主动取消：
+
+```text
+Job 2611-0514  state=CANCELLED  runtime=06:00:02
+completed_optimizer_steps=596318
+initial_optimizer_step=270000
+elapsed_seconds=21595.43
+stop_reason=signal
+last_metrics来自step596318
+```
+
+三个最可能原因及实际处理：
+
+1. **CPU Mask生成阻塞**：原11-frame causal sampler按样本逐行生成并逐行右对齐。
+   已改为batch向量化，四类Mask语义不变；500-step测试从约78 s降至38.72 s。
+2. **数据供给和传输间隙**：已启用4 workers、persistent workers、prefetch factor 4、
+   pinned memory和non-blocking transfer；这是CPU→GPU流水优化，不改变样本合同。
+3. **MLP短kernel和DAgger Python组batch**：纯MLP的LayerNorm/GELU/小矩阵kernel本身
+   不会像大Transformer持续占满GPU；已增加可选`max-autotune-no-cudagraphs`编译路径，
+   并把DAgger动态样本池一次性stack/搬到GPU，训练step只做GPU index_select。评估和
+   checkpoint仍保持50,000 step间隔。
+
+编译路径真实smoke：
+
+```text
+Job 2611-0522
+selected motions=32
+compile_enabled=true
+2 steps execution_pass=true
+```
+
+128-motion C阶段数据使用完整Physics v4 train数据，不复用32-motion v5 normalization；
+选择使用`selection_seed=20261110`，共128 motion、1010 completed episodes。精确128-motion
+smoke已通过：
+
+```text
+Job 2611-0524
+Run /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_128_12h_smoke_20261110_214106/
+selected motions=128
+execution_pass=true
+compile_enabled=true
+```
+
+正式C阶段已启动：
+
+```text
+Job 2611-0525
+Run /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_128_c_12h_20261110_214227/
+GPU=1, CPU=16, RAM=48G, wall-clock=12h
+max_steps=1000000
+```
+
+C完成后自动启动的全量128-motion DAgger监控器已经部署，日志为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_128_dagger_submit.log
+```
+
+它只在Job `2611-0525`成功且`best.pt`、summary完整后提交12小时
+`sonic_causal_mlp_cvae11_128_12h.yaml`；C失败、取消或缺checkpoint时不会错误启动DAgger。

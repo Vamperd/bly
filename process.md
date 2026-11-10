@@ -710,3 +710,33 @@ batch=1024对照Job `2611-0515`完成500 step，用时65.0013 s；batch=512向�
 为38.7196 s。batch1024的samples/s约高19%，但optimizer step/s从12.92降到7.69，
 所以低GPU瞬时利用率不能直接用增大batch解决。当前续训保持batch=512，避免改变
 optimizer-step语义和有效batch噪声。
+
+## 32. 6小时续训收尾与128-motion效率调整（2026-11-10）
+
+Job `2611-0514`达到调度器6小时上限后收到SIGTERM，最终summary为：
+
+```text
+completed_optimizer_steps = 596318
+initial_optimizer_step = 270000
+elapsed_seconds = 21595.43
+stop_reason = signal
+```
+
+这不是训练异常崩溃；最后只生成到step596318的`last.pt`，不能把该run写成
+`max_steps`完成，也没有新的质量PASS。
+
+低GPU利用率的三个证据链：
+
+- Mask sampler的Python逐样本causal对齐造成CPU空洞；
+- DataLoader和CPU→GPU传输没有充分流水；
+- 纯MLP短矩阵、LayerNorm/GELU kernel本身计算密度低，且DAgger动态样本组batch
+  原来每个step都在Python执行。
+
+对应优化已实际验证：Mask向量化将500-step从约78 s降到38.7196 s；4-worker、
+pin/non-blocking路径的smoke通过；compile路径的2-step smoke通过；DAgger adapter
+现在每个round只将dynamic sample pool一次性stack并搬到GPU。batch=1024虽然样本吞吐
+增加约19%，optimizer step/s下降约40%，所以没有替换正式训练的batch=512。
+
+128-motion C使用Physics v4完整训练集的128个确定性motion，精确128-motion smoke
+通过后Job `2611-0525`已启动12小时C阶段。C完成后由run-local watcher验证
+`best.pt`和summary，再提交12小时全量128-motion DAgger；当前尚无DAgger正式run结果。
