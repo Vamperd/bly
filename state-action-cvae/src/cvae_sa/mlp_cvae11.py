@@ -532,6 +532,18 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
     micro_batch = int(training_cfg.get("micro_batch", 256))
     if device.type == "cuda":
         torch.set_float32_matmul_precision(str(training_cfg.get("matmul_precision", "high")))
+    compile_cfg = dict(training_cfg.get("compile", {}))
+    compile_enabled = bool(compile_cfg.get("enabled", False))
+    forward_model: nn.Module = model
+    if compile_enabled:
+        if device.type != "cuda" or not hasattr(torch, "compile"):
+            raise RuntimeError("MLP11 compile requires CUDA and torch.compile")
+        forward_model = torch.compile(
+            model,
+            mode=str(compile_cfg.get("mode", "max-autotune-no-cudagraphs")),
+            dynamic=bool(compile_cfg.get("dynamic", False)),
+            fullgraph=bool(compile_cfg.get("fullgraph", False)),
+        )
     resume_path = os.environ.get("CVAE_RESUME_CHECKPOINT")
     configured_max_steps = int(training_cfg.get("max_steps", 300000))
     max_steps = int(
@@ -638,7 +650,7 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
             values = _prepare_batch(batch, masks, device, non_blocking=non_blocking)
             model_kwargs = {key: values[key] for key in MODEL_INPUT_KEYS}
             with _autocast(device, precision):
-                output_values = model(**model_kwargs, sample=True)
+                output_values = forward_model(**model_kwargs, sample=True)
                 q_state = _masked_mse(output_values["q_output"], values["truth_state"], values["target_state"])
                 q_action = _masked_mse(output_values["q_action"], values["truth_action"], values["target_action"])
                 p_state = _masked_mse(output_values["p_output"], values["truth_state"], values["target_state"])
@@ -655,7 +667,7 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
             scheduler.step()
             if step == start_step + 1 or step % validation_interval == 0 or step == max_steps:
                 metrics = _evaluate(
-                    model,
+                    forward_model,
                     monitor_loader,
                     device,
                     sampler,
@@ -706,6 +718,8 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
             "monitor_interval": validation_interval,
             "checkpoint_interval": checkpoint_interval,
             "monitor_batches": eval_batches,
+            "compile_enabled": compile_enabled,
+            "compile_mode": compile_cfg.get("mode") if compile_enabled else None,
         },
         "best_score": None if best_metrics is None else best_score,
         "best_metrics": best_metrics,

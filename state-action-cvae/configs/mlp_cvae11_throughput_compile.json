@@ -1,0 +1,11 @@
+{
+  "extends": "mlp_cvae11_throughput.json",
+  "training": {
+    "compile": {
+      "enabled": true,
+      "mode": "max-autotune-no-cudagraphs",
+      "dynamic": false,
+      "fullgraph": false
+    }
+  }
+}

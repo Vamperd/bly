@@ -177,12 +177,27 @@ class MlpCvae11StudentAdapter:
             raise RuntimeError("MLP CVAE DAgger has no dynamic samples")
         generator = generator or torch.Generator(device="cpu").manual_seed(self.seed)
         self.model.train()
+        tensor_keys = [
+            key for key, value in dynamic_samples[0].items()
+            if isinstance(value, torch.Tensor) and key != "teacher_action"
+        ]
+        pool = {
+            key: torch.stack([row[key] for row in dynamic_samples]).to(self.device)
+            for key in tensor_keys
+        }
+        teacher_pool = torch.stack([row["teacher_action"] for row in dynamic_samples]).to(self.device)
+        sample_count = len(dynamic_samples)
+        sample_batch = min(int(batch_size), sample_count)
         losses = []
         for _ in range(int(steps)):
-            indices = torch.randint(len(dynamic_samples), (min(int(batch_size), len(dynamic_samples)),), generator=generator).tolist()
-            rows = [dynamic_samples[i] for i in indices]
-            batch = {key: torch.stack([row[key] for row in rows]).to(self.device) for key in rows[0] if isinstance(rows[0][key], torch.Tensor)}
-            teacher = torch.stack([row["teacher_action"] for row in rows]).to(self.device)
+            indices = torch.randint(
+                sample_count,
+                (sample_batch,),
+                generator=generator,
+                device="cpu",
+            ).to(self.device)
+            batch = {key: value.index_select(0, indices) for key, value in pool.items()}
+            teacher = teacher_pool.index_select(0, indices)
             posterior_action = batch["condition_action"].clone()
             posterior_action[:, -1] = teacher
             output = self.model(
@@ -193,14 +208,25 @@ class MlpCvae11StudentAdapter:
                 action_before=batch["action_before"], action_before_valid=batch["action_before_valid"],
                 posterior_state=batch["condition_state"], posterior_action=posterior_action, sample=True,
             )
-            target = teacher[:, None, :]
-            loss = 0.5 * ((output["p_action"][:, -1] - teacher).float().square().mean() + (output["q_action"][:, -1] - teacher).float().square().mean())
-            loss = loss + self.kl_beta * (output["q_mean"].float().square() + torch.exp(output["q_logvar"].float()) - 1.0 - output["q_logvar"].float()).mean() * 0.5
+            loss = 0.5 * (
+                (output["p_action"][:, -1] - teacher).float().square().mean()
+                + (output["q_action"][:, -1] - teacher).float().square().mean()
+            )
+            loss = loss + self.kl_beta * (
+                output["q_mean"].float().square()
+                + torch.exp(output["q_logvar"].float())
+                - 1.0
+                - output["q_logvar"].float()
+            ).mean() * 0.5
             if not torch.isfinite(loss):
                 raise FloatingPointError("non-finite MLP CVAE DAgger loss")
-            self.optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0, error_if_nonfinite=True); self.optimizer.step(); losses.append(float(loss.detach()))
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0, error_if_nonfinite=True)
+            self.optimizer.step()
+            losses.append(float(loss.detach()))
         self.model.eval()
-        return {"train_loss": float(np.mean(losses)) if losses else 0.0, "source_steps": 0.0, "dagger_steps": float(steps), "dataset_samples": float(len(dynamic_samples))}
+        return {"train_loss": float(np.mean(losses)) if losses else 0.0, "source_steps": 0.0, "dagger_steps": float(steps), "dataset_samples": float(sample_count)}
 
     def save(self, path: str | Path, *, round_index: int, metadata: dict[str, Any] | None = None) -> None:
         payload = {
