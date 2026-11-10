@@ -784,3 +784,45 @@ ordinal 21 max update-relative RMSE = 1.2807
 该目录包含21×8个单轮MP4、8个三层ghost（`goal`、`state_goal_10`、`state_goal_20`）、
 manifest、逐轮轨迹和`sonic_goal_state_iteration_videos.ok`。三层ghost均为193帧、50Hz；
 它们只证明渲染链路和迭代对照完整，不证明SONIC控制闭环或物理稳定性通过。
+## 33. MLP CVAE训练吞吐优化与32-motion六小时续训（2026-11-10）
+
+本次优化不改变10-token/11-State-10-Action数据、Mask、模型参数或CVAE q/p合同。低GPU
+利用率主要来自训练主线程的CPU工作：11-frame sampler按样本逐行执行causal对齐并反复
+clone；reference MLP默认`num_workers=0`且CPU batch同步搬运；训练期间评估/保存频率也过高。
+
+已实现：
+
+- `CausalBlockMaskSampler`改为批量生成block Mask和causal对齐，保留四类Mask语义；
+- DataLoader支持worker、persistent worker、prefetch、pin memory和non-blocking transfer；
+- reference MLP C阶段q/p路径复用一次condition构造；
+- reference评估间隔独立于checkpoint，吞吐配置改为50,000 step评估/保存；
+- 增加续训校验，严格检查checkpoint格式、架构签名和32-motion选择；
+- 增加`elapsed_seconds`及performance字段，便于下一次作业直接审计step速度。
+
+服务器smoke和吞吐对照：
+
+```text
+Reference旧配置 500 step: Job 2611-0505, runtime 26 s
+Reference优化配置 500 step: Job 2611-0508, runtime 16 s
+11-frame优化配置 smoke: Job 2611-0511, 2 step, execution_pass=true
+11-frame向量化后 500 step: Job 2611-0513, elapsed_seconds=38.72 s
+```
+
+向量化前同配置500-step作业约78 s；向量化后约38.72 s，约2.0× step吞吐提升。
+GPU采样值从旧基线约8%提高到向量化作业中一次约20%，这是瞬时观测，不作为稳态平均
+利用率结论。Reference对照约1.6×；实际收益仍需以长作业的平均step/s为准。
+
+已从现有32-motion训练run的`best.pt`（step 270000）启动六小时续训：
+
+```text
+Job 2611-0514
+Run /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_finetune_6h_20261110_151234/
+Initial checkpoint /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_20261108_223113/checkpoints/best.pt
+Configured total step ceiling 600000
+Wall-clock limit 6 h
+Data 32 motions, throughput config, monitor/checkpoint interval 50000
+```
+
+启动检查已通过：服务器HEAD为`601da08f6`，checkpoint存在，motion selection为32，
+作业状态为RUNNING。该run最终以实际summary和`stop_reason`为准；目前不能把正在运行
+写成已经完成。

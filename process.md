@@ -664,3 +664,44 @@ converged_count = 0/8
 回传验证为`iterations=21`、`motion_count=8`、`iteration_mp4=168`、`final_mp4=8`，
 根marker为`sonic_goal_state_iteration_videos.ok`。所有视频均为SONIC/Isaac rollout的
 kinematic ghost，对摔倒、终止、长时物理稳定性不做正面质量声明。
+## 31. MLP CVAE低GPU利用率根因与吞吐优化（2026-11-10）
+
+历史11-frame MLP训练的主循环不是GPU计算错误，而是CPU供给不足：每个batch的causal
+Mask由Python逐行构造，causal样本再次逐行复制/右对齐；reference MLP还使用
+`num_workers=0`、同步`.to(device)`，并在较短checkpoint间隔执行多路径评估。一次
+`gpu top`采样显示旧reference训练约8% GPU利用率、约1.6 GiB VRAM；这与CPU/数据
+准备空转一致，不能由显存不足解释。
+
+优化后：
+
+1. causal/block Mask按batch向量化，消除512个样本的Python循环和逐行clone；
+2. DataLoader使用4 workers、persistent worker、prefetch factor 4、pin memory及
+   non-blocking transfer；
+3. reference C阶段复用condition向量，避免posterior/standard路径重复构造；
+4. 正式优化配置每50000 step评估和保存，smoke仍保持每step评估；
+5. 续训从best checkpoint恢复model、AdamW、scheduler和32-motion identity，并拒绝
+   架构或motion selection不匹配。
+
+服务器证据：
+
+```text
+Reference: 500 step 26 s -> 16 s
+11-frame MLP: 向量化前500 step约78 s -> 向量化后38.7196 s
+11-frame smoke: 2 step execution_pass=true
+```
+
+这证明吞吐优化有效，但GPU瞬时利用率不是稳定性能指标；长期run必须读取summary的
+`elapsed_seconds`、`completed_optimizer_steps`和`performance`，并结合`gpu top`
+采样判断。优化没有改变数据、Mask、q/p或Action推理语义。
+
+六小时32-motion续训已启动：
+
+```text
+Job 2611-0514
+Run /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_finetune_6h_20261110_151234/
+Resume /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_20261108_223113/checkpoints/best.pt
+Initial optimizer step 270000
+Total step ceiling 600000
+```
+
+启动时已生成motion selection且作业为RUNNING；训练完成前不声明质量改善。
