@@ -826,3 +826,13 @@ Data 32 motions, throughput config, monitor/checkpoint interval 50000
 启动检查已通过：服务器HEAD为`601da08f6`，checkpoint存在，motion selection为32，
 作业状态为RUNNING。该run最终以实际summary和`stop_reason`为准；目前不能把正在运行
 写成已经完成。
+
+额外batch对照未修改正在运行的六小时任务：
+
+```text
+batch=512: 500 step / 38.7196 s = 12.92 optimizer step/s
+batch=1024: Job 2611-0515, 500 step / 65.0013 s = 7.69 optimizer step/s
+```
+
+batch1024每秒处理样本约增加19%，但optimizer step速度下降约40%，且会改变有效batch
+和优化噪声；因此当前六小时续训继续保持`batch=512`，不因单次GPU利用率低而中途重启。

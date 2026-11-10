@@ -705,3 +705,8 @@ Total step ceiling 600000
 ```
 
 启动时已生成motion selection且作业为RUNNING；训练完成前不声明质量改善。
+
+batch=1024对照Job `2611-0515`完成500 step，用时65.0013 s；batch=512向量化对照
+为38.7196 s。batch1024的samples/s约高19%，但optimizer step/s从12.92降到7.69，
+所以低GPU瞬时利用率不能直接用增大batch解决。当前续训保持batch=512，避免改变
+optimizer-step语义和有效batch噪声。
