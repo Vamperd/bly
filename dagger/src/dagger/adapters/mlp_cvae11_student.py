@@ -45,6 +45,9 @@ class MlpCvae11StudentAdapter:
         self.model_signature = self.model.architecture_signature()
         self.checkpoint_path = checkpoint_path
         self.checkpoint_sha256 = _sha256(checkpoint_path)
+        is_dagger = payload.get("format_version") == CHECKPOINT_FORMAT
+        self.source_checkpoint = str(payload["source_checkpoint"]) if is_dagger else str(checkpoint_path)
+        self.source_checkpoint_sha256 = str(payload["source_checkpoint_sha256"]) if is_dagger else self.checkpoint_sha256
         selection = payload.get("selection") or {}
         self.train_motion_keys = [str(v) for v in selection.get("selected_motion_keys", payload.get("train_motion_keys", []))]
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
@@ -177,27 +180,18 @@ class MlpCvae11StudentAdapter:
             raise RuntimeError("MLP CVAE DAgger has no dynamic samples")
         generator = generator or torch.Generator(device="cpu").manual_seed(self.seed)
         self.model.train()
-        tensor_keys = [
-            key for key, value in dynamic_samples[0].items()
-            if isinstance(value, torch.Tensor) and key != "teacher_action"
-        ]
-        pool = {
-            key: torch.stack([row[key] for row in dynamic_samples]).to(self.device)
-            for key in tensor_keys
-        }
-        teacher_pool = torch.stack([row["teacher_action"] for row in dynamic_samples]).to(self.device)
+        # Aggregate rows may be backed by mmap'd CPU shards. Never materialize
+        # the whole growing DAgger dataset on either CPU or GPU.
         sample_count = len(dynamic_samples)
         sample_batch = min(int(batch_size), sample_count)
         losses = []
         for _ in range(int(steps)):
             indices = torch.randint(
-                sample_count,
-                (sample_batch,),
-                generator=generator,
-                device="cpu",
-            ).to(self.device)
-            batch = {key: value.index_select(0, indices) for key, value in pool.items()}
-            teacher = teacher_pool.index_select(0, indices)
+                sample_count, (sample_batch,), generator=generator, device="cpu",
+            )
+            batch = default_collate([dynamic_samples[index] for index in indices.tolist()])
+            batch = {key: value.to(self.device) for key, value in batch.items()}
+            teacher = batch["teacher_action"]
             posterior_action = batch["condition_action"].clone()
             posterior_action[:, -1] = teacher
             output = self.model(
@@ -234,7 +228,11 @@ class MlpCvae11StudentAdapter:
             "model_signature": self.model.architecture_signature(), "model": self.model.state_dict(), "config": {"model": self.model_config},
             "optimizer": self.optimizer.state_dict(), "selection": {"selected_motion_keys": self.train_motion_keys},
             "normalization": {"state_mean": self.state_mean.cpu(), "state_std": self.state_std.cpu(), "action_mean": self.action_mean.cpu(), "action_std": self.action_std.cpu()},
-            "source_checkpoint": str(self.checkpoint_path), "source_checkpoint_sha256": self.checkpoint_sha256, "round_index": int(round_index),
+            "source_checkpoint": self.source_checkpoint, "source_checkpoint_sha256": self.source_checkpoint_sha256, "round_index": int(round_index),
         }
         if metadata: payload.update(metadata)
-        path = Path(path); path.parent.mkdir(parents=True, exist_ok=True); torch.save(payload, path)
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        torch.save(payload, temporary)
+        temporary.replace(path)

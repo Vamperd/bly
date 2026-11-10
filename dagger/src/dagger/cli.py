@@ -1260,39 +1260,44 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
         )
         if not dataset_run:
             raise ValueError("causal DAgger student requires dataset_run, source_dataset_run or normalization_run")
-        if resume_path is not None:
-            prior_checkpoints = sorted(resume_path.glob("checkpoints/round_*.pt"))
-            if prior_checkpoints:
-                checkpoint = prior_checkpoints[-1]
-            resume_data_kwargs = (
-                {"dataset_run": dataset_run}
-                if adapter_kind == "mlp_cvae11"
-                else {"normalization_run": config.student.get("normalization_run") or dataset_run}
-            )
-            student = StudentAdapter(
-                checkpoint=checkpoint, device=device, action_contract=contract,
-                seed=int(config.seed),
-                **resume_data_kwargs,
-                learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
-                weight_decay=float(config.student.get("weight_decay", 1.0e-4)),
-                kl_beta=float(config.student.get("kl_beta", 0.002)),
-            )
-        else:
-            student = StudentAdapter(
-                checkpoint=checkpoint, device=device, action_contract=contract,
-                normalization_run=config.student.get("normalization_run"),
-                seed=int(config.seed),
-                learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
-                weight_decay=float(config.student.get("weight_decay", 0.0)),
-                action_clip_value=config.student.get("action_clip_value", 20.0),
-                kl_beta=float(config.student.get("kl_beta", 0.002)),
-            )
+        metrics_path = run_dir / "manifests" / "sonic_causal_metrics.partial.json"
+        metrics = []
+        if resume_path is not None and metrics_path.is_file():
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        # Metrics are the commit record: ignore orphan data/checkpoints left by
+        # an interrupted round, and never order round_100 before round_99.
+        for index, row in enumerate(metrics):
+            if int(row["round"]) != index:
+                raise ValueError("causal DAgger resume metrics must contain contiguous numeric rounds")
+            for child in ("checkpoints", "data/dagger"):
+                saved = run_dir / child / f"round_{index:02d}.pt"
+                if not saved.is_file():
+                    raise FileNotFoundError(f"committed DAgger round is missing {saved}")
+        if metrics:
+            checkpoint = run_dir / "checkpoints" / f"round_{int(metrics[-1]['round']):02d}.pt"
+        adapter_kwargs = (
+            {"dataset_run": dataset_run}
+            if adapter_kind == "mlp_cvae11"
+            else {
+                "normalization_run": config.student.get("normalization_run") or dataset_run,
+                "action_clip_value": config.student.get("action_clip_value", 20.0),
+            }
+        )
+        student = StudentAdapter(
+            checkpoint=checkpoint, device=device, action_contract=contract,
+            seed=int(config.seed), **adapter_kwargs,
+            learning_rate=float(config.student.get("learning_rate", 1.0e-5)),
+            weight_decay=float(config.student.get("weight_decay", 1.0e-4 if resume_path else 0.0)),
+            kl_beta=float(config.student.get("kl_beta", 0.002)),
+        )
         loaded_motions = [str(key) for key in (getattr(env, "motion_keys", None) or [])]
         unseen = sorted(set(loaded_motions) - set(student.train_motion_keys))
         if not loaded_motions or unseen:
             raise RuntimeError(
                 f"DAgger env loaded motions not seen in C training: {unseen or 'none loaded'}"
             )
+        if bool(config.dagger.get("require_full_motion_coverage", False)) and set(loaded_motions) != set(student.train_motion_keys):
+            raise RuntimeError("full-coverage DAgger must load the exact C-trained motion set")
         teacher = SonicReleaseTeacher(
             config=prepared["release_config"],
             env=env,
@@ -1321,32 +1326,63 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
         beta_schedule = beta_schedule[:rounds]
         max_hours = config.dagger.get("max_train_hours", None)
         max_seconds = None if max_hours is None else float(max_hours) * 3600.0
+        aggregate = None
+        if adapter_kind == "mlp_cvae11":
+            from .core.sonic_causal_sample_pool import SonicCausalSamplePool
+
+            aggregate = SonicCausalSamplePool(run_dir / "data" / "training_cache")
+        for row in metrics:
+            old_path = run_dir / "data" / "dagger" / f"round_{int(row['round']):02d}.pt"
+            if aggregate is not None:
+                aggregate.add_round(old_path)
+            else:
+                payload = torch.load(old_path, map_location="cpu", weights_only=False)
+                loop.samples.extend(payload.get("samples") or [])
+        if aggregate is not None:
+            loop.samples = aggregate
+        start_round = len(metrics)
+        completed_seconds = 0.0
+        previous_elapsed = 0.0
+        for row in metrics:
+            # Older manifests reset elapsed_seconds when a process restarted.
+            elapsed = float(row.get("elapsed_seconds", 0.0))
+            completed_seconds += max(0.0, elapsed - previous_elapsed) if elapsed >= previous_elapsed else elapsed
+            completed_seconds = float(row.get("completed_training_seconds", completed_seconds))
+            previous_elapsed = elapsed
         started = time.monotonic()
+        deadline_text = os.environ.get("DAGGER_DEADLINE_EPOCH", "").strip()
+        deadline_epoch = float(deadline_text) if deadline_text else None
+        lease_buffer = float(os.environ.get("DAGGER_LEASE_BUFFER_SECONDS", "180"))
         stopped_by_time_limit = False
-        metrics = []
-        start_round = 0
-        if resume_path is not None:
-            partial = resume_path / "manifests/sonic_causal_metrics.partial.json"
-            if partial.is_file():
-                metrics = json.loads(partial.read_text(encoding="utf-8"))
-                start_round = len(metrics)
-                for old_path in sorted(resume_path.glob("data/dagger/round_*.pt")):
-                    payload = torch.load(old_path, map_location="cpu", weights_only=False)
-                    loop.samples.extend(payload.get("samples") or [])
-        process_rounds = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", rounds - start_round))
-        end_round = min(rounds, start_round + max(1, process_rounds))
+        stopped_by_lease = False
+        process_rounds = int(os.environ.get("DAGGER_ROUNDS_PER_PROCESS", "0") or 0)
+        end_round = min(rounds, start_round + process_rounds) if process_rounds > 0 else rounds
         for round_index in range(start_round, end_round):
-            if max_seconds is not None and round_index > 0:
-                elapsed = time.monotonic() - started
-                if elapsed + elapsed / round_index > max_seconds:
-                    print(
-                        f"[sonic-causal] time budget {max_hours}h: stop before round {round_index} "
-                        f"(elapsed={elapsed / 3600:.2f}h, mean_round={elapsed / round_index / 60:.1f}min)",
-                        flush=True,
-                    )
-                    stopped_by_time_limit = True
+            elapsed = completed_seconds + time.monotonic() - started
+            if max_seconds is not None and elapsed >= max_seconds:
+                stopped_by_time_limit = True
+                break
+            mean_round = (
+                sum(float(row.get("round_seconds", 0.0)) for row in metrics) / len(metrics)
+                if metrics else 0.0
+            )
+            if deadline_epoch is not None and time.time() + mean_round + lease_buffer >= deadline_epoch:
+                stopped_by_lease = True
+                break
+            round_started = time.monotonic()
+            if aggregate is not None:
+                # collect_round builds only the current round in RAM.
+                loop.samples = []
             beta = beta_schedule[round_index]
             dynamic = loop.collect_round(round_index, beta)
+            motion_ids, motion_counts = torch.stack([row["motion_id"] for row in dynamic]).unique(return_counts=True)
+            coverage = {}
+            for motion_id, count in zip(motion_ids.tolist(), motion_counts.tolist()):
+                if not 0 <= motion_id < len(loaded_motions):
+                    raise RuntimeError(f"collected DAgger sample has invalid motion_id {motion_id}")
+                coverage[loaded_motions[motion_id]] = count
+            if bool(config.dagger.get("require_full_motion_coverage", False)) and set(coverage) != set(student.train_motion_keys):
+                raise RuntimeError(f"DAgger rollout omitted C motions: {sorted(set(student.train_motion_keys) - set(coverage))}")
             data_path = run_dir / "data" / "dagger" / f"round_{round_index:02d}.pt"
             data_path.parent.mkdir(parents=True, exist_ok=True)
             data_tmp = data_path.with_name(f"{data_path.name}.tmp.{__import__('os').getpid()}")
@@ -1361,6 +1397,13 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
                 data_tmp,
             )
             data_tmp.replace(data_path)
+            if aggregate is not None:
+                aggregate.add_round(data_path, samples=dynamic)
+                loop.samples = aggregate
+                round_sample_count = len(dynamic)
+                del dynamic
+            else:
+                round_sample_count = len(dynamic)
             train_metrics = student.train_on_samples(
                 loop.samples,
                 source_dataset=source_dataset,
@@ -1381,6 +1424,8 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
                 metadata={
                     "beta": beta,
                     "motion_keys": list(getattr(env, "motion_keys", []) or []),
+                    "collected_motion_keys": sorted(coverage),
+                    "collected_motion_samples": coverage,
                     "eval_metrics": eval_metrics,
                 },
             )
@@ -1388,23 +1433,31 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
                 {
                     "round": round_index,
                     "beta": beta,
-                    "round_samples": len(dynamic),
+                    "round_samples": round_sample_count,
                     "samples": len(loop.samples),
+                    "collected_motion_keys": sorted(coverage),
+                    "collected_motion_samples": coverage,
                     "train": train_metrics,
                     "student_only": eval_metrics,
-                    "elapsed_seconds": time.monotonic() - started,
+                    "round_seconds": time.monotonic() - round_started,
+                    "elapsed_seconds": completed_seconds + time.monotonic() - started,
+                    "completed_training_seconds": completed_seconds + time.monotonic() - started,
                 }
             )
-            _write_json(run_dir / "manifests" / "sonic_causal_metrics.partial.json", metrics)
+            _write_json(metrics_path, metrics)
             print(
                 f"[sonic-causal] round={round_index} beta={beta:.2f} samples={len(loop.samples)} "
                 f"train_loss={train_metrics['train_loss']:.4g} "
                 f"eval_rmse={eval_metrics['teacher_action_rmse']:.4f} "
                 f"term_rate={eval_metrics['termination_rate']:.4f} "
                 f"survival={eval_metrics['survival_ratio']:.2f} "
-                f"elapsed={(time.monotonic() - started) / 3600:.2f}h",
+                f"elapsed={(completed_seconds + time.monotonic() - started) / 3600:.2f}h",
                 flush=True,
             )
+        elapsed = float(metrics[-1].get("completed_training_seconds", completed_seconds)) if metrics else completed_seconds
+        budget_complete = max_seconds is not None and elapsed >= max_seconds
+        all_rounds_complete = len(metrics) >= rounds
+        complete = bool(metrics) and (budget_complete or all_rounds_complete)
         baseline = metrics[0]["student_only"] if metrics else None
         final = metrics[-1]["student_only"] if metrics else None
         baseline_by_motion = (baseline or {}).get("teacher_action_rmse_by_motion", {})
@@ -1439,9 +1492,9 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
         manifest = {
             "format_version": "sonic_causal_dagger_manifest_v1",
             "mode": str(config.mode),
-            "complete": len(metrics) >= rounds,
+            "complete": complete,
             "execution_pass": True,
-            "quality_pass": gate["pass"] if len(metrics) >= rounds else None,
+            "quality_pass": gate["pass"] if complete else None,
             "quality_scope": "same_motion_teacher_action_imitation",
             "architecture_version": student.model.ARCHITECTURE_VERSION,
             "history_state_shape": [10, 70],
@@ -1465,6 +1518,12 @@ def _run_sonic_causal(config, run_dir: Path, device: torch.device, args_cli, pre
             "rounds": metrics,
             "max_train_hours": max_hours,
             "stopped_by_time_limit": stopped_by_time_limit,
+            "stopped_by_lease": stopped_by_lease,
+            "completed_training_seconds": elapsed,
+            "completed_rounds": len(metrics),
+            "budget_complete": budget_complete,
+            "completion_reason": "time_budget" if budget_complete else ("rounds" if all_rounds_complete else None),
+            "latest_checkpoint": str(run_dir / "checkpoints" / f"round_{len(metrics) - 1:02d}.pt") if metrics else None,
             "imitation_gate": gate,
             "teacher_information_contract": {
                 "teacher_input_keys": sorted(

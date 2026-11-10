@@ -110,6 +110,11 @@ def render(args: argparse.Namespace) -> dict:
     if any(value <= 0 for value in frame_counts.values()):
         raise ValueError(f"empty trajectory: {frame_counts}")
     frames = max(frame_counts.values())
+    display_frames = getattr(args, "display_frames", None)
+    if display_frames is not None:
+        if display_frames < frames:
+            raise ValueError(f"display frames {display_frames} would truncate trajectories: {frame_counts}")
+        frames = display_frames
     alignment = {}
     for index in range(1, len(qposes)):
         offset = qposes[0][0, :3] - qposes[index][0, :3]
@@ -195,6 +200,13 @@ def render(args: argparse.Namespace) -> dict:
         "frames": int(rendered),
         "seconds": float(seconds),
         "fps": fps,
+        "original_frame_counts": frame_counts,
+        "display_padding": {
+            "method": "repeat_final_frame_only",
+            "frames_by_layer": {name: frames - count for name, count in frame_counts.items()},
+            "trajectories_modified": False,
+        },
+        "engines": {"rollout": "Isaac Sim", "display": "MuJoCo kinematic replay"},
         "layers": [
             {
                 "name": name,
@@ -223,6 +235,10 @@ def main(argv=None) -> int:
     parser.add_argument("--layer", action="append", required=True, help="NAME=trajectory.pkl; first is opaque")
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output-run", type=Path, required=True)
+    parser.add_argument(
+        "--display-frames", type=int,
+        help="Pad display to this many frames by holding each ended layer's final pose; never truncate",
+    )
     parser.add_argument("--title", default="")
     parser.add_argument("--robot-profile", default="g1")
     parser.add_argument("--mesh-dir", type=Path)

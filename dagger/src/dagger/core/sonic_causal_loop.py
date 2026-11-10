@@ -99,6 +99,8 @@ class SonicCausalDaggerLoop:
             executed_raw = torch.where(
                 teacher_mask[:, None], teacher_raw, rollout.action_raw
             )
+            # Capture the action's motion before auto-reset can reassign it.
+            motion_ids = self._motion_ids()
             next_observation, _reward, next_done, _info = self.env.step(
                 {"actions": executed_raw}
             )
@@ -111,7 +113,6 @@ class SonicCausalDaggerLoop:
                 rollout.action_canonical - self.student.action_mean
             ) / self.student.action_std.clamp_min(1.0e-6)
             executed_canonical = self.action_contract.raw_to_canonical(executed_raw)
-            motion_ids = self._motion_ids()
             for index in range(self.num_envs):
                 sample = {
                     key: value[index].detach().cpu().clone()

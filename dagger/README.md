@@ -41,3 +41,44 @@ bash scripts/run_dagger.sh cvae-pilot
 每个动态样本保存 `[65,70]` State、`[64,29]` Action、causal State/Action mask、teacher/student/executed raw 和 canonical Action、episode metadata 以及 latent seed。训练使用 50% 原始 CVAE 窗口和 50% DAgger 窗口，normalizer 保持原数据集版本并冻结。
 
 当前无 reference 的 CVAE 版本是动态补全诊断。若 teacher action 在相似 student-visible 状态下仍有明显条件方差，manifest 会保留 `teacher_not_identifiable` 证据，不能把该结果解释为完整的 SONIC reference-conditioned imitation。
+
+## 128-motion MLP CVAE duration stage
+
+After the existing C run finishes, invoke once **outside** a GPU allocation:
+
+```bash
+bash dagger/scripts/run_mlp_cvae11_128_dagger.sh "$C_RUN" "$MIG" "$OUTPUT_STATE_DIR"
+```
+
+The runner submits and monitors sequential `gpu` jobs, with two Isaac rounds per
+process by default. Reusing the same arguments reattaches/resumes rather than
+starting over. It loads C's `checkpoints/best.pt`, requires its exact 128 distinct
+trained motions, and uses 128 environments. Every collected round must actually
+contain all 128 motion IDs before training/commit; labels are captured before
+automatic resets. Historical causal routes retain their configurations.
+
+`OUTPUT_STATE_DIR/dagger_stage.json` atomically records `dagger_run`, `state`,
+`complete`, `completed_rounds`, `completed_training_seconds`, `latest_checkpoint`,
+and C checkpoint identity. `complete=true` means at least 12 hours of **committed
+round work** (rollout, training, evaluation, saving), excluding queue and Isaac
+startup time; the final round may cross the duration boundary. Errors never set
+completion. Only scheduler `SUCCEEDED`, or `CANCELLED` with `TIME_LIMIT` and a
+new valid committed round, permits continuation. Other failures stop explicitly.
+The checkpoint/data files plus contiguous numeric metrics are a round's commit
+record; orphan files from interrupted rounds are ignored on resume.
+
+The full aggregate is retained on disk, with memory-mapped CPU training columns
+and uniformly sampled minibatches staged to CUDA, not an ever-growing GPU pool.
+AdamW state and original C provenance survive each process boundary. A lease
+guard avoids starting a round when its measured mean duration plus a buffer
+would exceed the allocation.
+
+For an isolated smoke output directory, `DAGGER_STAGE_SMOKE=1` defaults to two
+one-round processes, two rollout/evaluation steps, and one optimizer step.
+All **128 motions and environments remain enabled**. Smoke-only overrides are
+`DAGGER_STAGE_ROUNDS`, `DAGGER_STAGE_HOURS`, `DAGGER_STAGE_ROLLOUT_STEPS`,
+`DAGGER_STAGE_TRAIN_STEPS`, and `DAGGER_STAGE_EVAL_STEPS`; smoke completion is
+explicitly marked and is not evidence of a full-duration run. Resource knobs:
+`DAGGER_SHARD_ROUNDS` (2; smoke 1), `DAGGER_STAGE_LEASE_SECONDS` (7200),
+`DAGGER_STAGE_CPUS` (16), `DAGGER_STAGE_RAM` (48G),
+`DAGGER_LEASE_BUFFER_SECONDS` (180), `DAGGER_STAGE_POLL_SECONDS` (15).
