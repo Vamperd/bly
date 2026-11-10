@@ -281,58 +281,91 @@ class CausalBlockMaskSampler:
         condition_action = action.clone()
         posterior_state = state.clone()
         posterior_action = action.clone()
-        causal_indices = []
-        families: list[str] = []
-        for row in range(batch_size):
-            choice = float(self.rng.random())
-            if choice < 0.40:
-                target_time = int(self.rng.integers(0, ACTION_STEPS))
-                causal_indices.append((row, target_time))
-                families.append("causal")
-                continue
-            if choice < 0.60:
-                length = int(self.rng.integers(1, 3))
-                start = int(self.rng.integers(1, STATE_STEPS - length))
-                target_state[row, start : start + length] = True
-                state_visible[row, start : start + length] = False
-                families.append("state_only")
-                continue
-            if choice < 0.80:
-                length = int(self.rng.integers(1, 3))
-                start = int(self.rng.integers(0, ACTION_STEPS - length + 1))
-                target_action[row, start : start + length] = True
-                action_visible[row, start : start + length] = False
-                families.append("action_only")
-                continue
-            length = int(self.rng.integers(1, 3))
-            start = int(self.rng.integers(1, ACTION_STEPS - length))
-            target_state[row, start : start + length] = True
-            state_visible[row, start : start + length] = False
-            target_action[row, start : start + length] = True
-            action_visible[row, start : start + length] = False
-            families.append("both")
-        for row, target_time in causal_indices:
-            row_state, row_action, row_state_valid, row_action_valid, row_target_state, row_target_action, row_before, row_before_valid = _right_align_causal(
-                state[row : row + 1], action[row : row + 1], before[row : row + 1], before_valid[row : row + 1], target_time
+
+        choices = self.rng.random(batch_size)
+        families = np.empty(batch_size, dtype=object)
+        families[choices < 0.40] = "causal"
+        families[(choices >= 0.40) & (choices < 0.60)] = "state_only"
+        families[(choices >= 0.60) & (choices < 0.80)] = "action_only"
+        families[choices >= 0.80] = "both"
+
+        def block_mask(rows: np.ndarray, *, width: int, low: int, high_by_length: int) -> torch.Tensor:
+            mask = torch.zeros(batch_size, width, dtype=torch.bool)
+            if rows.size == 0:
+                return mask
+            lengths = self.rng.integers(1, 3, size=rows.size)
+            starts = np.asarray(
+                [self.rng.integers(low, high_by_length - int(length)) for length in lengths],
+                dtype=np.int64,
             )
-            causal_truth_action = row_action.clone()
-            causal_truth_action[0, -1] = action[row, target_time]
-            truth_state[row] = row_state[0]
-            truth_action[row] = causal_truth_action[0]
-            condition_state[row] = row_state[0]
-            condition_action[row] = row_action[0]
-            posterior_state[row] = row_state[0]
-            posterior_action[row] = causal_truth_action[0]
-            state_valid[row] = row_state_valid[0]
-            action_valid[row] = row_action_valid[0]
-            state_visible[row] = row_state_valid[0]
-            action_visible[row] = row_action_valid[0]
-            action_visible[row, -1] = False
-            target_state[row] = row_target_state[0]
-            target_action[row] = row_target_action[0]
-            before[row] = row_before[0]
-            before_valid[row] = row_before_valid[0]
-            condition_action[row, -1] = 0.0
+            slots = np.arange(width, dtype=np.int64)[None, :]
+            span = (slots >= starts[:, None]) & (slots < starts[:, None] + lengths[:, None])
+            mask[torch.from_numpy(rows), :] = torch.from_numpy(span)
+            return mask
+
+        state_rows = np.flatnonzero((choices >= 0.40) & (choices < 0.60))
+        state_blocks = block_mask(state_rows, width=STATE_STEPS, low=1, high_by_length=STATE_STEPS)
+        state_visible[state_blocks] = False
+        target_state[state_blocks] = True
+
+        action_rows = np.flatnonzero((choices >= 0.60) & (choices < 0.80))
+        action_blocks = block_mask(action_rows, width=ACTION_STEPS, low=0, high_by_length=ACTION_STEPS + 1)
+        action_visible[action_blocks] = False
+        target_action[action_blocks] = True
+
+        both_rows = np.flatnonzero(choices >= 0.80)
+        both_state_blocks = block_mask(both_rows, width=STATE_STEPS, low=1, high_by_length=STATE_STEPS)
+        both_action_blocks = block_mask(both_rows, width=ACTION_STEPS, low=1, high_by_length=ACTION_STEPS)
+        state_visible[both_state_blocks] = False
+        action_visible[both_action_blocks] = False
+        target_state[both_state_blocks] = True
+        target_action[both_action_blocks] = True
+
+        causal_rows_np = np.flatnonzero(choices < 0.40)
+        if causal_rows_np.size:
+            rows = torch.from_numpy(causal_rows_np).long()
+            target_times = torch.from_numpy(
+                self.rng.integers(0, ACTION_STEPS, size=causal_rows_np.size)
+            ).long()
+            source_state = state.index_select(0, rows)
+            source_action = action.index_select(0, rows)
+            state_slots = torch.arange(STATE_STEPS)
+            state_frames = target_times[:, None] - 9 + state_slots[None, :]
+            state_indices = state_frames.clamp(0, STATE_STEPS - 1)
+            state_valid_rows = (state_frames >= 0) & (state_frames <= target_times[:, None] + 1)
+            aligned_state = source_state.gather(
+                1, state_indices[..., None].expand(-1, -1, STATE_DIM)
+            )
+            aligned_state = aligned_state.masked_fill(~state_valid_rows[..., None], 0.0)
+
+            action_slots = torch.arange(ACTION_STEPS)
+            action_frames = target_times[:, None] - 9 + action_slots[None, :]
+            action_indices = action_frames.clamp(0, ACTION_STEPS - 1)
+            action_valid_rows = (action_frames >= 0) & (action_frames < target_times[:, None])
+            aligned_action = source_action.gather(
+                1, action_indices[..., None].expand(-1, -1, ACTION_DIM)
+            )
+            aligned_action = aligned_action.masked_fill(~action_valid_rows[..., None], 0.0)
+            truth_action_rows = aligned_action.clone()
+            truth_action_rows[:, -1] = source_action[
+                torch.arange(rows.shape[0]), target_times
+            ]
+            action_valid_rows[:, -1] = True
+
+            truth_state[rows] = aligned_state
+            truth_action[rows] = truth_action_rows
+            condition_state[rows] = aligned_state
+            condition_action[rows] = aligned_action
+            posterior_state[rows] = aligned_state
+            posterior_action[rows] = truth_action_rows
+            state_valid[rows] = state_valid_rows
+            action_valid[rows] = action_valid_rows
+            state_visible[rows] = state_valid_rows
+            action_visible[rows] = action_valid_rows
+            action_visible[rows, -1] = False
+            target_action[rows, -1] = True
+            condition_action[rows, -1] = 0.0
+
         posterior_state[target_state] = truth_state[target_state]
         posterior_action[target_action] = truth_action[target_action]
         return {
@@ -350,7 +383,7 @@ class CausalBlockMaskSampler:
             "truth_action": truth_action,
             "action_before": before,
             "action_before_valid": before_valid,
-            "family": tuple(families),
+            "family": tuple(str(value) for value in families.tolist()),
         }
 
 
