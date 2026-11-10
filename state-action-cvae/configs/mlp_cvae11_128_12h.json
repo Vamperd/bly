@@ -1,0 +1,18 @@
+{
+  "extends": "mlp_cvae11_throughput_compile.json",
+  "data": {
+    "motion_count": 128,
+    "selection_seed": 20261110,
+    "train_samples_per_epoch": 65536,
+    "monitor_stride": 10
+  },
+  "training": {
+    "max_steps": 1000000,
+    "max_wall_hours": 12.0,
+    "micro_batch": 512,
+    "monitor_batch": 1024,
+    "monitor_interval": 50000,
+    "checkpoint_interval": 50000,
+    "monitor_batches": 32
+  }
+}
