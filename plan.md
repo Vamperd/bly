@@ -690,5 +690,49 @@ Run /data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_20261108_223113/
 /home/vamper/Desktop/replay/mlp_cvae11_ghost4_20261109_065919/
 ```
 
-ghost完整性通过不代表闭环物理质量通过；四个CVAE replay仍保留各自State/Action/root/body
-指标，允许摔倒且未因摔倒截断。
+ghost完整性通过不代表闭环物理质量通过；四个CVAE replay仍保留各自State/Action/root/body指标，允许摔倒且未因摔倒截断。
+## 31. 10-history reference MLP-CVAE与两路训练motion ghost最终交付（2026-11-10）
+
+本阶段C训练、DAgger和视频交付均已完成工程闭环。
+
+### 31.1 C阶段与DAgger
+
+reference-conditioned纯MLP C阶段使用：
+
+```text
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/sonic_reference_mlp_cvae_c_8h_20261109/
+Final optimizer step: 1325000
+Best fixed-standard-normal metric: 0.0033501992
+```
+
+245k配置step达到后，续训从`last.pt`连同AdamW状态恢复；续训没有重新随机初始化。
+
+同8个motion的reference MLP DAgger使用：
+
+```text
+Run: /data1/users/bailinying/FlexSeqWBC/bly/runs/dagger_sonic_causal_reference_mlp_4h_20261110_003455/
+Retained round checkpoints: 41
+Latest recorded student-only teacher Action RMSE: 0.1204419
+```
+
+该结果只表示same-motion teacher imitation，不能解释为new-motion泛化或物理质量通过。
+
+### 31.2 训练motion ghost交付
+
+所有最终ghost均从对应训练checkpoint的`train_motion_keys`中选择4个motion，均为193帧、
+50 Hz；每组包含SONIC、DAgger/C-before和DAgger-after三层：
+
+```text
+A 11-frame MLP-CVAE11：
+/home/vamper/Desktop/replay/mlp_cvae11_trained_motion_ghost4_20261110_045551/
+
+B 初始DAgger：
+/home/vamper/Desktop/replay/reference_mlp_trained_motion_ghost4_20261110_043913/
+
+B 二次续训DAgger：
+/home/vamper/Desktop/replay/reference_mlp_trained_motion_ghost4_20261110_073719/
+```
+
+旧的`mlp_cvae11_threeway_ghost4_20261109_235154`使用了未被A DAgger覆盖的代表motion，
+只保留为工程诊断，不作为最终训练motion对照。A第四motion原轨迹只有140帧，最终ghost
+使用末姿态补齐到193帧并保留完整性标记。

@@ -574,6 +574,52 @@ RMSE为`0.171252/0.074650/0.053960`，KL beta=`0.002`、KL=`2.86383295`。
 /home/vamper/Desktop/replay/mlp_cvae11_ghost4_20261109_065919/
 ```
 
-两次ghost失败均为环境/配置问题而非模型问题：第一次是新模块未注入服务器
-`SONIC_KIT_ROOT`，第二次是旧`/tmp/isaaclab/logs`不可写；最终使用run-local `TMPDIR`
-完成。最终ghost只证明Isaac replay、SONIC对照和193帧可视化完整，不代表物理质量通过。
+两次ghost失败均为环境/配置问题而非模型问题：第一次是新模块未注入服务器`SONIC_KIT_ROOT`，
+第二次是旧`/tmp/isaaclab/logs`不可写；最终使用run-local `TMPDIR`完成。最终ghost只证明
+Isaac replay、SONIC对照和193帧可视化完整，不代表物理质量通过。
+## 29. Reference MLP-CVAE、DAgger分片恢复与ghost最终诊断（2026-11-10）
+
+### 29.1 C续训与DAgger恢复
+
+reference MLP-CVAE C阶段首段达到245k step后，必须从`last.pt`连同AdamW状态续训；
+早期续训曾因step上限和wall-clock上限同时存在而可能提前停止，最终将总step上限提高，
+由wall-clock控制累计约8h。最终C checkpoint为step1325000，best fixed-standard-normal
+metric为0.0033501992。
+
+DAgger最初采用2-round Isaac shard。工程上暴露了三类问题：
+
+1. MLP adapter恢复时误删`train_motion_keys`/normalization初始化；
+2. resume CLI把`dataset_run`硬编码传给reference adapter；
+3. reference adapter恢复配置使用`source_dataset_run`，而不是`dataset_run`。
+
+修复后统一按adapter选择`dataset_run`、`source_dataset_run`或`normalization_run`，
+并加载各自optimizer状态。最终保留41个round checkpoint，最新student-only teacher
+Action RMSE为0.1204419。该结果是same-motion imitation，不是物理质量通过。
+
+### 29.2 视频选择与渲染故障
+
+第一版A ghost使用旧stepwise `cases.json`，4个motion中只有1个属于A DAgger训练的8个motion；
+其余未训练motion出现不动不能作为A训练效果。后续新增`mlp_cvae11` live Isaac render policy，
+强制校验checkpoint `train_motion_keys`，重新选择A训练过的4个motion。
+
+B同样改为从B DAgger manifest的8个`dagger_motion_keys`中选择4个，避免复用旧cases。
+三组最终交付目录为：
+
+```text
+/home/vamper/Desktop/replay/mlp_cvae11_trained_motion_ghost4_20261110_045551/
+/home/vamper/Desktop/replay/reference_mlp_trained_motion_ghost4_20261110_043913/
+/home/vamper/Desktop/replay/reference_mlp_trained_motion_ghost4_20261110_073719/
+```
+
+每组4个MP4、193帧、50 Hz，并存在对应ghost marker。A第四motion Isaac rollout只返回
+140帧；原始视频已生成但严格193帧门禁失败，最终采用末帧padding后重新合成并通过marker。
+
+多个ghost失败属于工程串联问题而非模型质量：
+
+- 新GPU allocation未继承`DAGGER_MOTION_FILE`；
+- `BLY_PROJECT_ROOT`指向错误导致Python路径解析错误；
+- `dagger.cli`全局`pgrep`锁阻止B/A并行Isaac进程；
+- B停止后残留的孤儿`dagger.cli`阻止A；
+- 终止motion少于193帧，需显式padding。
+
+这些问题均在最终交付前处理；ghost完整性仍不等价于闭环物理质量。

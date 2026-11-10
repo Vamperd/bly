@@ -590,14 +590,124 @@ State-only、Action-only和Both只隐藏长度1–2的时间块；没有feature-
 
 该过程输出192个Action和193帧，再与SONIC release teacher渲染成两层193帧ghost。物理
 摔倒不截断视频；视频完整性和物理质量分开记录。正式训练`2611-0439`完成300000 step，
-`best.pt`选择step270000；四动作ghost run为：
+`best.pt`选择step270000。最终严格prior-only replay使用显式`prior_forward()`，不计算
+posterior q，服务器ghost run为：
 
 ```text
-/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_ghost4_20261109_065919/
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_ghost4_20261109_133453/
 ```
 
 四条视频已回传到：
 
 ```text
-/home/vamper/Desktop/replay/mlp_cvae11_ghost4_20261109_065919/
+/home/vamper/Desktop/replay/mlp_cvae11_ghost4_20261109_133453/
 ```
+
+同一`best.pt`、同一32-batch train-only monitor和同一mask下，prior-only配对结果为：
+
+```text
+sampled zp:       State 0.193812, Action 0.078920, causal Action 0.054099
+deterministic μp: State 0.193561, Action 0.078413, causal Action 0.053153
+```
+
+采样/确定性RMSE ratio为`1.0013/1.0065/1.0178`。这证明当前离线误差差异主要来自
+latent sampling，而不是posterior误用；它仍不等价于闭环物理质量通过。
+
+## 16. 10-history reference-conditioned MLP-CVAE（2026-11-09，合同与实现）
+
+该路线严格保留旧 `sonic-10history-reference-cvae-v1` 的单步合同，只把 Transformer
+posterior/condition/decoder 替换为纯 MLP；不改变 SONIC goal、Physics State、reference
+或 Action 的语义。训练和 DAgger 使用 8 个 C 训练过的 motion；ghost 只选 4 个代表 motion。
+
+固定输入/输出：
+
+```text
+state_history    [B,10,70]
+action_history   [B,10,29]
+reference_future [B,10,64]
+target_action    [B,29]
+output action    [B,29]
+```
+
+reference 的 10×64 输入来自 Physics v5 的 reference future。State/Action history 的
+validity 会显式编码；无效值先置零。condition 向量宽度为 `1738`：
+
+```text
+10*70 + 10*29 + 10*64       values
++ 10 + 10                   state/action valid
++ 10*2                      paired history validity
++ 10                        reference time offsets
++ 29 + 29                   target marker + zero target placeholder
+= 1738
+```
+
+q posterior 额外接收真实 target Action，因此 posterior 输入为 `1767`；p condition
+encoder 不接收 target。q/p 分别为：
+
+```text
+q: [1767,2560,1792,896,512] -> mean/logvar[256]
+p: [1738,2560,1792,896,512] -> condition code[512]
+decoder: [1738+256,2048,1536,768] -> Action[29]
+```
+
+Linear 层后为 LayerNorm+GELU；全局 latent 为 256 维 Gaussian。参数量为 `31,543,581`。
+C 阶段独立计算 posterior-sample Action loss、standard-normal Action loss 和
+`KL(q||p)`；部署及 DAgger 只走 `p(condition)` 加 standard-normal latent，不调用 q。
+训练配置为 `kl_beta=0.002`，前 20k step warmup，配置 step 上限 245k；若达到 step
+上限而未达到 8h，必须从 `last.pt` 连同 AdamW 状态续训至累计 8h。
+
+DAgger 保持旧 10-history/reference 合同。每轮先以当前 Isaac State、Action history
+和 SONIC reference 查询 student，再以 teacher Action 作标签；student-only 评估为
+192-step same-motion teacher imitation。Isaac 长进程按 2 round 分片，保存
+`round_XX.pt`、samples 和 partial metrics 后重启；分片恢复加载模型和 AdamW 状态。
+该分片机制只改变进程生命周期，不改变训练数据、loss 或模型合同。
+
+代码入口：
+
+```text
+state-action-cvae/src/cvae_sa/sonic_reference_mlp_model.py
+state-action-cvae/src/cvae_sa/sonic_reference_mlp_train.py
+state-action-cvae/configs/sonic_reference_mlp_cvae_c_8h.json
+dagger/configs/sonic_causal_reference_mlp_4h.yaml
+dagger/scripts/render_reference_mlp_threeway_ghost4.sh
+```
+
+服务器执行结果与ghost交付已在§17回填；工程marker不等价于质量通过。
+
+## 17. 10-history reference MLP-CVAE：C、DAgger与训练motion ghost最终结果（2026-11-10）
+
+本路线已完成工程训练与视频交付。C阶段run为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/sonic_reference_mlp_cvae_c_8h_20261109/
+```
+
+首段245k step达到配置step上限后，使用`last.pt`和AdamW状态继续；最终checkpoint为
+`step=1325000`，best fixed-standard-normal metric为`0.0033501992`。续训没有重新初始化，
+也没有改变数据、归一化或模型合同。
+
+DAgger使用同一C训练过的8个motion和10-history/reference合同。最终run为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/dagger_sonic_causal_reference_mlp_4h_20261110_003455/
+```
+
+最终保留41个round checkpoint，最新已记录round 40的student-only teacher Action RMSE为
+`0.1204419`。该指标仍是same-motion teacher imitation，不等价于新motion泛化或物理质量通过。
+
+最终训练motion ghost均要求motion来自对应checkpoint的`train_motion_keys`，每组4个motion、
+3层、193帧、50 Hz：
+
+```text
+A MLP-CVAE11：
+/home/vamper/Desktop/replay/mlp_cvae11_trained_motion_ghost4_20261110_045551/
+
+B 初始DAgger：
+/home/vamper/Desktop/replay/reference_mlp_trained_motion_ghost4_20261110_043913/
+
+B 二次续训后：
+/home/vamper/Desktop/replay/reference_mlp_trained_motion_ghost4_20261110_073719/
+```
+
+A第四motion原Isaac rollout在140帧终止；ghost层使用末姿态补齐到193帧并在manifest中明确保留，
+不是把摔倒或终止误报为模型执行失败。视频完整性与控制质量独立判断。
