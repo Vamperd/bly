@@ -1,14 +1,13 @@
 """SONIC goal/state fixed-point probe for the 65-token DAgger contract.
 
 The probe keeps SONIC's released actor and Isaac environment unchanged.  At
-iteration zero it uses the native SONIC reference observation.  At later
 iterations it replaces only the two G1 tokenizer goal terms with the previous
 iteration's simulated State trajectory, projected to SONIC's joint-position /
 joint-velocity / relative-orientation goal representation.
 
-Only converged samples write the compact database: goal trajectory, current
-State trajectory, and previous State trajectory.  Actions are intentionally
-not persisted.
+Every iteration writes State/goal/Action arrays and a 193-frame kinematic
+trajectory per motion. Convergence metrics remain diagnostic; no iteration is
+discarded because a motion falls or fails to reach the requested horizon.
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import pickle
 import numpy as np
 import torch
 from omegaconf import OmegaConf
@@ -36,12 +36,12 @@ FUTURE_FRAMES = 10
 IDENTITY_ROT6 = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
 
-def _load_motion_keys(path: Path) -> list[str]:
+def _load_motion_keys(path: Path, count: int = 32) -> list[str]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     keys = [str(value) for value in payload.get("motion_keys", [])]
-    if len(keys) < 32:
-        raise ValueError(f"motion manifest contains {len(keys)} motions; expected at least 32")
-    return keys[:32]
+    if len(keys) < int(count):
+        raise ValueError(f"motion manifest contains {len(keys)} motions; expected at least {count}")
+    return keys[: int(count)]
 
 
 def _raw_env(env: Any) -> Any:
@@ -176,6 +176,58 @@ def _baseline(env: Any) -> dict[str, torch.Tensor]:
         "prev_action": previous.clone(),
     }
 
+def _robot_frames(env: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    raw = _raw_env(env)
+    robot = raw.scene["robot"]
+    origins = raw.scene.env_origins
+    root_pos = robot.data.root_pos_w - origins
+    return (
+        robot.data.joint_pos.detach().cpu().numpy().copy(),
+        root_pos.detach().cpu().numpy().copy(),
+        robot.data.root_quat_w.detach().cpu().numpy().copy(),
+    )
+
+
+def _write_iteration_artifacts(
+    output: Path,
+    iteration: int,
+    keys: list[str],
+    states: torch.Tensor,
+    goals: torch.Tensor,
+    actions: torch.Tensor,
+    dof_frames: list[np.ndarray],
+    root_frames: list[np.ndarray],
+    quat_frames: list[np.ndarray],
+) -> str:
+    iteration_root = output / "data" / "iterations" / f"iteration_{iteration:02d}"
+    iteration_root.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        iteration_root / "state_goal_action.npz",
+        states=states.numpy().astype(np.float32),
+        goals=goals.numpy().astype(np.float32),
+        actions=actions.numpy().astype(np.float32),
+    )
+    dof = np.stack(dof_frames, axis=0)
+    root = np.stack(root_frames, axis=0)
+    quat = np.stack(quat_frames, axis=0)
+    for env_id, key in enumerate(keys):
+        safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in key)
+        trajectory = {
+            "dof_pos": dof[:, env_id],
+            "root_pos_w": root[:, env_id],
+            "root_quat_w": quat[:, env_id],
+            "quat_format": "wxyz",
+            "fps": 50.0,
+            "num_joints": 29,
+            "total_frames": int(dof.shape[0]),
+            "source": "sonic_goal_state_fixed_point_iteration",
+            "motion_key": key,
+            "iteration": int(iteration),
+        }
+        with (iteration_root / f"{env_id:02d}_{safe}.trajectory.pkl").open("wb") as stream:
+            pickle.dump(trajectory, stream, protocol=pickle.HIGHEST_PROTOCOL)
+    return str(iteration_root)
+
 
 def _metric(current: torch.Tensor, goal: torch.Tensor, previous: torch.Tensor | None) -> dict[str, float]:
     current_goal = _state_to_goal(current)
@@ -224,15 +276,16 @@ def main() -> int:
     parser.add_argument("--output-run", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20261107)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--max-iterations", type=int, default=10)
-    parser.add_argument("--horizon", type=int, default=32)
+    parser.add_argument("--max-iterations", type=int, default=20)
+    parser.add_argument("--horizon", type=int, default=192)
+    parser.add_argument("--motion-count", type=int, default=32)
     parser.add_argument("--relative-tolerance", type=float, default=0.05)
     parser.add_argument("--absolute-tolerance", type=float, default=0.05)
     args = parser.parse_args()
 
     if args.horizon < 1 or args.max_iterations < 1:
         raise ValueError("horizon and max-iterations must be positive")
-    keys = _load_motion_keys(args.motion_manifest)
+    keys = _load_motion_keys(args.motion_manifest, args.motion_count)
     output = args.output_run.expanduser().resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"output run must be new and empty: {output}")
@@ -306,6 +359,11 @@ def main() -> int:
             done = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
             state_steps: list[torch.Tensor] = []
             goal_steps: list[torch.Tensor] = []
+            action_steps: list[torch.Tensor] = []
+            initial_dof, initial_root, initial_quat = _robot_frames(env)
+            dof_frames: list[np.ndarray] = [initial_dof]
+            root_frames: list[np.ndarray] = [initial_root]
+            quat_frames: list[np.ndarray] = [initial_quat]
             for step in range(int(args.horizon)):
                 if iteration == 0:
                     policy_observation = observation
@@ -321,22 +379,45 @@ def main() -> int:
                     goal64 = goal_future[:, 0]
                 goal_steps.append(goal64.detach().cpu())
                 action = teacher.act(policy_observation, done)
+                action_steps.append(action.detach().cpu())
                 observation, _reward, next_done, _info = env.step({"actions": action})
                 _freeze_motion_cursor(env)
                 done = next_done.to(device=env.device).bool()
                 state_steps.append(env.physics_state().detach().cpu())
+                frame_dof, frame_root, frame_quat = _robot_frames(env)
+                dof_frames.append(frame_dof)
+                root_frames.append(frame_root)
+                quat_frames.append(frame_quat)
                 if bool(done.any()):
                     metrics.setdefault("termination_events", []).append(
                         {"iteration": iteration, "step": step, "env_ids": torch.nonzero(done).flatten().tolist()}
                     )
                     break
+            if len(state_steps) < int(args.horizon):
+                if not state_steps:
+                    raise RuntimeError(f"rollout produced no State frames at iteration {iteration}")
+                state_steps.extend([state_steps[-1].clone()] * (int(args.horizon) - len(state_steps)))
+                goal_steps.extend([goal_steps[-1].clone()] * (int(args.horizon) - len(goal_steps)))
+                action_steps.extend([action_steps[-1].clone()] * (int(args.horizon) - len(action_steps)))
+                dof_frames.extend([dof_frames[-1].copy()] * (int(args.horizon) + 1 - len(dof_frames)))
+                root_frames.extend([root_frames[-1].copy()] * (int(args.horizon) + 1 - len(root_frames)))
+                quat_frames.extend([quat_frames[-1].copy()] * (int(args.horizon) + 1 - len(quat_frames)))
             current_states = torch.stack(state_steps, dim=0)
             goals = torch.stack(goal_steps, dim=0)
+            actions = torch.stack(action_steps, dim=0)
+            artifact_dir = _write_iteration_artifacts(
+                output, iteration, keys, current_states, goals, actions,
+                dof_frames, root_frames, quat_frames,
+            )
             if current_states.shape[0] != int(args.horizon):
                 raise RuntimeError(
-                    f"rollout terminated before horizon: iteration={iteration} steps={current_states.shape[0]}"
+                    f"rollout produced unexpected State shape: {tuple(current_states.shape)}"
                 )
-            iteration_metrics: dict[str, Any] = {"iteration": iteration, "steps": int(current_states.shape[0])}
+            iteration_metrics: dict[str, Any] = {
+                "iteration": iteration,
+                "steps": int(current_states.shape[0]),
+                "artifact_dir": artifact_dir,
+            }
             per_motion: list[dict[str, Any]] = []
             for env_id, key in enumerate(keys):
                 previous_for_motion = None if previous_states is None else previous_states[:, env_id]
@@ -375,8 +456,6 @@ def main() -> int:
             )
             metrics["iterations"].append(iteration_metrics)
             previous_states = current_states
-            if len(converged_records) == len(keys):
-                break
 
         metrics["converged"] = [
             {k: value for k, value in record.items() if k not in {"goal", "current_state", "previous_state"}}
