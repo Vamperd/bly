@@ -349,6 +349,13 @@ Physics State为70维。实验只将State的joint position/velocity映射到goal
 不能解释为CVAE质量、DAgger质量或物理控制通过。固定点run、门限和失败证据见plan.md §26、
 process.md §25。
 
+2026-11-10扩展诊断固定取既有32-motion manifest的前8个motion，使用192-transition/
+193-State horizon，执行21个ordinal rollout以同时输出原生goal、第10次和第20次
+state-as-goal。每轮保存State/goal/Action及193帧轨迹，并离线生成单轮视频；最终三层
+ghost只作可视化对照。该run的`fixed_point_pass=false`、`converged_count=0/8`，
+因此不得把state-as-goal迭代结果当作已建立的不动点数据库，也不改变65-token模型合同。
+
+
 ## 14. 11-frame MLP Action completion（2026-11-08，独立试验）
 
 该路线是独立于65-token Transformer/CVAE的新序列补全实验，不迁移旧Transformer权重，也不改变

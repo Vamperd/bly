@@ -736,3 +736,51 @@ B 二次续训DAgger：
 旧的`mlp_cvae11_threeway_ghost4_20261109_235154`使用了未被A DAgger覆盖的代表motion，
 只保留为工程诊断，不作为最终训练motion对照。A第四motion原轨迹只有140帧，最终ghost
 使用末姿态补齐到193帧并保留完整性标记。
+## 32. SONIC goal→State 20次迭代视频诊断（2026-11-10）
+
+本阶段不改变65-token CVAE、DAgger或SONIC输入合同；只诊断SONIC的goal与实际Physics
+State之间是否存在可迭代的不动点。按用户确认，取`cvae_kl2_motion_manifest.json`前8个
+motion，每次 rollout 192个Action并保存193个State/robot frame，固定初始状态，首轮使用
+SONIC原生goal，随后把上一轮的Physics State投影为下一轮SONIC goal。为得到“10次”和
+“20次state-as-goal”两组对照，实际执行21轮：ordinal 1为原生goal，ordinal 11为第10次
+state-as-goal，ordinal 21为第20次state-as-goal。
+
+服务器执行：
+
+```text
+Job 2611-0503  sonic-goal-state-v2
+Run /data1/users/bailinying/FlexSeqWBC/bly/runs/sonic_goal_state_iteration_v2_20261110_141702/
+Source 1cfc092c3e1c828256946110f6ba0aece36d8de
+motions 8
+rollouts 21
+horizon 192 Action / 193 State
+```
+
+每个ordinal均写出`state_goal_action.npz`和每个motion的trajectory pickle；离线渲染
+为8×21=168个单轮视频。`goal_relative_rmse`只按SONIC joint-position/velocity goal
+维度计算，orientation另有绝对项；它不是CVAE RMSE。
+
+结果：
+
+```text
+fixed_point_pass = false
+converged_count = 0/8
+ordinal 1  mean/max goal-relative RMSE = 1.3385 / 2.0131
+ordinal 11 mean/max goal-relative RMSE = 1.0906 / 1.3564
+ordinal 21 mean/max goal-relative RMSE = 1.1177 / 1.2200
+ordinal 21 max update-relative RMSE = 1.2807
+```
+
+20次state-as-goal后没有达到相对阈值0.05；中间平均误差虽短暂下降，末轮仍约为1，
+不能称为不动点或小差异适配。所有8个motion均保留193帧；若Isaac出现终止，run-local
+轨迹按合同重复末姿态补齐，不把视频完整性误写成物理质量通过。
+
+最终视频已回传：
+
+```text
+/home/vamper/Desktop/replay/sonic_goal_state_iteration_v2_20261110_141702/
+```
+
+该目录包含21×8个单轮MP4、8个三层ghost（`goal`、`state_goal_10`、`state_goal_20`）、
+manifest、逐轮轨迹和`sonic_goal_state_iteration_videos.ok`。三层ghost均为193帧、50Hz；
+它们只证明渲染链路和迭代对照完整，不证明SONIC控制闭环或物理稳定性通过。

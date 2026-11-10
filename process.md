@@ -623,3 +623,44 @@ B同样改为从B DAgger manifest的8个`dagger_motion_keys`中选择4个，避�
 - 终止motion少于193帧，需显式padding。
 
 这些问题均在最终交付前处理；ghost完整性仍不等价于闭环物理质量。
+## 30. SONIC goal→State 20次迭代诊断（2026-11-10）
+
+本次实验只改变SONIC rollout的goal来源，不调用CVAE/DAgger学生。首轮使用原生
+`command_multi_future_nonflat`和`motion_anchor_ori_b_mf_nonflat`；下一轮开始将上一轮
+模拟得到的Physics State逐步映射为SONIC joint-position、joint-velocity和identity
+relative-orientation goal。为了同时取得原生goal、第10次和第20次state-as-goal，执行了
+21个ordinal rollout，ordinal 1对应iteration index 0，ordinal 11对应index 10，
+ordinal 21对应index 20。
+
+服务器run：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/sonic_goal_state_iteration_v2_20261110_141702/
+```
+
+固定点门禁失败且不是工程失败：
+
+```text
+fixed_point_pass = false
+converged_count = 0/8
+```
+
+8个motion的goal-relative RMSE均远高于0.05。均值从ordinal 1的1.3385下降到ordinal 11
+的1.0906，ordinal 21回升到1.1177；ordinal 21的最大goal-relative RMSE为1.2200，
+最大update-relative RMSE为1.2807。因而“把State再次作为goal”没有收敛到可接受的小
+差异，不能建立state-to-goal fixed-point database。
+
+此前代码只保存收敛记录，不能回答视频问题；本次补充后每轮保存`State/goal/Action`
+数组以及每个motion的`trajectory.pkl`，离线生成全部168个单轮视频和8个三层ghost。
+三层为原生goal、ordinal 11、ordinal 21，均验证193帧。轨迹终止时只重复末姿态补足
+193帧，这是可视化长度门禁，不是额外物理仿真。
+
+本地回传目录：
+
+```text
+/home/vamper/Desktop/replay/sonic_goal_state_iteration_v2_20261110_141702/
+```
+
+回传验证为`iterations=21`、`motion_count=8`、`iteration_mp4=168`、`final_mp4=8`，
+根marker为`sonic_goal_state_iteration_videos.ok`。所有视频均为SONIC/Isaac rollout的
+kinematic ghost，对摔倒、终止、长时物理稳定性不做正面质量声明。
