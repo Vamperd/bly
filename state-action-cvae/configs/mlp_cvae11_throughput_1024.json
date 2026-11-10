@@ -1,0 +1,7 @@
+{
+  "extends": "mlp_cvae11_throughput.json",
+  "training": {
+    "micro_batch": 1024,
+    "monitor_batch": 2048
+  }
+}
