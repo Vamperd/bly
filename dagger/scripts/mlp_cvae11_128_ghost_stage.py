@@ -156,6 +156,8 @@ def delivery_files(manifest, output_root):
         ghost = case["ghost"]
         if int(ghost.get("frames", 0)) != 193 or [layer["name"] for layer in ghost["layers"]] != LAYERS:
             raise ValueError("ghost must contain 193 display frames and three policy layers")
+        if abs(float(ghost.get("fps", 0.0)) - 50.0) > 1.0e-6:
+            raise ValueError("ghost must use the 50Hz rollout frame rate")
         if ghost.get("engines") != {"rollout": "Isaac Sim", "display": "MuJoCo kinematic replay"}:
             raise ValueError("missing engine evidence")
         expected_counts = {layer["name"]: int(layer["frames"]) for layer in ghost["layers"]}
@@ -218,6 +220,11 @@ def render_stage(args):
         code = Path(__file__).resolve().parents[2]
         state["frame_verifier_python"] = str(Path(sys.executable).absolute())
         environment = os.environ.copy()
+        # multiprocessing.Manager uses AF_UNIX sockets under TMPDIR; deep run
+        # paths exceed its 108-byte address limit.
+        short_tmp = code.parent / "isaac_tmp"
+        short_tmp.mkdir(parents=True, exist_ok=True)
+        environment["TMPDIR"] = str(short_tmp)
         environment["GHOST_OUTPUT_ROOT"] = str(output_root)
         environment.setdefault("CVAE_DATASET_PATH_MAP", json.dumps({"/home/helloworld/bly/runs": str(migration)}))
         command = ["bash", str(code / "dagger/scripts/render_mlp_cvae11_trained_motion_ghost4.sh"),
