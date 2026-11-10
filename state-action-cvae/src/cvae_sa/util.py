@@ -89,8 +89,14 @@ def deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def load_config(default_path: Path, override_path: Path | None = None) -> dict[str, Any]:
-    config = load_json(default_path)
-    if override_path is not None and override_path.resolve() != default_path.resolve():
+    default_path = default_path.resolve()
+    raw_default = load_json(default_path)
+    config = (
+        _load_config_override(default_path, set())
+        if "extends" in raw_default
+        else raw_default
+    )
+    if override_path is not None and override_path.resolve() != default_path:
         config = deep_update(config, _load_config_override(override_path.resolve(), set()))
     return config
 
