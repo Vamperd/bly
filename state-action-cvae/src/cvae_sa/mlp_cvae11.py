@@ -6,7 +6,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-import math
+import os
 from pathlib import Path
 import signal
 import time
@@ -498,16 +498,61 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
     micro_batch = int(training_cfg.get("micro_batch", 256))
     if device.type == "cuda":
         torch.set_float32_matmul_precision(str(training_cfg.get("matmul_precision", "high")))
-    max_steps = int(max_steps_override if max_steps_override is not None else training_cfg.get("max_steps", 300000))
+    resume_path = os.environ.get("CVAE_RESUME_CHECKPOINT")
+    configured_max_steps = int(training_cfg.get("max_steps", 300000))
+    max_steps = int(
+        max_steps_override
+        if max_steps_override is not None
+        else os.environ.get("CVAE_MAX_STEPS_TOTAL", configured_max_steps)
+    )
     if smoke:
         max_steps = min(max_steps, 2)
     validation_interval = 1 if smoke else int(training_cfg.get("monitor_interval", 5000))
     checkpoint_interval = 1 if smoke else int(training_cfg.get("checkpoint_interval", 50000))
     eval_batches = int(training_cfg.get("monitor_batches", 32))
-    wall_seconds = float(training_cfg.get("max_wall_hours", 10.0)) * 3600.0
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(training_cfg.get("learning_rate", 2.0e-4)), weight_decay=float(training_cfg.get("weight_decay", 1.0e-4)))
+    wall_seconds = (
+        120.0
+        if smoke
+        else float(os.environ.get("CVAE_MAX_WALL_HOURS", training_cfg.get("max_wall_hours", 10.0))) * 3600.0
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(training_cfg.get("learning_rate", 2.0e-4)),
+        weight_decay=float(training_cfg.get("weight_decay", 1.0e-4)),
+    )
     warmup = int(training_cfg.get("warmup_steps", 2000))
     min_ratio = float(training_cfg.get("min_lr_ratio", 0.05))
+
+    def schedule(step: int) -> float:
+        if step < warmup:
+            return max(1.0e-8, (step + 1) / max(warmup, 1))
+        progress = min(1.0, (step - warmup) / max(max_steps - warmup, 1))
+        return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
+    start_step = 0
+    resume_payload: dict[str, Any] | None = None
+    if resume_path:
+        resume_payload = torch.load(
+            Path(resume_path).expanduser().resolve(),
+            map_location="cpu",
+            weights_only=False,
+        )
+        if resume_payload.get("format_version") != CHECKPOINT_FORMAT:
+            raise ValueError(f"unsupported resume checkpoint format: {resume_payload.get('format_version')!r}")
+        if resume_payload.get("architecture_version") != ARCHITECTURE_VERSION:
+            raise ValueError("resume checkpoint architecture does not match 11-frame MLP CVAE")
+        if resume_payload.get("model_signature") != model.architecture_signature():
+            raise ValueError("resume checkpoint model signature does not match the requested configuration")
+        saved_keys = resume_payload.get("selection", {}).get("selected_motion_keys")
+        if saved_keys and list(saved_keys) != list(selection["selected_motion_keys"]):
+            raise ValueError("resume checkpoint motion selection does not match the current 32-motion dataset")
+        model.load_state_dict(resume_payload["model"], strict=True)
+        optimizer.load_state_dict(resume_payload["optimizer"])
+        scheduler.load_state_dict(resume_payload["scheduler"])
+        start_step = int(resume_payload.get("optimizer_step", 0))
+    if max_steps <= start_step:
+        raise ValueError(f"total max_steps={max_steps} must exceed resume step {start_step}")
     workers = int(data_cfg.get("num_workers", 2))
     pin_memory = bool(data_cfg.get("pin_memory", True))
     persistent_workers = bool(data_cfg.get("persistent_workers", workers > 0))
@@ -528,9 +573,13 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
     monitor_loader = DataLoader(monitor, **monitor_kwargs)
     iterator = iter(train_loader)
     sampler = CausalBlockMaskSampler(seed + 101)
-    best_score = float("inf")
-    best_metrics: dict[str, Any] | None = None
-    last_metrics: dict[str, Any] | None = None
+    best_metrics: dict[str, Any] | None = None if resume_payload is None else resume_payload.get("metrics")
+    best_score = (
+        float("inf")
+        if best_metrics is None
+        else float(best_metrics["prior_causal_action_rmse"] + best_metrics["prior_action_rmse"] + best_metrics["prior_state_rmse"])
+    )
+    last_metrics: dict[str, Any] | None = best_metrics
     started = time.monotonic()
     interrupted = False
     stop_reason = "max_steps"
@@ -542,7 +591,7 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
         stop_reason = "signal"
     previous_handlers = {signal.SIGTERM: signal.signal(signal.SIGTERM, handle_signal), signal.SIGINT: signal.signal(signal.SIGINT, handle_signal)}
     try:
-        for step in range(1, max_steps + 1):
+        for step in range(start_step + 1, max_steps + 1):
             if interrupted or time.monotonic() - started >= wall_seconds:
                 stop_reason = "wall_clock" if not interrupted else stop_reason
                 break
@@ -570,7 +619,7 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(training_cfg.get("gradient_clip", 1.0)))
             optimizer.step()
             scheduler.step()
-            if step == 1 or step % validation_interval == 0 or step == max_steps:
+            if step == start_step + 1 or step % validation_interval == 0 or step == max_steps:
                 metrics = _evaluate(
                     model,
                     monitor_loader,
@@ -606,6 +655,8 @@ def run_training(dataset_run: Path, output_run: Path, config: dict[str, Any], *,
         "quality_pass": None,
         "smoke": bool(smoke),
         "completed_optimizer_steps": completed_steps,
+        "initial_optimizer_step": int(start_step),
+        "resume_checkpoint": None if resume_path is None else str(Path(resume_path).expanduser().resolve()),
         "requested_max_steps": max_steps,
         "stop_reason": stop_reason,
         "wall_clock_limit_hours": wall_seconds / 3600.0,
