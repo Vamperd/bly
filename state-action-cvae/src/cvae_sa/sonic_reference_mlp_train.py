@@ -280,7 +280,7 @@ def train(config: dict[str, Any], output_run: Path, *, smoke: bool = False) -> d
         "completed_optimizer_steps": int(completed),
         "requested_max_steps": int(max_steps),
         "stop_reason": stop_reason,
-        "parameter_count": sum(p.numel() for p in model.parameters()),
+        "elapsed_seconds": time.monotonic() - started,
         "model_signature": model.architecture_instance_signature(),
         "train_motion_keys": train_motion_keys,
         "performance": {
