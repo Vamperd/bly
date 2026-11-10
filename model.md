@@ -620,6 +620,16 @@ deterministic μp: State 0.193561, Action 0.078413, causal Action 0.053153
 采样/确定性RMSE ratio为`1.0013/1.0065/1.0178`。这证明当前离线误差差异主要来自
 latent sampling，而不是posterior误用；它仍不等价于闭环物理质量通过。
 
+### 15.5 128-motion扩展及DAgger后可视化
+
+128-motion阶段保持11-State/10-Action、70/29维、四类Mask与Gaussian q/p接口，使用Physics
+v4独立归一化。DAgger-before固定使用本次C阶段选出的`best.pt`；DAgger-after使用同run中
+按整数round编号选择的最后完整提交checkpoint，不把旧32-motion权重作为本次before。
+四动作必须同时属于C训练集和DAgger实际采集/更新覆盖。每条视频三层为SONIC原始、
+DAgger-before和DAgger-after；长度193帧、50Hz，终止后的末姿态仅用于display padding，
+不改写原始rollout，也不以跌倒或termination为理由拒绝视频交付。
+
+
 ## 16. 10-history reference-conditioned MLP-CVAE（2026-11-09，合同与实现）
 
 该路线严格保留旧 `sonic-10history-reference-cvae-v1` 的单步合同，只把 Transformer

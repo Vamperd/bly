@@ -898,3 +898,54 @@ C完成后自动启动的全量128-motion DAgger监控器已经部署，日志�
 
 它只在Job `2611-0525`成功且`best.pt`、summary完整后提交12小时
 `sonic_causal_mlp_cvae11_128_12h.yaml`；C失败、取消或缺checkpoint时不会错误启动DAgger。
+
+## 35. 128-motion训练进度与DAgger后四动作ghost（2026-11-11）
+
+用户要求DAgger完成后交付4个实际训练motion的193帧ghost。C Job `2611-0525`未中断，
+最近已读回best/last step250000；prior State/Action/causal Action RMSE为
+`0.13147560/0.06764983/0.05595724`，posterior State/Action为`0.08264549/0.06398132`。
+这些仅为train-only monitor结果，不能与旧32-motion数据直接解释为泛化改善。
+
+执行链为：C满12h且验收产物完整 → 同128 motion的累计12h DAgger → 四动作三路ghost →
+5060自动回传。原watcher的`SUCCEEDED`单条件已替换：允许调度器`TIME_LIMIT`时在足量
+训练时间、完整summary、marker、128个训练key与best checkpoint一致的前提下继续；
+其他取消、早退和失败不放行。
+
+DAgger实际覆盖、跨进程AdamW恢复和视频入口必须先经过新的独立smoke，不加载smoke权重
+进入正式流程。128个motion的原始motion资产覆盖已核验为128/128；全量DAgger使用128环境，
+通过现有SONIC固定motion assignment保持reset后的完整覆盖，采集数据逐motion统计验收。
+
+正式流程状态：
+
+```text
+C_RUN=/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_128_c_12h_20261110_214227
+PIPELINE_STATE=$C_RUN/pipeline/pipeline_state.json
+DAGGER_STATE=$C_RUN/pipeline/dagger_stage.json
+GHOST_STATE=$C_RUN/pipeline/ghost_stage.json
+PIPELINE_LOG=/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_128_pipeline.log
+LOCAL_DEST=/home/vamper/Desktop/replay/mlp_cvae11_128_20261110_214227/
+```
+
+四动作从DAgger实际提交样本的motion coverage与C训练motion交集中确定性选择；
+before使用C阶段实际输入DAgger的best checkpoint，after使用最后完整提交的round
+checkpoint（按整数排序），不假设DAgger存在best.pt。三层为SONIC、dagger_before、
+dagger_after。每条193帧、50Hz，允许摔倒/termination，补帧数量单独记录；
+视频完整性不等于物理控制通过。
+
+本地接收服务`Mlp128FinalGhostReceiver`已启动为持久服务，等待远端完成manifest后仅拉取
+视频、JSON和marker，校验4个视频的SHA256及193帧并生成`receipt.json`。该目录目前只是
+回传目标；最终receipt不存在前不得宣称正式视频已回传。
+
+串行链路已通过独立端到端smoke（不是正式DAgger质量结果）：
+
+```text
+DAgger smoke: Jobs 2611-0542/0543，两进程各1轮，实际覆盖128/128 motion
+AdamW读回step=2；累计样本512；原C checkpoint SHA256在恢复后保持
+Ghost smoke: Job 2611-0545，4条三层MP4，均193帧、50Hz、3.86s
+Delivery smoke: /home/vamper/bly/runs/mlp128_ghost_delivery_smoke_20261111/receipt.json
+```
+
+回传smoke已独立校验四个视频的远端解码帧数和本地相同SHA256；抽查第96帧确认三层
+图例和机器人画面实际输出。smoke权重/视频不作为本次12h C＋12h DAgger的最终交付。
+正式流水仍在等待C结束；2026-11-11 02:48（服务器时间）C已运行约5h06m，剩余约6h54m，
+最新可读checkpoint仍为250000步。

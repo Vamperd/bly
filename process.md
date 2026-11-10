@@ -740,3 +740,45 @@ pin/non-blocking路径的smoke通过；compile路径的2-step smoke通过；DAgg
 128-motion C使用Physics v4完整训练集的128个确定性motion，精确128-motion smoke
 通过后Job `2611-0525`已启动12小时C阶段。C完成后由run-local watcher验证
 `best.pt`和summary，再提交12小时全量128-motion DAgger；当前尚无DAgger正式run结果。
+
+## 33. 128-motion串行DAgger与ghost阻塞修复（2026-11-11）
+
+C Job `2611-0525`保持运行；step250000的best/last已读回，prior State/Action/causal
+Action RMSE为`0.13147560/0.06764983/0.05595724`，posterior State/Action为
+`0.08264549/0.06398132`。这些是训练集monitor指标，不是DAgger或物理质量。
+
+串行审核发现两个原实现阻塞：C的12h GPU租约到期可能产生`CANCELLED/TIME_LIMIT`，
+旧watcher只接受`SUCCEEDED`；MLP-CVAE11 DAgger首次构造误传reference adapter的
+`normalization_run/action_clip_value`而非`dataset_run`。现以时长、summary、
+execution marker、128-motion identity和best checkpoint共同准入，用户主动取消、提前停止、
+缺checkpoint及identity不一致仍拒绝；DAgger初始化按adapter选择参数。
+
+真实全128-motion smoke的首次作业`2611-0540`在采集后、optimizer更新前被覆盖检查拒绝。
+SONIC的`sample_unique_motions`仅对初始化生效，`reset()`会再次随机采样并产生重复/遗漏。
+修复不修改服务器嵌套源码；仅对`require_full_motion_coverage=true`使用SONIC已有的
+`use_paired_motions`开关并要求128环境对应128个动作，所有reset保持环境i对应motion i。
+这次失败是工程覆盖门禁，不是模型质量失败，也没有取消C正式训练。
+
+DAgger round恢复改为按整数编号和完整metrics提交记录读取，累计采集/训练/评估时间，
+保留AdamW及最初C checkpoint的SHA256来源；分片超时若没有新完整round则报错，不假报完成。
+聚合样本使用CPU mmap，minibatch按列批量gather，保留抽样顺序和重复索引，避免逐条Python
+组batch以及把增长的全量样本池一次性搬入显存。
+
+最终ghost选4个实际DAgger样本覆盖且属于C训练集的动作，before为本次C best，after为
+数值编号最大的完整DAgger round；终止后只在display端补末姿态到193帧，原trajectory不改写。
+5060本地没有ffprobe时，回传脚本以远端真实解码帧数加远端/本地相同SHA256验证，不安装
+或修改现有环境。
+
+修正后的独立DAgger smoke通过Job `2611-0542/0543`：跨两个Isaac进程各完成1轮，
+每轮实测覆盖128 motion、256 samples，累计512 samples；AdamW读回step=2，
+最初C来源SHA256保持一致。它只验证采集/更新/恢复链路，不作为DAgger质量结果。
+之后ghost smoke `2611-0544`在motion库加载处报`AF_UNIX path too long`，
+原因是run-local TMPDIR超过multiprocessing socket长度限制。已将该渲染子进程TMPDIR
+固定为较短的项目资产根`isaac_tmp`；没有改动SONIC/IsaacLab源码或当前C进程。
+
+修复后的ghost smoke `2611-0545`已完成四动作三路真实Isaac rollout与MuJoCo ghost，
+全部193帧、50Hz、3.86s；本机接收smoke校验4/4视频SHA256与远端实际解码帧数，并写出
+`runs/mlp128_ghost_delivery_smoke_20261111/receipt.json`。第96帧视觉抽查可见三路图例与
+机器人叠加；允许跌倒，不以画面中模型失稳声称渲染失败或物理成功。正式12h C和后续
+12h DAgger尚未完成，这些smoke输出不替代最终四动作视频。
+

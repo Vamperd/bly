@@ -1274,3 +1274,24 @@ joint position/velocity加identity relative orientation。run：
 Git同步边界：本地 fixed-point commits 已生成；服务器 `git pull --ff-only` 因 GitHub
 443连接失败未更新 outer HEAD。服务器实验入口通过rsync同步且SHA256与本地一致；不得因
 服务器存在未跟踪嵌套 SONIC/IsaacLab 工作树而 reset/clean/覆盖。
+
+## 16. 128-motion MLP-CVAE与四动作ghost交付（2026-11-11）
+
+当前使用11-State/10-Action MLP-CVAE，不是10-history reference MLP。Physics v4完整
+train资产中确定性选择128 motion、1010 completed episode；归一化不与旧32-motion v5混用。
+C训练Job `2611-0525`，run为：
+
+```text
+/data1/users/bailinying/FlexSeqWBC/bly/runs/mlp_cvae11_128_c_12h_20261110_214227/
+```
+
+最新只读核验时仍为RUNNING，best/last checkpoint为step250000。用户要求C阶段12h，
+再进行同128 motion的12h全量DAgger，之后选4个DAgger实际覆盖motion输出193帧的
+SONIC / C-before / DAgger-after三层ghost，回传5060的`/home/vamper/Desktop/replay/`。
+未实际产出前不得宣称视频已完成或回传。
+
+注意调度器把租约到期记为`CANCELLED / TIME_LIMIT`，不能等同模型报错；也不能把
+用户主动取消或早退当成阶段成功。串行准入必须核对训练时长、summary、execution marker、
+128-motion identity和checkpoint。DAgger恢复必须保留AdamW与累计时间；round编号以整数
+排序，四动作从真实采集/更新覆盖中选择，不能仅根据配置中的motion列表推断。
+
